@@ -1,0 +1,24 @@
+{
+  "description": "Snoozed into the future: everything is suppressed while the snooze holds.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 44700,
+    "title": "Add a task-sdk client retry budget",
+    "author": "vincbeck",
+    "author_association": "MEMBER",
+    "head_sha": "eeff00112233445566778899aabbccddeeff0011",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-04T20:00:00Z",
+    "labels": ["area:task-sdk"],
+    "milestone": null,
+    "files": ["task-sdk/src/airflow/sdk/api/client.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "1111111111111111111111111111111111111111",
+    "last_verdict": "APPROVED",
+    "last_action_at": "2026-07-28T09:00:00Z",
+    "snoozed_until": "2026-08-08T12:00:00Z"
+  }
+}

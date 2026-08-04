@@ -1,0 +1,23 @@
+{
+  "description": "I approved at an older SHA and the head has since moved: re-review.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 44870,
+    "title": "Make the scheduler's DAG parsing loop cancellable",
+    "author": "uranusjr",
+    "author_association": "MEMBER",
+    "head_sha": "d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a291",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-04T16:42:00Z",
+    "labels": ["area:Scheduler"],
+    "milestone": "3.2.0",
+    "files": ["airflow-core/src/airflow/jobs/scheduler_job_runner.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "abc123f8901234567890123456789012345678ab",
+    "last_verdict": "APPROVED",
+    "last_action_at": "2026-08-01T10:00:00Z"
+  }
+}

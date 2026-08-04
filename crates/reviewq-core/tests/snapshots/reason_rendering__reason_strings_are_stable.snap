@@ -1,0 +1,17 @@
+---
+source: crates/reviewq-core/tests/reason_rendering.rs
+expression: "rendered.join(\"\\n\")"
+---
+mention              mention: @potiuk mentioned you
+thread_reply         thread-reply: @uranusjr replied in a thread you own
+thread_reply         thread-reply: @uranusjr replied in 3 threads you own
+resolved_unanswered  resolved-unanswered: @kaxil resolved your thread without replying
+resolved_unanswered  resolved-unanswered: @kaxil resolved 2 of your threads without replying
+re_review            re-review: 1 new commit since your review of abc123f
+re_review            re-review: 3 new commits since your review of abc123f
+review_requested     review-requested: you were asked to review
+review_requested     review-requested: @apache/airflow-committers was asked to review
+needs_first_look     needs-first-look: matches label area:task-sdk
+needs_first_look     needs-first-look: matches path task-sdk/**
+needs_first_look     needs-first-look: matches author FIRST_TIME_CONTRIBUTOR
+needs_first_look     needs-first-look: matches milestone 3.2

@@ -1,0 +1,18 @@
+{
+  "description": "Matches an interest label, I have never touched it: needs-first-look.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 45123,
+    "title": "Fix task-sdk serialization of TaskGroup mapped arguments",
+    "author": "newcontributor",
+    "author_association": "FIRST_TIME_CONTRIBUTOR",
+    "head_sha": "9f2b41c0d8e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-03T09:15:00Z",
+    "labels": ["area:task-sdk"],
+    "milestone": "3.2.0",
+    "files": ["task-sdk/src/airflow/sdk/definitions/taskgroup.py"],
+    "files_truncated": false
+  }
+}

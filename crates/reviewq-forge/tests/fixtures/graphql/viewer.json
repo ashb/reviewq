@@ -1,0 +1,11 @@
+{
+  "viewer": {
+    "login": "ashb"
+  },
+  "rateLimit": {
+    "limit": 5000,
+    "cost": 1,
+    "remaining": 4996,
+    "resetAt": "2026-08-05T16:48:03Z"
+  }
+}

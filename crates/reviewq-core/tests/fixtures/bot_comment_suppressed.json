@@ -1,0 +1,34 @@
+{
+  "description": "The only new activity in my thread is a bot comment: nothing fires.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 45077,
+    "title": "Bump the Task SDK protobuf schema to v3",
+    "author": "amoghrajesh",
+    "author_association": "MEMBER",
+    "head_sha": "5566778899aabbccddeeff00112233445566778899",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T09:45:00Z",
+    "labels": ["area:task-sdk"],
+    "milestone": null,
+    "files": ["task-sdk/src/airflow/sdk/api/schema.proto"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "5566778899aabbccddeeff00112233445566778899",
+    "last_verdict": "COMMENTED",
+    "last_action_at": "2026-08-04T18:00:00Z"
+  },
+  "threads": [
+    {
+      "thread_id": "PRRT_kwDOABCDEF4AmNoPqR",
+      "i_own": true,
+      "is_resolved": false,
+      "resolved_by": null,
+      "last_comment_author": "github-actions[bot]",
+      "last_comment_at": "2026-08-05T09:45:00Z",
+      "my_last_comment_at": "2026-08-04T18:00:00Z"
+    }
+  ]
+}

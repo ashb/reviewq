@@ -1,0 +1,34 @@
+{
+  "description": "Someone replied in an unresolved thread I own: thread-reply.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 45001,
+    "title": "Serialize Asset watchers with their trigger kwargs",
+    "author": "kaxil",
+    "author_association": "MEMBER",
+    "head_sha": "1122334455667788990011223344556677889900",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T08:30:00Z",
+    "labels": ["area:serialization"],
+    "milestone": null,
+    "files": ["airflow-core/src/airflow/serialization/serialized_objects.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "1122334455667788990011223344556677889900",
+    "last_verdict": "CHANGES_REQUESTED",
+    "last_action_at": "2026-08-04T11:00:00Z"
+  },
+  "threads": [
+    {
+      "thread_id": "PRRT_kwDOABCDEF4AbCdEf",
+      "i_own": true,
+      "is_resolved": false,
+      "resolved_by": null,
+      "last_comment_author": "kaxil",
+      "last_comment_at": "2026-08-05T08:30:00Z",
+      "my_last_comment_at": "2026-08-04T11:00:00Z"
+    }
+  ]
+}

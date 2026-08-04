@@ -1,0 +1,75 @@
+# reviewq configuration.
+#
+# A PR is *tracked* if it matches any interest rule below, or if GitHub says I
+# am already involved. Every queue item carries a reason string naming the rule
+# that produced it; `reviewq show N` prints it.
+
+[identity]
+# Whose queue this is. All attention reasons are computed relative to this login.
+login = "ashb"
+
+[repo]
+owner = "apache"
+name = "airflow"
+# The host this repo lives on; selects its [forge] entry below. Defaults to
+# "github.com", so leave it unless the repo is on a self-hosted instance.
+# host = "github.com"
+
+[interest]
+# A PR matches if ANY rule here matches.
+
+# Labels. apache/airflow's boring-cyborg.yml maps paths -> area/provider labels
+# upstream, so labels do most of the work and stay maintained for free.
+labels = [
+  "area:task-sdk",
+  "area:serialization",
+  "area:Executors-core",
+  "area:Scheduler",
+]
+
+# Path globs matched against changed-file paths, for what labels miss.
+paths = [
+  "task-sdk/**",
+  "airflow-core/src/airflow/serialization/**",
+]
+
+# Author classes that raise interest even off-label.
+# GitHub values: FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, NONE, CONTRIBUTOR,
+# COLLABORATOR, MEMBER, OWNER.
+author_associations = ["FIRST_TIME_CONTRIBUTOR"]
+
+# Milestones I'm watching (substring match against the milestone title).
+milestones = ["3.2"]
+
+[bots]
+# Comments by these accounts never trigger an attention reason.
+logins = ["boring-cyborg[bot]", "github-actions[bot]", "codecov[bot]"]
+
+[handoff]
+# `reviewq review N` execs this; "{number}" is substituted in every element.
+review_command = ["wiff", "forge", "pull", "{number}"]
+
+[sync]
+# How far back the first-ever sync reaches.
+bootstrap_days = 14
+# Overlap subtracted from the stored cursor, absorbing search-index lag.
+overlap_minutes = 5
+# GraphQL page size for the cheap sweep.
+page_size = 50
+
+# Per-host forge settings, keyed by host. Public github.com is built in, so this
+# whole section is optional. A user entry overlays the built-in field by field.
+#
+# Token resolution for a host, in order: $REVIEWQ_GITHUB_TOKEN, then the host's
+# token_file_env, then its token_env, then (github only) $GH_TOKEN, then
+# `gh auth token`.
+#
+# For a GitHub Enterprise host:
+#   [repo]
+#   host = "github.mycorp.com"
+#
+#   [forge."github.mycorp.com"]
+#   provider = "github"
+#   api_base = "https://github.mycorp.com/api/v3"
+#   token_env = "MYCORP_GH_TOKEN"
+#   token_file_env = "MYCORP_GH_TOKEN_FILE"

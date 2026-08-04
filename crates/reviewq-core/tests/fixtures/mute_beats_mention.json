@@ -1,0 +1,33 @@
+{
+  "description": "Muted PR with a fresh mention in a thread I own: mute wins, because mute means mute.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 43012,
+    "title": "Refactor the Executors-core queue adapter interface",
+    "author": "o-nikolas",
+    "author_association": "MEMBER",
+    "head_sha": "99aabbccddeeff00112233445566778899aabbcc",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T11:30:00Z",
+    "labels": ["area:Executors-core"],
+    "milestone": null,
+    "files": ["airflow-core/src/airflow/executors/executor_loader.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_action_at": "2026-06-15T08:00:00Z",
+    "muted": true
+  },
+  "threads": [
+    {
+      "thread_id": "PRRT_kwDOABCDEF4AsTuVwX",
+      "i_own": true,
+      "is_resolved": false,
+      "resolved_by": null,
+      "last_comment_author": "o-nikolas",
+      "last_comment_at": "2026-08-05T11:30:00Z",
+      "my_last_comment_at": "2026-06-15T08:00:00Z"
+    }
+  ]
+}

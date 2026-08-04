@@ -1,0 +1,18 @@
+{
+  "description": "A draft that matches interest rules: suppressed entirely, since only a mention pierces draft state.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 45140,
+    "title": "WIP: rewrite the serialization DAG round-trip tests",
+    "author": "jedcunningham",
+    "author_association": "MEMBER",
+    "head_sha": "ccddeeff00112233445566778899aabbccddeeff",
+    "is_draft": true,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T06:00:00Z",
+    "labels": ["area:serialization"],
+    "milestone": null,
+    "files": ["airflow-core/src/airflow/serialization/serialized_objects.py"],
+    "files_truncated": false
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "description": "Someone resolved my thread without replying: resolved-unanswered, which only an explicit ack clears.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 44955,
+    "title": "Drop the Executors-core retry shim for adopted tasks",
+    "author": "potiuk",
+    "author_association": "MEMBER",
+    "head_sha": "aabbccddeeff00112233445566778899aabbccdd",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T07:05:00Z",
+    "labels": ["area:Executors-core"],
+    "milestone": "3.2.0",
+    "files": ["airflow-core/src/airflow/executors/base_executor.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "aabbccddeeff00112233445566778899aabbccdd",
+    "last_verdict": "CHANGES_REQUESTED",
+    "last_action_at": "2026-08-02T14:20:00Z"
+  },
+  "threads": [
+    {
+      "thread_id": "PRRT_kwDOABCDEF4AgHiJkL",
+      "i_own": true,
+      "is_resolved": true,
+      "resolved_by": "potiuk",
+      "last_comment_author": "ashb",
+      "last_comment_at": "2026-08-02T14:20:00Z",
+      "my_last_comment_at": "2026-08-02T14:20:00Z"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+[package]
+name = "reviewq-core"
+description = "Pure queue logic: snapshot types, attention reasons, interest rules."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This crate is deliberately IO-free: no tokio, no octocrab, no rusqlite.
+# `make purity` fails the build if one of them appears here transitively.
+[dependencies]
+jiff.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
