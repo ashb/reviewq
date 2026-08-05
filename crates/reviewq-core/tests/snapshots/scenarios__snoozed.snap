@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "Snoozed into the future: everything is suppressed while the snooze holds."
+---
+(nothing)

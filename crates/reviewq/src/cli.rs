@@ -25,8 +25,15 @@ pub enum Command {
     /// Fetch updates from the forge and rebuild the ledger.
     Sync,
 
-    /// Show tracked PRs.
+    /// Show the queue: PRs that want attention, most-urgent first.
     List(ListArgs),
+
+    /// Show just the single most-urgent PR.
+    Next(NextArgs),
+
+    /// Show everything known about one PR: why it's tracked, its attention
+    /// reasons and its threads.
+    Show(ShowArgs),
 
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
@@ -34,13 +41,31 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Show everything tracked, grouped by state.
-    #[arg(long)]
+    /// Show everything tracked, grouped by state, rather than just the queue.
+    #[arg(long, conflicts_with = "waiting")]
     pub all: bool,
 
-    /// Show the awaiting-author bucket (needs the state machine).
-    #[arg(long, conflicts_with = "all")]
+    /// Show the tracked PRs that want nothing right now — seen, waiting on
+    /// someone else.
+    #[arg(long)]
     pub waiting: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NextArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {
+    /// The PR number.
+    pub number: u64,
 
     /// Emit machine-readable JSON.
     #[arg(long)]

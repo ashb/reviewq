@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "Someone @mentioned me in a comment after my last action: mention, the highest-priority reason."
+---
+[p1] mention: @potiuk mentioned you (since 2026-08-05T10:15:00Z)

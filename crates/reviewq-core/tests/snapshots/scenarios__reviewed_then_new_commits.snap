@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "I approved at an older SHA and the head has since moved: re-review."
+---
+[p4] re-review: 4 new commits since your review of abc123f (since 2026-08-04T16:42:00Z)

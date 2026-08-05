@@ -8,7 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use reviewq_core::model::{MyState, PrSnapshot, ThreadState};
+use reviewq_core::model::{
+    ClassifyCtx, Mention, MyState, PrSnapshot, ReviewRequest, ThreadState, classify,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +24,58 @@ struct Scenario {
     mine: MyState,
     #[serde(default)]
     threads: Vec<ThreadState>,
+    /// Signals that come from config or a tier-2 fetch rather than the PR's own
+    /// activity — see [`ClassifyCtx`].
+    #[serde(default)]
+    ctx: ScenarioCtx,
+}
+
+/// The [`ClassifyCtx`] inputs, in an owned form the fixture can deserialize.
+#[derive(Debug, Default, Deserialize)]
+struct ScenarioCtx {
+    #[serde(default)]
+    bots: Vec<String>,
+    #[serde(default)]
+    interest: Option<String>,
+    #[serde(default)]
+    mentions: Vec<Mention>,
+    #[serde(default)]
+    review_request: Option<ReviewRequest>,
+    #[serde(default)]
+    new_commits: u32,
+    #[serde(default)]
+    include_merged: bool,
+}
+
+impl Scenario {
+    /// Classify this fixture and render each fired reason as one line, so the
+    /// snapshot is a diffable statement of what the queue would show.
+    fn classified(&self) -> String {
+        let ctx = ClassifyCtx {
+            bots: &self.ctx.bots,
+            interest: self.ctx.interest.as_deref(),
+            mentions: &self.ctx.mentions,
+            review_request: self.ctx.review_request.clone(),
+            new_commits: self.ctx.new_commits,
+            include_merged: self.ctx.include_merged,
+        };
+        let attention = classify(&self.pr, &self.mine, &self.threads, self.now, &ctx);
+        if attention.is_empty() {
+            return "(nothing)".to_string();
+        }
+        attention
+            .iter()
+            .map(|a| {
+                format!(
+                    "[p{}] {} (since {})",
+                    a.reason.priority(),
+                    a.reason,
+                    a.since
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 fn fixture_dir() -> PathBuf {
@@ -109,11 +163,14 @@ fn no_fixture_describes_an_impossible_state() {
 fn every_required_scenario_has_a_fixture() {
     let required = [
         "bot_comment_suppressed",
+        "direct_mention",
         "draft_suppressed",
         "fresh_interesting_pr",
+        "merged_post_merge_reply",
         "mute_beats_mention",
         "my_thread_resolved_silently",
         "reply_in_my_thread",
+        "review_requested",
         "reviewed_then_new_commits",
         "snooze_expired",
         "snoozed",
@@ -127,4 +184,14 @@ fn every_required_scenario_has_a_fixture() {
         .collect();
 
     assert!(missing.is_empty(), "missing fixtures: {missing:?}");
+}
+
+/// The heart of the suite: what does classification actually produce for each
+/// case? One snapshot per fixture, named after it, so a behaviour change shows
+/// up as a diff against the specific scenario it broke.
+#[test]
+fn classification_matches_the_snapshot() {
+    for (name, scenario) in load_all() {
+        insta::assert_snapshot!(name.clone(), scenario.classified(), &scenario.description);
+    }
 }

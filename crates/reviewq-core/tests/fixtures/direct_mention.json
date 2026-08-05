@@ -1,0 +1,27 @@
+{
+  "description": "Someone @mentioned me in a comment after my last action: mention, the highest-priority reason.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 45200,
+    "title": "Tighten the Scheduler's zombie-task detection window",
+    "author": "potiuk",
+    "author_association": "MEMBER",
+    "head_sha": "77889900aabbccddeeff00112233445566778899",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T10:15:00Z",
+    "labels": ["area:Scheduler"],
+    "milestone": null,
+    "files": ["airflow-core/src/airflow/jobs/scheduler_job_runner.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_action_at": "2026-08-04T09:00:00Z"
+  },
+  "ctx": {
+    "bots": ["github-actions[bot]"],
+    "mentions": [
+      { "by": "potiuk", "at": "2026-08-05T10:15:00Z" }
+    ]
+  }
+}

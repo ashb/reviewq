@@ -1,0 +1,38 @@
+{
+  "description": "A project that opts into post-merge review: someone replied in my thread after the PR merged, so it still surfaces (thread-reply). needs-first-look never fires on merged.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 44600,
+    "title": "Switch the scheduler DAG-parse loop to the new Task SDK client",
+    "author": "uranusjr",
+    "author_association": "MEMBER",
+    "head_sha": "bb00ccddeeff00112233445566778899aabbccdd",
+    "is_draft": false,
+    "state": "MERGED",
+    "updated_at": "2026-08-05T09:30:00Z",
+    "labels": ["area:Scheduler"],
+    "milestone": "3.2.0",
+    "files": ["airflow-core/src/airflow/jobs/scheduler_job_runner.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "bb00ccddeeff00112233445566778899aabbccdd",
+    "last_verdict": "APPROVED",
+    "last_action_at": "2026-08-04T18:00:00Z"
+  },
+  "threads": [
+    {
+      "thread_id": "PRRT_kwDOABCDEF4ApostMerge",
+      "i_own": true,
+      "is_resolved": false,
+      "resolved_by": null,
+      "last_comment_author": "potiuk",
+      "last_comment_at": "2026-08-05T09:30:00Z",
+      "my_last_comment_at": "2026-08-04T18:00:00Z"
+    }
+  ],
+  "ctx": {
+    "interest": "label area:Scheduler",
+    "include_merged": true
+  }
+}

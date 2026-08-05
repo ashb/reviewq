@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "A formal review request names me and I have not reviewed the head yet: review-requested."
+---
+[p5] review-requested: you were asked to review (since 2026-08-05T07:40:00Z)

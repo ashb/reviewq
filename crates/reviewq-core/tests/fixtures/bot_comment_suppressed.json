@@ -30,5 +30,9 @@
       "last_comment_at": "2026-08-05T09:45:00Z",
       "my_last_comment_at": "2026-08-04T18:00:00Z"
     }
-  ]
+  ],
+  "ctx": {
+    "bots": ["github-actions[bot]"],
+    "interest": "label area:task-sdk"
+  }
 }

@@ -98,6 +98,22 @@ impl AttentionReason {
             Self::NeedsFirstLook { .. } => "needs_first_look",
         }
     }
+
+    /// The priority of a stored [`discriminant`](Self::discriminant), without
+    /// reconstructing the variant. The ledger stores only the discriminant, so
+    /// this is how a queue read recovers the sort band. `None` for an
+    /// unrecognised string — a row from a newer build than this one.
+    pub fn priority_for(discriminant: &str) -> Option<u8> {
+        Some(match discriminant {
+            "mention" => 1,
+            "thread_reply" => 2,
+            "resolved_unanswered" => 3,
+            "re_review" => 4,
+            "review_requested" => 5,
+            "needs_first_look" => 6,
+            _ => return None,
+        })
+    }
 }
 
 impl fmt::Display for AttentionReason {
@@ -201,6 +217,17 @@ mod tests {
         let mut priorities: Vec<u8> = all.iter().map(AttentionReason::priority).collect();
         priorities.sort_unstable();
         assert_eq!(priorities, (1..=6).collect::<Vec<u8>>());
+
+        // The by-discriminant lookup the ledger uses must agree with the
+        // variant's own priority, or a queue read would sort differently from a
+        // fresh classification.
+        for reason in &all {
+            assert_eq!(
+                AttentionReason::priority_for(reason.discriminant()),
+                Some(reason.priority()),
+            );
+        }
+        assert_eq!(AttentionReason::priority_for("nonsense"), None);
     }
 
     #[test]

@@ -59,6 +59,11 @@ pub struct Project {
     /// `[involvement].reasons` when set; inherits it when omitted.
     #[serde(default)]
     pub involvement: Option<Vec<String>>,
+    /// Keep surfacing a PR after it merges, so post-merge activity (a reply, a
+    /// mention) can flag something that shipped broken. Off by default — most
+    /// people want the queue to end at merge.
+    #[serde(default)]
+    pub include_merged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

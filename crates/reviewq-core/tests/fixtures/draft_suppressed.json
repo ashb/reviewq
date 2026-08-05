@@ -14,5 +14,8 @@
     "milestone": null,
     "files": ["airflow-core/src/airflow/serialization/serialized_objects.py"],
     "files_truncated": false
+  },
+  "ctx": {
+    "interest": "label area:serialization"
   }
 }

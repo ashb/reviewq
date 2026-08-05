@@ -15,7 +15,7 @@ pub mod github;
 pub use host::{
     DEFAULT_HOST, ForgeHost, ForgeTable, Token, TokenSource, resolve_host, resolve_token,
 };
-pub use types::{RateLimit, SEARCH_CAP, SweepPage, Viewer};
+pub use types::{PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -53,6 +53,18 @@ pub trait Forge: Send + Sync {
 
     /// One PR by number. `None` if it no longer exists.
     async fn fetch_pr(&self, owner: &str, name: &str, number: u64) -> Result<Option<PrSnapshot>>;
+
+    /// Tier-2 detail for one PR — threads, my review history, mentions — from
+    /// the point of view of `login` (the authenticated viewer). `None` if the
+    /// PR no longer exists. This is the expensive per-PR fetch the queue needs
+    /// beyond the sweep, so the caller runs it only for tracked PRs.
+    async fn fetch_pr_detail(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+        login: &str,
+    ) -> Result<Option<PrDetail>>;
 }
 
 /// Build the adapter for `host` authenticated with `token`, choosing it by

@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "The only new activity in my thread is a bot comment: nothing fires."
+---
+(nothing)

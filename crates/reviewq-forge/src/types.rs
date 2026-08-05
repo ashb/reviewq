@@ -5,7 +5,7 @@
 //! second provider is where they would earn a more neutral form.
 
 use jiff::Timestamp;
-use reviewq_core::model::PrSnapshot;
+use reviewq_core::model::{Mention, PrSnapshot, ReviewRequest, ThreadState, Verdict};
 use serde::Deserialize;
 
 /// GitHub search returns at most this many results however many match, so a
@@ -63,6 +63,40 @@ pub struct SweepPage {
     /// number reachable if the window blew past [`SEARCH_CAP`].
     pub total_count: u32,
     /// GraphQL points this page cost.
+    pub cost: u32,
+    /// Points remaining after it.
+    pub remaining: u32,
+}
+
+/// The tier-2 detail for one PR: everything the [`classify`] state machine needs
+/// beyond the cheap sweep, derived from the authenticated viewer's point of
+/// view. The adapter resolves "me" while shaping this, so nothing above it needs
+/// the login to interpret the result.
+///
+/// [`classify`]: reviewq_core::model::classify
+#[derive(Debug, Clone)]
+pub struct PrDetail {
+    /// PR number.
+    pub number: u64,
+    /// Head SHA at fetch time; lets the caller detect a head that moved between
+    /// the sweep and this fetch.
+    pub head_sha: String,
+    /// Head SHA as of my most recent review, if I have reviewed.
+    pub last_reviewed_sha: Option<String>,
+    /// The verdict of that review.
+    pub last_verdict: Option<Verdict>,
+    /// The most recent thing I did on the PR — a review or any comment.
+    pub last_action_at: Option<Timestamp>,
+    /// The PR's review threads, from my point of view (`i_own`, my last
+    /// comment, ...).
+    pub threads: Vec<ThreadState>,
+    /// @mentions of me, from others, across comments and reviews.
+    pub mentions: Vec<Mention>,
+    /// Commits pushed since my last review; zero if I have not reviewed.
+    pub new_commits: u32,
+    /// A live review request naming me directly, if any.
+    pub review_request: Option<ReviewRequest>,
+    /// GraphQL points this fetch cost.
     pub cost: u32,
     /// Points remaining after it.
     pub remaining: u32,

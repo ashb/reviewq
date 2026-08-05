@@ -112,6 +112,29 @@ pub enum Verdict {
     Commented,
 }
 
+impl Verdict {
+    /// GitHub's own spelling, and the value stored in the ledger's
+    /// `last_verdict` column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "APPROVED",
+            Self::ChangesRequested => "CHANGES_REQUESTED",
+            Self::Commented => "COMMENTED",
+        }
+    }
+
+    /// Parse the wire/ledger spelling back to a verdict. GitHub also emits
+    /// `DISMISSED` and `PENDING`, which are not verdicts we record.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "APPROVED" => Some(Self::Approved),
+            "CHANGES_REQUESTED" => Some(Self::ChangesRequested),
+            "COMMENTED" => Some(Self::Commented),
+            _ => None,
+        }
+    }
+}
+
 /// One review thread. Mirrors the `threads` ledger table.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ThreadState {

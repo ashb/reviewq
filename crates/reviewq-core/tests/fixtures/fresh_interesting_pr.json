@@ -14,5 +14,8 @@
     "milestone": "3.2.0",
     "files": ["task-sdk/src/airflow/sdk/definitions/taskgroup.py"],
     "files_truncated": false
+  },
+  "ctx": {
+    "interest": "label area:task-sdk"
   }
 }

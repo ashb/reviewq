@@ -18,6 +18,10 @@ repos = [{ owner = "apache", name = "airflow" }]
 # A repo on a self-hosted instance names its host, which selects a [forge] entry
 # below; the default is "github.com":
 #   repos = [{ owner = "acme", name = "widgets", host = "github.acme.example" }]
+# Keep surfacing a PR after it merges, so a post-merge reply or mention can flag
+# something that shipped broken. Off by default — the queue normally ends at
+# merge. Turn it on per project if you review post-merge:
+#   include_merged = true
 
 # Interest rules. A PR is interesting if ANY rule matches. Each rule tests one
 # dimension for now; within a dimension, any listed value matches.

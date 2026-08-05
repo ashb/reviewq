@@ -1,0 +1,91 @@
+{
+  "repository": {
+    "pullRequest": {
+      "number": 44870,
+      "headRefOid": "d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a291",
+      "reviewRequests": {
+        "nodes": [
+          { "requestedReviewer": { "__typename": "User", "login": "ashb" } },
+          { "requestedReviewer": { "__typename": "Team", "slug": "core-committers" } }
+        ]
+      },
+      "reviews": {
+        "nodes": [
+          {
+            "author": { "login": "ashb" },
+            "state": "APPROVED",
+            "submittedAt": "2026-08-01T10:00:00Z",
+            "commit": { "oid": "abc123f8901234567890123456789012345678ab" },
+            "body": "LGTM"
+          },
+          {
+            "author": { "login": "ashb" },
+            "state": "PENDING",
+            "submittedAt": null,
+            "commit": null,
+            "body": ""
+          }
+        ]
+      },
+      "comments": {
+        "nodes": [
+          {
+            "author": { "login": "uranusjr" },
+            "createdAt": "2026-08-04T16:00:00Z",
+            "body": "Can you take another look @ashb? Rebased on main."
+          },
+          {
+            "author": { "login": "ashb" },
+            "createdAt": "2026-08-01T09:55:00Z",
+            "body": "Starting review now."
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          { "commit": { "committedDate": "2026-08-01T09:00:00Z" } },
+          { "commit": { "committedDate": "2026-08-04T15:30:00Z" } },
+          { "commit": { "committedDate": "2026-08-04T16:42:00Z" } }
+        ]
+      },
+      "reviewThreads": {
+        "nodes": [
+          {
+            "id": "PRRT_mine",
+            "isResolved": false,
+            "resolvedBy": null,
+            "comments": {
+              "nodes": [
+                {
+                  "author": { "login": "ashb" },
+                  "createdAt": "2026-08-01T10:05:00Z",
+                  "body": "This branch needs a guard for the empty case."
+                },
+                {
+                  "author": { "login": "kaxil" },
+                  "createdAt": "2026-08-04T16:20:00Z",
+                  "body": "Good catch, fixed."
+                }
+              ]
+            }
+          },
+          {
+            "id": "PRRT_theirs",
+            "isResolved": true,
+            "resolvedBy": { "login": "uranusjr" },
+            "comments": {
+              "nodes": [
+                {
+                  "author": { "login": "uranusjr" },
+                  "createdAt": "2026-08-02T08:00:00Z",
+                  "body": "Nit: rename this."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "rateLimit": { "limit": 5000, "cost": 1, "remaining": 4987, "resetAt": "2026-08-05T13:00:00Z" }
+}

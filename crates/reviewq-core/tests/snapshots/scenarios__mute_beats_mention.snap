@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "Muted PR with a fresh mention in a thread I own: mute wins, because mute means mute."
+---
+(nothing)

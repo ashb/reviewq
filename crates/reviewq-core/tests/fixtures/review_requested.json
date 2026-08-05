@@ -1,0 +1,21 @@
+{
+  "description": "A formal review request names me and I have not reviewed the head yet: review-requested.",
+  "now": "2026-08-05T12:00:00Z",
+  "pr": {
+    "number": 45210,
+    "title": "Add a connection-pool ceiling to the Celery result backend",
+    "author": "dstandish",
+    "author_association": "MEMBER",
+    "head_sha": "00112233445566778899aabbccddeeff00112233",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-05T07:40:00Z",
+    "labels": ["area:Executors-core"],
+    "milestone": null,
+    "files": ["providers/celery/src/airflow/providers/celery/executors/celery_executor.py"],
+    "files_truncated": false
+  },
+  "ctx": {
+    "review_request": { "team": null }
+  }
+}

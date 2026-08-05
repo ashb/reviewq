@@ -6,13 +6,14 @@
 //! PRs that name me. Everything is an idempotent upsert, so a re-sync over an
 //! overlapping window is a near-no-op.
 
+use std::collections::HashSet;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use std::io::{IsTerminal, Write};
-
 use anyhow::{Context, Result};
 use jiff::{Timestamp, ToSpan};
+use reviewq_core::model::{ClassifyCtx, classify};
 use reviewq_core::rules::Evaluation;
 use reviewq_forge::{Forge, build, resolve_token};
 use reviewq_ledger::{Ledger, TrackedReason};
@@ -105,7 +106,7 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
     let truncated = stats.total_count > stats.swept as u32;
     ledger.set_meta(TRUNCATED_KEY, if truncated { "1" } else { "0" })?;
 
-    involvement_search(
+    let review_requested = involvement_search(
         forge.as_ref(),
         &ledger,
         repo,
@@ -117,6 +118,24 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
         &mut progress,
     )
     .await?;
+
+    detail_pass(
+        forge.as_ref(),
+        &ledger,
+        repo,
+        &cfg.identity.login,
+        &cfg.bots.logins,
+        project.include_merged,
+        &review_requested,
+        now,
+        &mut stats,
+        &mut progress,
+    )
+    .await?;
+
+    // Merged/closed PRs are not re-fetched, so drop any attention they still
+    // carry (unless this project keeps merged PRs on the queue).
+    ledger.clear_archived_attention(project.include_merged)?;
 
     finish_progress(in_place);
     let (tracked, total) = ledger.counts()?;
@@ -160,7 +179,10 @@ fn search_time(ts: Timestamp) -> String {
 }
 
 /// Find PRs I'm involved in via search qualifiers — one query per configured
-/// relationship — and mark them `involved:`.
+/// relationship — and mark them `involved:`. Returns the set of PR numbers where
+/// a review is currently requested of me, so the detail pass can raise
+/// `review-requested` even when the request went to a *team* I'm on (which
+/// tier-2 can't attribute to me directly, but this search resolves).
 ///
 /// This is what replaces scanning the notifications firehose: each qualifier
 /// (`review-requested:me`, `mentions:me`, `assignee:me`, ...) returns only the
@@ -178,8 +200,9 @@ async fn involvement_search(
     now: Timestamp,
     stats: &mut Stats,
     progress: &mut impl FnMut(&str, usize, u32),
-) -> Result<()> {
-    let mut involved = std::collections::HashSet::new();
+) -> Result<HashSet<u64>> {
+    let mut involved = HashSet::new();
+    let mut review_requested = HashSet::new();
 
     for reason in reasons {
         let Some(qualifier) = involvement_qualifier(reason, login) else {
@@ -209,6 +232,9 @@ async fn involvement_search(
                     stats.new += 1;
                 }
                 involved.insert(pr.number);
+                if reason == "review_requested" {
+                    review_requested.insert(pr.number);
+                }
             }
             fetched += page.prs.len();
             progress(reason, fetched, page.total_count);
@@ -220,7 +246,104 @@ async fn involvement_search(
     }
 
     stats.involved = involved.len() as u64;
+    Ok(review_requested)
+}
+
+/// Stop the detail pass when the GraphQL budget falls below this. The pass is
+/// resumable (each PR commits independently and the sync watermark is already
+/// advanced), so stopping short just means the next `sync` finishes the rest —
+/// far better than running the budget to zero and erroring out.
+const DETAIL_BUDGET_FLOOR: u32 = 100;
+
+/// Tier-2: for every tracked PR whose detail is stale, fetch its threads,
+/// reviews and mentions, classify it, and store the resulting attention. This
+/// is the expensive pass — one query per PR — so it runs only over the tracked
+/// set, and each PR commits independently so a ^C (or a budget stop) keeps
+/// finished work.
+#[allow(clippy::too_many_arguments)]
+async fn detail_pass(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo: &RepoRef,
+    login: &str,
+    bots: &[String],
+    include_merged: bool,
+    review_requested: &HashSet<u64>,
+    now: Timestamp,
+    stats: &mut Stats,
+    progress: &mut impl FnMut(&str, usize, u32),
+) -> Result<()> {
+    let pending = ledger.prs_needing_detail(include_merged)?;
+    let total = pending.len() as u32;
+    for (index, tracked) in pending.iter().enumerate() {
+        // The floor is checked against the budget the last fetch reported, so we
+        // stop before spending the tail rather than after.
+        if stats.remaining != 0 && stats.remaining < DETAIL_BUDGET_FLOOR {
+            tracing::warn!(
+                remaining = stats.remaining,
+                done = index,
+                total,
+                "stopping the detail pass to preserve GraphQL budget; \
+                 re-run `reviewq sync` to finish the rest"
+            );
+            break;
+        }
+
+        let number = tracked.pr.number;
+        let Some(detail) = forge
+            .fetch_pr_detail(&repo.owner, &repo.name, number, login)
+            .await?
+        else {
+            continue;
+        };
+        stats.cost += detail.cost;
+        stats.remaining = detail.remaining;
+
+        // Classify against the head the detail fetch saw, not the sweep's: the
+        // head can move between the two, and re-review keys on it.
+        let mut pr = tracked.pr.clone();
+        pr.head_sha = detail.head_sha.clone();
+
+        // GitHub owns my review history; the ledger owns done/snooze/mute. Read
+        // the local state and overlay only the forge-derived fields.
+        let mut mine = ledger.my_state(number)?;
+        mine.last_reviewed_sha = detail.last_reviewed_sha.clone();
+        mine.last_verdict = detail.last_verdict;
+        mine.last_action_at = detail.last_action_at;
+
+        // A review requested of me — directly (tier-2) or via a team I'm on (the
+        // involvement search) — is the same actionable request.
+        let review_request = detail
+            .review_request
+            .clone()
+            .or_else(|| review_requested.contains(&number).then(Default::default));
+
+        let interest = interest_detail(&tracked.tracked_reason);
+        let ctx = ClassifyCtx {
+            bots,
+            interest: interest.as_deref(),
+            mentions: &detail.mentions,
+            review_request,
+            new_commits: detail.new_commits,
+            include_merged,
+        };
+        let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
+        if !attention.is_empty() {
+            stats.queued += 1;
+        }
+        ledger.commit_detail(number, &mine, &detail.threads, &attention, now)?;
+        progress("detail", index + 1, total);
+    }
     Ok(())
+}
+
+/// The bare interest rule from a stored `tracked_reason`
+/// (`interest: label area:x` → `label area:x`), or `None` for an involvement
+/// reason — which never produces `needs-first-look`.
+fn interest_detail(tracked_reason: &str) -> Option<String> {
+    tracked_reason
+        .strip_prefix("interest: ")
+        .map(str::to_string)
 }
 
 /// Map a configured involvement reason to its GitHub search qualifier.
@@ -243,6 +366,7 @@ struct Stats {
     new: u64,
     interest: u64,
     involved: u64,
+    queued: u64,
     truncated_unknown: u64,
     cost: u32,
     remaining: u32,
@@ -279,8 +403,8 @@ fn print_summary(stats: &Stats, tracked: u64, total: u64) {
     // `involved` count why PRs are tracked.
     let mut line = format!(
         "sync: swept {} of {} in window, tracked {tracked}/{total} (+{} new), \
-         {} interest, {} involved",
-        stats.swept, stats.total_count, stats.new, stats.interest, stats.involved
+         {} interest, {} involved, {} on the queue",
+        stats.swept, stats.total_count, stats.new, stats.interest, stats.involved, stats.queued,
     );
     if stats.truncated_unknown > 0 {
         line.push_str(&format!(

@@ -1,12 +1,13 @@
-//! Snapshot types and attention reasons.
+//! Snapshot types, attention reasons, and the classifier that maps one to the
+//! other.
 //!
-//! Classification itself — the pure function turning a snapshot into a list of
-//! [`Attention`] entries — is not written yet. Its input and output types are,
-//! because they double as the on-disk test fixture format and because the
-//! rendered reason strings are a stable, user-visible API.
+//! The types double as the on-disk fixture format, and the rendered reason
+//! strings are a stable, user-visible API — so both are snapshot-tested.
 
+mod classify;
 mod reason;
 mod snapshot;
 
+pub use classify::{ClassifyCtx, Mention, ReviewRequest, classify};
 pub use reason::{Attention, AttentionReason};
 pub use snapshot::{MyState, PrSnapshot, PrState, ThreadState, Verdict};

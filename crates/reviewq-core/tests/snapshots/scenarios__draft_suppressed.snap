@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "A draft that matches interest rules: suppressed entirely, since only a mention pierces draft state."
+---
+(nothing)

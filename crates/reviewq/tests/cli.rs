@@ -39,7 +39,7 @@ fn help_and_version_succeed() {
 
 #[test]
 fn every_subcommand_is_reachable() {
-    for name in ["sync", "list", "doctor"] {
+    for name in ["sync", "list", "next", "show", "doctor"] {
         let output = run(&[name, "--help"]);
         assert!(
             output.status.success(),
@@ -57,12 +57,22 @@ fn list_rejects_contradictory_buckets() {
 }
 
 #[test]
-fn the_queue_says_it_needs_the_state_machine() {
-    // `list` with no --all is the queue, which M3 will build. Until then it
-    // must explain itself rather than silently print nothing.
-    let output = run(&["list"]);
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("state machine"));
+fn an_empty_queue_reports_itself_and_exits_empty() {
+    // `list` with no flag is the queue. Against a fresh ledger it is empty, and
+    // must say so with the dedicated exit code rather than printing nothing.
+    let db = std::env::temp_dir().join("reviewq-cli-empty-queue.db");
+    let _ = std::fs::remove_file(&db);
+    let output = Command::new(BIN)
+        .args(["list"])
+        .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
+        .env("REVIEWQ_DB", &db)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("binary runs");
+    let _ = std::fs::remove_file(&db);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("queue is empty"));
 }
 
 #[test]
