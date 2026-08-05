@@ -50,6 +50,34 @@ pub enum PrState {
     Closed,
 }
 
+impl PrState {
+    /// GitHub's own spelling, and the value stored in the ledger's `state`
+    /// column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "OPEN",
+            Self::Merged => "MERGED",
+            Self::Closed => "CLOSED",
+        }
+    }
+
+    /// Parse the wire/ledger spelling back to a state.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "OPEN" => Some(Self::Open),
+            "MERGED" => Some(Self::Merged),
+            "CLOSED" => Some(Self::Closed),
+            _ => None,
+        }
+    }
+
+    /// Whether the PR is still open. Merged/closed PRs are archived out of the
+    /// queue.
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open)
+    }
+}
+
 /// My own history on a PR. Mirrors the `my_state` ledger table.
 ///
 /// This is the state GitHub does not track for me, and the reason reviewq

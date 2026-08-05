@@ -37,6 +37,13 @@ pub struct ForgeHost {
     pub token_env: Option<String>,
     /// The environment variable naming a file that holds the token.
     pub token_file_env: Option<String>,
+    /// A command (argv, no shell) that prints the token on stdout. For secret
+    /// managers: `["op", "read", "op://Private/GitHub/token"]`, or reuse a
+    /// configured 1Password plugin with `["op", "plugin", "run", "--", "gh",
+    /// "auth", "token"]`. Tried after the env vars and before the built-in `gh`
+    /// fallback, so an unattended run that sets a token env var never triggers
+    /// it (and never blocks on an interactive unlock prompt).
+    pub token_command: Option<Vec<String>>,
 }
 
 impl ForgeHost {
@@ -51,6 +58,10 @@ impl ForgeHost {
                 .token_file_env
                 .clone()
                 .or_else(|| base.token_file_env.clone()),
+            token_command: self
+                .token_command
+                .clone()
+                .or_else(|| base.token_command.clone()),
         }
     }
 }
@@ -124,6 +135,7 @@ static BUILT_IN_HOSTS: LazyLock<BTreeMap<String, ForgeHost>> = LazyLock::new(|| 
             api_base: None,
             token_env: Some("GITHUB_TOKEN".to_string()),
             token_file_env: Some("GITHUB_TOKEN_FILE".to_string()),
+            token_command: None,
         },
     )])
 });
@@ -139,6 +151,8 @@ pub enum TokenSource {
     HostEnv(String),
     /// The gh CLI convention `$GH_TOKEN`.
     GhTokenEnv,
+    /// The host's configured `token_command`; carries the command for display.
+    Command(String),
     /// Shelling out to `gh auth token`.
     GhCli,
 }
@@ -150,6 +164,7 @@ impl std::fmt::Display for TokenSource {
             Self::HostFile(var) => write!(f, "file named by ${var}"),
             Self::HostEnv(var) => write!(f, "${var}"),
             Self::GhTokenEnv => write!(f, "${GH_TOKEN_ENV}"),
+            Self::Command(cmd) => write!(f, "`{cmd}`"),
             Self::GhCli => write!(f, "gh auth token"),
         }
     }
@@ -164,12 +179,24 @@ pub struct Token {
     pub source: TokenSource,
 }
 
-/// Resolve the token for `host` against the real environment, falling back to
-/// `gh auth token` for the GitHub provider.
+/// Resolve the token for `host`.
+///
+/// Order: `$REVIEWQ_GITHUB_TOKEN`, the host's `token_file_env` then `token_env`,
+/// `$GH_TOKEN` (GitHub only), the host's `token_command`, and finally
+/// `gh auth token` (GitHub only). Env sources come first on purpose, so an
+/// unattended run that sets a token variable never falls through to a command
+/// that might block on an interactive unlock prompt.
 pub fn resolve_token(host: &ForgeHost) -> Result<Token> {
     let env = |name: &str| std::env::var(name).ok();
     if let Some(token) = resolve_from_env(host, &env)? {
         return Ok(token);
+    }
+    if let Some(argv) = &host.token_command {
+        let value = run_token_command(argv)?;
+        return Ok(Token {
+            value,
+            source: TokenSource::Command(argv.join(" ")),
+        });
     }
     if is_github(host)
         && let Some(value) = gh_auth_token()?
@@ -180,13 +207,44 @@ pub fn resolve_token(host: &ForgeHost) -> Result<Token> {
         });
     }
     bail!(
-        "no token found for {host}: set ${OVERRIDE_ENV}{}, or make `gh auth token` work",
+        "no token found for {host}: set ${OVERRIDE_ENV}{}, configure a token_command, \
+         or make `gh auth token` work",
         host.token_env
             .as_deref()
             .map(|v| format!(" / ${v}"))
             .unwrap_or_default(),
         host = host.provider.as_deref().unwrap_or("this host"),
     )
+}
+
+/// Run a configured `token_command` (argv, no shell) and return its trimmed
+/// stdout. A non-zero exit, empty output, or missing program is an error — never
+/// a silent fall-through to the next source.
+fn run_token_command(argv: &[String]) -> Result<String> {
+    let (program, args) = argv
+        .split_first()
+        .context("token_command is empty; give it a program and arguments")?;
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("running token_command {program:?}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "token_command `{}` failed ({}): {}",
+            argv.join(" "),
+            output.status,
+            stderr.trim()
+        );
+    }
+    let token = String::from_utf8(output.stdout)
+        .context("token_command output was not UTF-8")?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        bail!("token_command `{}` produced no output", argv.join(" "));
+    }
+    Ok(token)
 }
 
 /// The environment half of resolution, with the variable lookup injected so it
@@ -352,6 +410,48 @@ mod tests {
 
         let host = table.host("git.example.org").expect("configured host");
         assert_eq!(host.provider.as_deref(), Some("forgejo"));
+    }
+
+    #[test]
+    fn a_token_command_overlays_and_inherits() {
+        let table: ForgeTable = toml::from_str(
+            r#"
+            ["github.com"]
+            token_command = ["op", "read", "op://Private/GitHub/token"]
+            "#,
+        )
+        .expect("parses");
+
+        let host = table.host("github.com").expect("known host");
+        assert_eq!(
+            host.token_command.as_deref().unwrap(),
+            ["op", "read", "op://Private/GitHub/token"]
+        );
+        // The built-in provider/token vars are still inherited.
+        assert_eq!(host.provider.as_deref(), Some("github"));
+        assert_eq!(host.token_env.as_deref(), Some("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn run_token_command_returns_trimmed_stdout() {
+        let argv = ["printf".to_string(), "  cmd-token\n".to_string()];
+        assert_eq!(run_token_command(&argv).unwrap(), "cmd-token");
+    }
+
+    #[test]
+    fn run_token_command_rejects_a_failing_command() {
+        assert!(run_token_command(&["false".to_string()]).is_err());
+    }
+
+    #[test]
+    fn run_token_command_rejects_empty_output() {
+        // `true` exits 0 with no stdout — an empty token is an error, not a pass.
+        assert!(run_token_command(&["true".to_string()]).is_err());
+    }
+
+    #[test]
+    fn run_token_command_rejects_empty_argv() {
+        assert!(run_token_command(&[]).is_err());
     }
 
     #[test]

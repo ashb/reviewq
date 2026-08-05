@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
-use reviewq_forge::{github::GithubForge, resolve_token};
+use reviewq_forge::{build, resolve_token};
 
 use crate::{config, paths};
 
@@ -30,20 +30,21 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
     };
     row("ledger", &db_note);
 
-    row("repo", &loaded.config.slug());
+    let (_project, repo) = loaded.config.sole_repo()?;
+    row("repo", &repo.slug());
 
-    let host = loaded.config.forge_host()?;
+    let host = loaded.config.forge_host_for(repo)?;
     let host_note = match &host.api_base {
-        Some(api_base) => format!("{} ({api_base})", loaded.config.repo.host),
-        None => loaded.config.repo.host.clone(),
+        Some(api_base) => format!("{} ({api_base})", repo.host),
+        None => repo.host.clone(),
     };
     row("forge", &host_note);
 
     let token = resolve_token(&host)?;
     row("token", &token.source.to_string());
 
-    let client = GithubForge::new(&host, &token.value)?;
-    let viewer = client.viewer().await?;
+    let forge = build(&host, &token.value)?;
+    let viewer = forge.viewer().await?;
     viewer.rate_limit.trace("doctor:viewer");
 
     let configured = loaded.config.identity.login.trim();
@@ -79,7 +80,7 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
         },
     );
 
-    match client.rest_core_remaining().await {
+    match forge.rest_core_remaining().await {
         Ok((remaining, limit)) => row("rest", &format!("{remaining}/{limit} core requests")),
         Err(err) => {
             problems += 1;

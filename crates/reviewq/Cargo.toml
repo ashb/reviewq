@@ -6,13 +6,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+reviewq-core.workspace = true
 reviewq-forge.workspace = true
+reviewq-ledger.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
 etcetera.workspace = true
+jiff.workspace = true
 owo-colors.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// A deterministic PR review queue.
 ///
@@ -22,8 +22,29 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Fetch updates from the forge and rebuild the ledger.
+    Sync,
+
+    /// Show tracked PRs.
+    List(ListArgs),
+
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Show everything tracked, grouped by state.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Show the awaiting-author bucket (needs the state machine).
+    #[arg(long, conflicts_with = "all")]
+    pub waiting: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(test)]

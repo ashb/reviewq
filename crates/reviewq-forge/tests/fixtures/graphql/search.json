@@ -1,0 +1,81 @@
+{
+  "search": {
+    "issueCount": 738,
+    "pageInfo": {
+      "endCursor": "Y3Vyc29yOjI=",
+      "hasNextPage": true
+    },
+    "nodes": [
+      {
+        "number": 71196,
+        "title": "Keep API error details when a response declares a JSON charset",
+        "isDraft": true,
+        "state": "OPEN",
+        "author": {
+          "login": "rjgoyln"
+        },
+        "authorAssociation": "CONTRIBUTOR",
+        "headRefOid": "51753c8f04ffe29e648ac700e8a5ece5c4ff0d93",
+        "updatedAt": "2026-08-05T18:04:01Z",
+        "labels": {
+          "nodes": [
+            {
+              "name": "area:task-sdk"
+            },
+            {
+              "name": "area:airflow-ctl"
+            },
+            {
+              "name": "backport-to-airflow-ctl/v0-1-test"
+            }
+          ]
+        },
+        "milestone": null,
+        "files": {
+          "totalCount": 4,
+          "nodes": [
+            { "path": "airflow-ctl/src/airflowctl/api/operations.py" },
+            { "path": "airflow-ctl/tests/airflow_ctl/api/test_client.py" },
+            { "path": "task-sdk/src/airflow/sdk/api/client.py" }
+          ]
+        }
+      },
+      {
+        "number": 71195,
+        "title": "Surface keyring failures instead of silently dropping the token",
+        "isDraft": true,
+        "state": "OPEN",
+        "author": {
+          "login": "rjgoyln"
+        },
+        "authorAssociation": "CONTRIBUTOR",
+        "headRefOid": "0a8513ed809db39dae51e26bd55f890f04f3d199",
+        "updatedAt": "2026-08-05T18:01:25Z",
+        "labels": {
+          "nodes": [
+            {
+              "name": "area:airflow-ctl"
+            },
+            {
+              "name": "backport-to-airflow-ctl/v0-1-test"
+            }
+          ]
+        },
+        "milestone": null,
+        "files": {
+          "totalCount": 2,
+          "nodes": [
+            { "path": "airflow-ctl/src/airflowctl/api/client.py" },
+            { "path": "airflow-ctl/src/airflowctl/api/token.py" }
+          ]
+        }
+      }
+    ]
+  },
+  "rateLimit": {
+    "limit": 5000,
+    "cost": 1,
+    "remaining": 4999,
+    "resetAt": "2026-08-05T19:29:50Z"
+  }
+}

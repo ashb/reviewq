@@ -1,0 +1,18 @@
+[package]
+name = "reviewq-ledger"
+description = "SQLite ledger for reviewq: schema, migrations, and typed queries."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reviewq-core.workspace = true
+
+anyhow.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

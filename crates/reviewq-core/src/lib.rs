@@ -10,3 +10,4 @@
 //! the invariant testable exhaustively and cheaply.
 
 pub mod model;
+pub mod rules;

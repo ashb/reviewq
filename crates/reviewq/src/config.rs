@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use reviewq_core::rules::{ConditionInput, Interest, RuleInput};
 use serde::{Deserialize, Serialize};
 
 use reviewq_forge::{DEFAULT_HOST, ForgeHost, ForgeTable, resolve_host};
@@ -12,15 +13,20 @@ pub const DEFAULT_CONFIG: &str = include_str!("config.default.toml");
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub identity: Identity,
-    pub repo: Repo,
-    #[serde(default)]
-    pub interest: Interest,
+    /// One or more projects, each bundling its repos with the interest rules
+    /// that apply to them. `[[project]]` in TOML.
+    #[serde(rename = "project", default)]
+    pub projects: Vec<Project>,
     #[serde(default)]
     pub bots: Bots,
     #[serde(default)]
     pub handoff: Handoff,
     #[serde(default)]
     pub sync: Sync,
+    /// Global default for which relationships make a PR involve me; a project
+    /// may override it.
+    #[serde(default)]
+    pub involvement: Involvement,
     /// Per-host forge settings, keyed by host. Overlaid onto built-in defaults,
     /// so an empty table still resolves the public GitHub host. Plural since
     /// the table itself may hold settings for several hosts; kept as `forge`
@@ -36,8 +42,27 @@ pub struct Identity {
     pub login: String,
 }
 
+/// A group of repos that share a set of interest rules. Conventions differ per
+/// project, so rules are duplicated across projects rather than shared.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Repo {
+pub struct Project {
+    /// Optional label, used in reason strings and diagnostics.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The repos in this project.
+    pub repos: Vec<RepoRef>,
+    /// Interest rules, matched against every repo in the project. `A PR is
+    /// interesting if ANY rule matches.` `[[project.interest]]` in TOML.
+    #[serde(default)]
+    pub interest: Vec<InterestRule>,
+    /// Relationships that involve me in this project's PRs. Overrides
+    /// `[involvement].reasons` when set; inherits it when omitted.
+    #[serde(default)]
+    pub involvement: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RepoRef {
     pub owner: String,
     pub name: String,
     /// The host the repo lives on; selects its `[forge]` entry. Defaults to
@@ -46,17 +71,69 @@ pub struct Repo {
     pub host: String,
 }
 
+impl RepoRef {
+    pub fn slug(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+}
+
 fn default_host() -> String {
     DEFAULT_HOST.to_string()
 }
 
+/// One interest rule. Today exactly one dimension may be set; the loader
+/// rejects a rule that sets more than one, so the future "A and B" conjunction
+/// is a config change, not a redesign.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
-pub struct Interest {
+pub struct InterestRule {
+    /// Optional label; when set it becomes the rule's reason string.
+    pub name: Option<String>,
     pub labels: Vec<String>,
     pub paths: Vec<String>,
     pub author_associations: Vec<String>,
     pub milestones: Vec<String>,
+}
+
+impl InterestRule {
+    /// Convert to a core rule input, enforcing the one-dimension-per-rule gate.
+    fn to_input(&self) -> Result<RuleInput> {
+        let mut conditions = Vec::new();
+        if !self.labels.is_empty() {
+            conditions.push(ConditionInput::Labels(self.labels.clone()));
+        }
+        if !self.paths.is_empty() {
+            conditions.push(ConditionInput::Paths(self.paths.clone()));
+        }
+        if !self.author_associations.is_empty() {
+            conditions.push(ConditionInput::Authors(self.author_associations.clone()));
+        }
+        if !self.milestones.is_empty() {
+            conditions.push(ConditionInput::Milestones(self.milestones.clone()));
+        }
+        match conditions.len() {
+            1 => Ok(RuleInput {
+                name: self.name.clone(),
+                conditions,
+            }),
+            0 => bail!(
+                "interest rule{} sets no condition (needs one of labels/paths/\
+                 author_associations/milestones)",
+                self.name
+                    .as_deref()
+                    .map(|n| format!(" {n:?}"))
+                    .unwrap_or_default(),
+            ),
+            n => bail!(
+                "interest rule{} sets {n} conditions; combining conditions in one rule \
+                 isn't supported yet — split them into separate rules",
+                self.name
+                    .as_deref()
+                    .map(|n| format!(" {n:?}"))
+                    .unwrap_or_default(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -116,6 +193,32 @@ impl Default for Sync {
     }
 }
 
+/// Which relationships to me make a PR "involved". Each maps to a GitHub search
+/// qualifier run against the repo, so involvement is found the same way as
+/// interest — no notifications API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Involvement {
+    /// The relationships to search for: `review_requested`, `mention`,
+    /// `assign`, `author`, `comment`.
+    pub reasons: Vec<String>,
+}
+
+impl Default for Involvement {
+    fn default() -> Self {
+        // The "a human pulled me in and I couldn't otherwise know" signals.
+        // `author`/`comment` are deliberately out of the default — the M3
+        // attention state machine handles those cases more precisely — but
+        // remain available to anyone who lists them.
+        Self {
+            reasons: ["review_requested", "mention", "assign"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
 /// Outcome of resolving the config, so callers can tell the user that a config
 /// was just created for them.
 #[derive(Debug)]
@@ -167,43 +270,116 @@ fn load_from(path: &Path, create_if_missing: bool) -> Result<Loaded> {
 
 impl Config {
     fn validate(&self, path: &Path) -> Result<()> {
+        let at = || path.display();
+
         if self.identity.login.trim().is_empty() {
             bail!(
                 "identity.login is empty in {} — set it to your GitHub login",
-                path.display()
-            );
-        }
-        if self.repo.owner.trim().is_empty() || self.repo.name.trim().is_empty() {
-            bail!(
-                "repo.owner and repo.name must both be set in {}",
-                path.display()
+                at()
             );
         }
         if self.handoff.review_command.is_empty() {
-            bail!("handoff.review_command is empty in {}", path.display());
+            bail!("handoff.review_command is empty in {}", at());
         }
-        if self.repo.host.trim().is_empty() {
-            bail!("repo.host is empty in {}", path.display());
+
+        let repos: Vec<&RepoRef> = self.repos().collect();
+        if repos.is_empty() {
+            bail!(
+                "no repos configured in {} — add a [[project]] with a repo",
+                at()
+            );
         }
-        self.forge_host().with_context(|| {
-            format!(
-                "resolving the forge host for {} in {}",
-                self.slug(),
-                path.display()
-            )
-        })?;
+        // Multi-repo isn't wired into the ledger yet (PR numbers collide across
+        // repos without a composite key), so the config is modelled for many
+        // but gated to one. See the schema when lifting this.
+        if repos.len() > 1 {
+            bail!(
+                "{} repos configured in {}, but multi-repo isn't supported yet — \
+                 configure a single repo for now",
+                repos.len(),
+                at()
+            );
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for repo in &repos {
+            if repo.owner.trim().is_empty() || repo.name.trim().is_empty() {
+                bail!("a repo is missing owner or name in {}", at());
+            }
+            if repo.host.trim().is_empty() {
+                bail!("repo {} has an empty host in {}", repo.slug(), at());
+            }
+            if !seen.insert(repo.slug()) {
+                bail!(
+                    "repo {} appears in more than one project in {}",
+                    repo.slug(),
+                    at()
+                );
+            }
+            resolve_host(&self.forges, &repo.host).with_context(|| {
+                format!("resolving the forge host for {} in {}", repo.slug(), at())
+            })?;
+        }
+
+        // Compile every project's rules so glob errors and the
+        // one-condition-per-rule gate surface at load, not mid-sync.
+        for project in &self.projects {
+            self.interest_for(project)
+                .with_context(|| format!("in project {} in {}", project.label(), at()))?;
+        }
         Ok(())
     }
 
-    pub fn slug(&self) -> String {
-        format!("{}/{}", self.repo.owner, self.repo.name)
+    /// Every repo across every project.
+    pub fn repos(&self) -> impl Iterator<Item = &RepoRef> {
+        self.projects.iter().flat_map(|p| p.repos.iter())
     }
 
-    /// The resolved forge settings for the configured repo host, with a
-    /// supported provider. Errors if the host is neither built in nor
-    /// configured, or names a provider without an adapter.
-    pub fn forge_host(&self) -> Result<ForgeHost> {
-        resolve_host(&self.forges, &self.repo.host)
+    /// The sole repo and the project that owns it. Valid because the loader
+    /// currently gates the config to exactly one repo.
+    pub fn sole_repo(&self) -> Result<(&Project, &RepoRef)> {
+        for project in &self.projects {
+            if let Some(repo) = project.repos.first() {
+                return Ok((project, repo));
+            }
+        }
+        bail!("no repo configured")
+    }
+
+    /// The resolved forge settings for `repo`'s host, with a supported provider.
+    pub fn forge_host_for(&self, repo: &RepoRef) -> Result<ForgeHost> {
+        resolve_host(&self.forges, &repo.host)
+    }
+
+    /// The relationships that involve me in `project`: its own override if set,
+    /// else the global default.
+    pub fn involving_reasons<'a>(&'a self, project: &'a Project) -> &'a [String] {
+        project
+            .involvement
+            .as_deref()
+            .unwrap_or(&self.involvement.reasons)
+    }
+
+    /// Compile a project's interest rules into the pure evaluator.
+    pub fn interest_for(&self, project: &Project) -> Result<Interest> {
+        let inputs = project
+            .interest
+            .iter()
+            .map(InterestRule::to_input)
+            .collect::<Result<Vec<_>>>()?;
+        Interest::compile(inputs).context("compiling interest globs")
+    }
+}
+
+impl Project {
+    /// A name for messages: the configured name, else the first repo's slug.
+    pub fn label(&self) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            self.repos
+                .first()
+                .map(RepoRef::slug)
+                .unwrap_or_else(|| "<empty>".to_string())
+        })
     }
 }
 
@@ -211,35 +387,163 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// A minimal valid config: one project, one repo, one rule.
+    fn minimal(extra: &str) -> String {
+        format!(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            name = "airflow"
+            repos = [{{ owner = "apache", name = "airflow" }}]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            {extra}
+            "#
+        )
+    }
+
     #[test]
     fn default_config_parses_and_validates() {
         let config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
         config
             .validate(Path::new("default"))
             .expect("default config validates");
-        assert_eq!(config.slug(), "apache/airflow");
+        let (_project, repo) = config.sole_repo().expect("one repo");
+        assert_eq!(repo.slug(), "apache/airflow");
     }
 
     #[test]
     fn omitted_sections_fall_back_to_defaults() {
-        let config: Config = toml::from_str(
-            r#"
-            [identity]
-            login = "ashb"
-            [repo]
-            owner = "apache"
-            name = "airflow"
-            "#,
-        )
-        .expect("minimal config parses");
+        let config: Config = toml::from_str(&minimal("")).expect("minimal config parses");
+        config.validate(Path::new("cfg")).expect("validates");
 
         assert_eq!(config.sync.bootstrap_days, 14);
         assert_eq!(config.handoff.review_command[0], "wiff");
         assert!(config.bots.logins.contains(&"codecov[bot]".to_string()));
-        assert!(config.interest.labels.is_empty());
-        assert_eq!(config.repo.host, "github.com");
-        let host = config.forge_host().expect("built-in github host");
+
+        let (_project, repo) = config.sole_repo().unwrap();
+        assert_eq!(repo.host, "github.com");
+        let host = config.forge_host_for(repo).expect("built-in github host");
         assert_eq!(host.provider.as_deref(), Some("github"));
+    }
+
+    #[test]
+    fn nested_interest_rules_parse() {
+        let config: Config = toml::from_str(&minimal(
+            r#"
+            [[project.interest]]
+            name = "serialization"
+            paths = ["airflow-core/src/airflow/serialization/**"]
+            [[project.interest]]
+            author_associations = ["FIRST_TIME_CONTRIBUTOR"]
+            "#,
+        ))
+        .expect("parses");
+
+        let (project, _repo) = config.sole_repo().unwrap();
+        assert_eq!(project.interest.len(), 3);
+        config.interest_for(project).expect("compiles");
+    }
+
+    #[test]
+    fn involving_reasons_default_then_project_override() {
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        let (project, _repo) = config.sole_repo().unwrap();
+        // Global default: the lean human-pulled-me-in set, no `subscribed`.
+        assert_eq!(
+            config.involving_reasons(project),
+            ["review_requested", "mention", "assign"]
+        );
+
+        let overridden: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            involvement = ["mention"]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            "#,
+        )
+        .expect("parses");
+        let (project, _repo) = overridden.sole_repo().unwrap();
+        assert_eq!(overridden.involving_reasons(project), ["mention"]);
+    }
+
+    #[test]
+    fn a_rule_with_two_dimensions_is_rejected_for_now() {
+        let config: Config = toml::from_str(&minimal(
+            r#"
+            [[project.interest]]
+            author_associations = ["FIRST_TIME_CONTRIBUTOR"]
+            paths = ["task-sdk/**"]
+            "#,
+        ))
+        .expect("parses");
+
+        let err = config.validate(Path::new("cfg")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("isn't supported yet"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_rule_with_no_condition_is_rejected() {
+        let config: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            name = "empty"
+            "#,
+        )
+        .expect("parses");
+
+        let err = config.validate(Path::new("cfg")).unwrap_err();
+        assert!(format!("{err:#}").contains("sets no condition"), "{err:#}");
+    }
+
+    #[test]
+    fn more_than_one_repo_is_rejected_for_now() {
+        let config: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [
+              { owner = "apache", name = "airflow" },
+              { owner = "astronomer", name = "astro" },
+            ]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            "#,
+        )
+        .expect("parses");
+
+        let err = config.validate(Path::new("cfg")).unwrap_err();
+        assert!(
+            err.to_string().contains("multi-repo isn't supported yet"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn no_repo_is_rejected() {
+        let config: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            "#,
+        )
+        .expect("parses");
+
+        let err = config.validate(Path::new("cfg")).unwrap_err();
+        assert!(err.to_string().contains("no repos configured"), "{err:#}");
     }
 
     #[test]
@@ -248,10 +552,10 @@ mod tests {
             r#"
             [identity]
             login = "ashb"
-            [repo]
-            owner = "acme"
-            name = "widgets"
-            host = "git.acme.example"
+            [[project]]
+            repos = [{ owner = "acme", name = "widgets", host = "git.acme.example" }]
+            [[project.interest]]
+            labels = ["x"]
             "#,
         )
         .expect("config parses");
@@ -266,10 +570,10 @@ mod tests {
             r#"
             [identity]
             login = "ashb"
-            [repo]
-            owner = "acme"
-            name = "widgets"
-            host = "github.acme.example"
+            [[project]]
+            repos = [{ owner = "acme", name = "widgets", host = "github.acme.example" }]
+            [[project.interest]]
+            labels = ["x"]
 
             [forge."github.acme.example"]
             provider = "github"
@@ -279,7 +583,8 @@ mod tests {
         .expect("config parses");
 
         config.validate(Path::new("cfg.toml")).expect("validates");
-        let host = config.forge_host().expect("configured host");
+        let (_project, repo) = config.sole_repo().unwrap();
+        let host = config.forge_host_for(repo).expect("configured host");
         assert_eq!(
             host.api_base.as_deref(),
             Some("https://github.acme.example/api/v3")
@@ -287,38 +592,10 @@ mod tests {
     }
 
     #[test]
-    fn a_host_with_an_unsupported_provider_is_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-            [identity]
-            login = "ashb"
-            [repo]
-            owner = "acme"
-            name = "widgets"
-            host = "git.acme.example"
-
-            [forge."git.acme.example"]
-            provider = "gitlab"
-            "#,
-        )
-        .expect("config parses");
-
-        let err = config.forge_host().unwrap_err();
-        assert!(err.to_string().contains("no adapter yet"));
-    }
-
-    #[test]
     fn empty_login_is_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-            [identity]
-            login = "  "
-            [repo]
-            owner = "apache"
-            name = "airflow"
-            "#,
-        )
-        .expect("config parses");
+        let config: Config =
+            toml::from_str(&minimal("").replace(r#"login = "ashb""#, r#"login = "  ""#))
+                .expect("config parses");
 
         let err = config.validate(Path::new("cfg.toml")).unwrap_err();
         assert!(err.to_string().contains("identity.login is empty"));
@@ -355,17 +632,12 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_tolerated() {
-        toml::from_str::<Config>(
+        toml::from_str::<Config>(&minimal(
             r#"
-            [identity]
-            login = "ashb"
-            [repo]
-            owner = "apache"
-            name = "airflow"
             [future]
             thing = 1
             "#,
-        )
+        ))
         .expect("forward-compatible");
     }
 }

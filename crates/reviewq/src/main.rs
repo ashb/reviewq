@@ -28,12 +28,17 @@ async fn main() -> ExitCode {
 }
 
 /// Quiet by default; `-v` raises our own level, `RUST_LOG` overrides entirely.
+///
+/// octocrab is pinned quiet at every `-v` level — its per-request HTTP tracing
+/// (`HTTP{…}: requesting` / `stream closed`, one pair per page) drowns out our
+/// own logs and says nothing useful. Anyone who genuinely wants the raw HTTP
+/// trace can ask for it explicitly with `RUST_LOG=octocrab=debug`.
 fn init_tracing(verbose: u8) {
     let default = match verbose {
         0 => "warn",
-        1 => "reviewq=info",
-        2 => "reviewq=debug",
-        _ => "reviewq=trace,octocrab=debug",
+        1 => "reviewq=info,octocrab=warn",
+        2 => "reviewq=debug,octocrab=warn",
+        _ => "reviewq=trace,octocrab=warn",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
 

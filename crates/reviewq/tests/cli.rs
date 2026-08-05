@@ -38,13 +38,31 @@ fn help_and_version_succeed() {
 }
 
 #[test]
-fn doctor_is_reachable() {
-    let output = run(&["doctor", "--help"]);
-    assert!(
-        output.status.success(),
-        "`doctor --help` failed: {}",
-        stderr(&output)
-    );
+fn every_subcommand_is_reachable() {
+    for name in ["sync", "list", "doctor"] {
+        let output = run(&[name, "--help"]);
+        assert!(
+            output.status.success(),
+            "`{name} --help` failed: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn list_rejects_contradictory_buckets() {
+    let output = run(&["list", "--all", "--waiting"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("cannot be used with"));
+}
+
+#[test]
+fn the_queue_says_it_needs_the_state_machine() {
+    // `list` with no --all is the queue, which M3 will build. Until then it
+    // must explain itself rather than silently print nothing.
+    let output = run(&["list"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("state machine"));
 }
 
 #[test]

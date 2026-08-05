@@ -1,45 +1,64 @@
 # reviewq configuration.
 #
-# A PR is *tracked* if it matches any interest rule below, or if GitHub says I
-# am already involved. Every queue item carries a reason string naming the rule
-# that produced it; `reviewq show N` prints it.
+# A PR is *tracked* if it matches any interest rule in its project, or if GitHub
+# says I am already involved. Every queue item carries a reason string naming
+# the rule that produced it; `reviewq show N` prints it.
 
 [identity]
 # Whose queue this is. All attention reasons are computed relative to this login.
 login = "ashb"
 
-[repo]
-owner = "apache"
-name = "airflow"
-# The host this repo lives on; selects its [forge] entry below. Defaults to
-# "github.com", so leave it unless the repo is on a self-hosted instance.
-# host = "github.com"
+# A project bundles one or more repos with the interest rules that apply to
+# them. Add more [[project]] blocks for other codebases; each carries its own
+# rules, since conventions differ per project. (Multiple repos are modelled but
+# not wired up yet — configure a single repo for now.)
+[[project]]
+name  = "airflow"
+repos = [{ owner = "apache", name = "airflow" }]
+# A repo on a self-hosted instance names its host, which selects a [forge] entry
+# below; the default is "github.com":
+#   repos = [{ owner = "acme", name = "widgets", host = "github.acme.example" }]
 
-[interest]
-# A PR matches if ANY rule here matches.
+# Interest rules. A PR is interesting if ANY rule matches. Each rule tests one
+# dimension for now; within a dimension, any listed value matches.
 
 # Labels. apache/airflow's boring-cyborg.yml maps paths -> area/provider labels
 # upstream, so labels do most of the work and stay maintained for free.
-labels = [
-  "area:task-sdk",
-  "area:serialization",
-  "area:Executors-core",
-  "area:Scheduler",
-]
+[[project.interest]]
+labels = ["area:task-sdk", "area:serialization", "area:Executors-core", "area:Scheduler"]
 
 # Path globs matched against changed-file paths, for what labels miss.
-paths = [
-  "task-sdk/**",
-  "airflow-core/src/airflow/serialization/**",
-]
+[[project.interest]]
+paths = ["task-sdk/**", "airflow-core/src/airflow/serialization/**"]
 
 # Author classes that raise interest even off-label.
 # GitHub values: FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, NONE, CONTRIBUTOR,
 # COLLABORATOR, MEMBER, OWNER.
+[[project.interest]]
 author_associations = ["FIRST_TIME_CONTRIBUTOR"]
 
 # Milestones I'm watching (substring match against the milestone title).
+[[project.interest]]
 milestones = ["3.2"]
+
+# A rule may carry an optional `name`, which becomes its reason string:
+#   [[project.interest]]
+#   name = "task-sdk"
+#   labels = ["area:task-sdk"]
+
+[involvement]
+# Relationships to you that make a PR "involved" and surface it, even off your
+# interest rules. Each is found with a GitHub search — the same mechanism as
+# interest, no notifications firehose:
+#   review_requested -> review-requested:you    assign  -> assignee:you
+#   mention          -> mentions:you            author  -> author:you
+#                                               comment -> commenter:you
+#
+# `author` and `comment` are left out of the default on purpose — the attention
+# state machine handles replies on your threads and reviews of your PRs more
+# precisely — but you can add them. A [[project]] may set its own `involvement`
+# list to override this per project (e.g. only ["mention"] for a repo you lurk).
+reasons = ["review_requested", "mention", "assign"]
 
 [bots]
 # Comments by these accounts never trigger an attention reason.
@@ -61,15 +80,21 @@ page_size = 50
 # whole section is optional. A user entry overlays the built-in field by field.
 #
 # Token resolution for a host, in order: $REVIEWQ_GITHUB_TOKEN, then the host's
-# token_file_env, then its token_env, then (github only) $GH_TOKEN, then
-# `gh auth token`.
+# token_file_env, then its token_env, then (github only) $GH_TOKEN, then the
+# host's token_command, then (github only) `gh auth token`. Env sources come
+# first, so an unattended cron/systemd run that sets a token variable never
+# blocks on an interactive unlock prompt.
+#
+# token_command runs a program (argv, no shell) and reads the token from its
+# stdout — handy for a secret manager. For example, pull it from 1Password:
+#   [forge."github.com"]
+#   token_command = ["op", "read", "op://Private/GitHub/token"]
+# or reuse a configured 1Password gh plugin:
+#   token_command = ["op", "plugin", "run", "--", "gh", "auth", "token"]
 #
 # For a GitHub Enterprise host:
-#   [repo]
-#   host = "github.mycorp.com"
-#
-#   [forge."github.mycorp.com"]
+#   [forge."github.acme.example"]
 #   provider = "github"
-#   api_base = "https://github.mycorp.com/api/v3"
-#   token_env = "MYCORP_GH_TOKEN"
-#   token_file_env = "MYCORP_GH_TOKEN_FILE"
+#   api_base = "https://github.acme.example/api/v3"
+#   token_env = "ACME_GH_TOKEN"
+#   token_file_env = "ACME_GH_TOKEN_FILE"
