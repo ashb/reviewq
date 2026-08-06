@@ -2,6 +2,15 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// Parse a PR number, tolerating a leading `#` so a number copied straight out
+/// of `list`/`show` output pastes in unedited.
+fn pr_number(s: &str) -> Result<u64, String> {
+    s.strip_prefix('#')
+        .unwrap_or(s)
+        .parse()
+        .map_err(|_| format!("{s:?} is not a PR number"))
+}
+
 /// A deterministic PR review queue.
 ///
 /// Every queue item names the rule that produced it.
@@ -94,6 +103,7 @@ pub struct NextArgs {
 #[derive(Debug, Args)]
 pub struct ShowArgs {
     /// The PR number.
+    #[arg(value_parser = pr_number)]
     pub number: u64,
 
     /// Emit machine-readable JSON.
@@ -105,12 +115,14 @@ pub struct ShowArgs {
 #[derive(Debug, Args)]
 pub struct NumberArgs {
     /// The PR number.
+    #[arg(value_parser = pr_number)]
     pub number: u64,
 }
 
 #[derive(Debug, Args)]
 pub struct SnoozeArgs {
     /// The PR number.
+    #[arg(value_parser = pr_number)]
     pub number: u64,
 
     /// How long to suppress it, e.g. `3d`, `12h`, `1w2d`.
@@ -137,5 +149,28 @@ mod tests {
     #[test]
     fn a_subcommand_is_required() {
         assert!(Cli::try_parse_from(["reviewq"]).is_err());
+    }
+
+    #[test]
+    fn a_pr_number_sheds_a_leading_hash_so_pasted_output_just_works() {
+        let cli = Cli::try_parse_from(["reviewq", "show", "#42"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Show(ShowArgs { number: 42, .. })
+        ));
+    }
+
+    #[test]
+    fn a_bare_pr_number_still_parses() {
+        let cli = Cli::try_parse_from(["reviewq", "mute", "42"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Mute(NumberArgs { number: 42 })
+        ));
+    }
+
+    #[test]
+    fn garbage_after_the_hash_is_rejected() {
+        assert!(Cli::try_parse_from(["reviewq", "mute", "#nope"]).is_err());
     }
 }
