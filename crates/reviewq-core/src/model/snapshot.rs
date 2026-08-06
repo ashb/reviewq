@@ -146,6 +146,20 @@ impl Verdict {
     }
 }
 
+/// One reviewer's most recent submitted verdict on a PR — everyone who has
+/// reviewed, not just me. Mirrors the `reviewers` ledger table. Purely
+/// informational: `classify` never reads this, only [`MyState`]'s own review
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ReviewerVerdict {
+    /// The reviewer's login.
+    pub login: String,
+    /// Their most recent submitted verdict.
+    pub verdict: Verdict,
+    /// When they submitted it.
+    pub at: Timestamp,
+}
+
 /// One review thread. Mirrors the `threads` ledger table.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ThreadState {

@@ -5,7 +5,9 @@
 //! second provider is where they would earn a more neutral form.
 
 use jiff::Timestamp;
-use reviewq_core::model::{Mention, PrSnapshot, ReviewRequest, ThreadState, Verdict};
+use reviewq_core::model::{
+    Mention, PrSnapshot, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
+};
 use serde::Deserialize;
 
 /// GitHub search returns at most this many results however many match, so a
@@ -90,6 +92,8 @@ pub struct PrDetail {
     /// The PR's review threads, from my point of view (`i_own`, my last
     /// comment, ...).
     pub threads: Vec<ThreadState>,
+    /// Every reviewer's most recent submitted verdict, not just mine.
+    pub reviewers: Vec<ReviewerVerdict>,
     /// @mentions of me, from others, across comments and reviews.
     pub mentions: Vec<Mention>,
     /// Commits pushed since my last review; zero if I have not reviewed.

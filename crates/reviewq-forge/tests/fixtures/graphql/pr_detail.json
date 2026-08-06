@@ -24,6 +24,27 @@
             "submittedAt": null,
             "commit": null,
             "body": ""
+          },
+          {
+            "author": { "login": "kaxil" },
+            "state": "APPROVED",
+            "submittedAt": "2026-08-03T09:00:00Z",
+            "commit": { "oid": "def456f8901234567890123456789012345678cd" },
+            "body": "LGTM too"
+          },
+          {
+            "author": { "login": "uranusjr" },
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-08-02T09:00:00Z",
+            "commit": { "oid": "111222f8901234567890123456789012345678ef" },
+            "body": "needs work"
+          },
+          {
+            "author": { "login": "uranusjr" },
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-04T09:00:00Z",
+            "commit": null,
+            "body": "still thinking"
           }
         ]
       },

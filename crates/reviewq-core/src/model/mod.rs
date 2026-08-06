@@ -10,4 +10,4 @@ mod snapshot;
 
 pub use classify::{ClassifyCtx, Mention, ReviewRequest, classify};
 pub use reason::{Attention, AttentionReason};
-pub use snapshot::{MyState, PrSnapshot, PrState, ThreadState, Verdict};
+pub use snapshot::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};

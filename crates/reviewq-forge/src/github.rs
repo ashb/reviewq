@@ -5,12 +5,16 @@
 //! PR's changed files in the same query, so there is no separate file round
 //! trip and a PR arrives ready to classify.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use jiff::Timestamp;
 use octocrab::Octocrab;
 use octocrab::models::activity::Notification;
-use reviewq_core::model::{Mention, PrSnapshot, PrState, ReviewRequest, ThreadState, Verdict};
+use reviewq_core::model::{
+    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
+};
 use serde::Deserialize;
 
 use crate::types::{PrDetail, RateLimit, SweepPage, Viewer};
@@ -513,6 +517,12 @@ impl DetailPr {
         // My latest parseable review sets last_reviewed_sha / verdict; every one
         // of my reviews counts toward last_action_at.
         let mut last: Option<(Timestamp, Verdict, Option<String>)> = None;
+        // Everyone's latest parseable review, not just mine — purely
+        // informational, so a dismissed or superseded-by-a-plain-comment
+        // review is dropped the same way `last`/`last_verdict` already treats
+        // mine: whichever review has the newest `submittedAt` wins, dismissal
+        // notwithstanding.
+        let mut reviewer_latest: BTreeMap<String, (Timestamp, Verdict)> = BTreeMap::new();
         for review in &self.reviews.nodes {
             let mine = author_login(&review.author) == Some(login);
             if mine && let Some(at) = review.submitted_at {
@@ -522,6 +532,20 @@ impl DetailPr {
                 mention_from(&review.author, review.submitted_at, &review.body, login)
             {
                 mentions.push(other);
+            }
+            if let Some(reviewer) = author_login(&review.author)
+                && let Some(verdict) = Verdict::from_wire(&review.state)
+                && let Some(at) = review.submitted_at
+            {
+                reviewer_latest
+                    .entry(reviewer.to_string())
+                    .and_modify(|(cur_at, cur_verdict)| {
+                        if at > *cur_at {
+                            *cur_at = at;
+                            *cur_verdict = verdict;
+                        }
+                    })
+                    .or_insert((at, verdict));
             }
             if !mine {
                 continue;
@@ -540,6 +564,10 @@ impl DetailPr {
             Some((at, v, sha)) => (Some(at), Some(v), sha),
             None => (None, None, None),
         };
+        let reviewers = reviewer_latest
+            .into_iter()
+            .map(|(login, (at, verdict))| ReviewerVerdict { login, verdict, at })
+            .collect();
 
         for comment in &self.comments.nodes {
             if author_login(&comment.author) == Some(login) {
@@ -584,6 +612,7 @@ impl DetailPr {
             last_verdict,
             last_action_at: action_times.into_iter().max(),
             threads,
+            reviewers,
             mentions,
             new_commits,
             review_request,
@@ -746,6 +775,18 @@ mod tests {
             "my latest submitted review sets the reviewed sha; the PENDING one is ignored"
         );
         assert_eq!(detail.last_verdict, Some(Verdict::Approved));
+        let reviewers: std::collections::BTreeMap<_, _> = detail
+            .reviewers
+            .iter()
+            .map(|r| (r.login.as_str(), r.verdict))
+            .collect();
+        assert_eq!(detail.reviewers.len(), 3, "ashb, kaxil, uranusjr");
+        assert_eq!(reviewers.get("ashb"), Some(&Verdict::Approved));
+        assert_eq!(reviewers.get("kaxil"), Some(&Verdict::Approved));
+        // uranusjr requested changes, then later left a plain comment review —
+        // the same "latest submitted review wins" rule already applied to my
+        // own last_verdict above.
+        assert_eq!(reviewers.get("uranusjr"), Some(&Verdict::Commented));
         // Two commits land after my 10:00 review.
         assert_eq!(detail.new_commits, 2);
         // A direct request to me fires; the team request does not.

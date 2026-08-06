@@ -9,7 +9,7 @@ mod schema;
 use anyhow::{Context, Result};
 use jiff::Timestamp;
 use reviewq_core::model::{
-    Attention, AttentionReason, MyState, PrSnapshot, PrState, ThreadState, Verdict,
+    Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
 };
 use rusqlite::types::Type;
 use rusqlite::{Connection, Error::FromSqlConversionFailure, OptionalExtension, params};
@@ -102,6 +102,8 @@ pub struct PrShow {
     pub my_state: MyState,
     /// Its review threads.
     pub threads: Vec<ThreadState>,
+    /// Every reviewer's most recent submitted verdict, not just mine.
+    pub reviewers: Vec<ReviewerVerdict>,
     /// Every attention reason it currently holds, most-urgent first.
     pub attention: Vec<AttentionRow>,
 }
@@ -389,26 +391,28 @@ impl Ledger {
     /// Persist a PR's tier-2 detail and freshly-classified attention in one
     /// transaction: the forge-derived half of my history (`last_reviewed_sha`,
     /// `last_verdict`, `last_action_at` — see
-    /// [`write_forge_state`]), its threads (replaced wholesale), the attention
-    /// rows (likewise), and the detail-sync watermark. Atomic so an
-    /// interrupted detail pass leaves each PR either fully updated or
-    /// untouched. `my_state` is read by the caller beforehand for
-    /// [`classify`](reviewq_core::model::classify) to decide against, but only
-    /// its forge-derived fields are written back here — the user-set fields
-    /// (`done_sha`, `snoozed_until`, `muted`, `deferred_at`, `done_at`) are
-    /// never touched, so a `reviewq done`/`snooze`/`mute`/`defer` racing this
-    /// call can never be lost, in either direction.
+    /// [`write_forge_state`]), its threads (replaced wholesale), every
+    /// reviewer's verdict (likewise), the attention rows (likewise), and the
+    /// detail-sync watermark. Atomic so an interrupted detail pass leaves each
+    /// PR either fully updated or untouched. `my_state` is read by the caller
+    /// beforehand for [`classify`](reviewq_core::model::classify) to decide
+    /// against, but only its forge-derived fields are written back here — the
+    /// user-set fields (`done_sha`, `snoozed_until`, `muted`, `deferred_at`,
+    /// `done_at`) are never touched, so a `reviewq done`/`snooze`/`mute`/`defer`
+    /// racing this call can never be lost, in either direction.
     pub fn commit_detail(
         &self,
         number: u64,
         my_state: &MyState,
         threads: &[ThreadState],
+        reviewers: &[ReviewerVerdict],
         attention: &[Attention],
         now: Timestamp,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         write_forge_state(&tx, number, my_state)?;
         replace_threads(&tx, number, threads)?;
+        replace_reviewers(&tx, number, reviewers)?;
         replace_attention(&tx, number, attention)?;
         // Stored at whole-second precision so the lexicographic comparison in
         // `prs_needing_detail` against GitHub's whole-second `updatedAt` is
@@ -560,14 +564,28 @@ impl Ledger {
 
         let my_state = self.my_state(number)?;
         let threads = self.threads(number)?;
+        let reviewers = self.reviewers(number)?;
         let attention = self.attention(number)?;
         Ok(Some(PrShow {
             pr,
             tracked_reason,
             my_state,
             threads,
+            reviewers,
             attention,
         }))
+    }
+
+    /// A PR's reviewers, most recently submitted first.
+    fn reviewers(&self, number: u64) -> Result<Vec<ReviewerVerdict>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT login, verdict, submitted_at FROM reviewers \
+             WHERE pr_number = ?1 ORDER BY submitted_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![number as i64], row_to_reviewer)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// A PR's review threads, ordered by id for stability.
@@ -797,6 +815,17 @@ fn row_to_my_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyState> {
     })
 }
 
+fn row_to_reviewer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewerVerdict> {
+    let verdict_str: String = row.get(1)?;
+    let verdict = Verdict::from_wire(&verdict_str)
+        .ok_or_else(|| decode_err(format!("bad verdict {verdict_str:?}").into()))?;
+    Ok(ReviewerVerdict {
+        login: row.get(0)?,
+        verdict,
+        at: parse_ts(&row.get::<_, String>(2)?)?,
+    })
+}
+
 fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadState> {
     let last_comment_at: Option<String> = row.get(5)?;
     let my_last_comment_at: Option<String> = row.get(6)?;
@@ -884,6 +913,21 @@ fn replace_threads(conn: &Connection, number: u64, threads: &[ThreadState]) -> R
             ],
         )
         .with_context(|| format!("writing thread {} for #{number}", t.thread_id))?;
+    }
+    Ok(())
+}
+
+fn replace_reviewers(conn: &Connection, number: u64, reviewers: &[ReviewerVerdict]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM reviewers WHERE pr_number = ?1",
+        params![number as i64],
+    )?;
+    for r in reviewers {
+        conn.execute(
+            "INSERT INTO reviewers (pr_number, login, verdict, submitted_at) VALUES (?1,?2,?3,?4)",
+            params![number as i64, r.login, r.verdict.as_str(), r.at.to_string()],
+        )
+        .with_context(|| format!("writing reviewer {} for #{number}", r.login))?;
     }
     Ok(())
 }
@@ -1147,7 +1191,9 @@ mod tests {
             deferred_at: Some(ts("2026-08-06T00:00:00Z")),
             done_at: Some(ts("2026-08-06T00:00:00Z")),
         };
-        ledger.commit_detail(1, &state, &[], &[], now()).unwrap();
+        ledger
+            .commit_detail(1, &state, &[], &[], &[], now())
+            .unwrap();
 
         let stored = ledger.my_state(1).unwrap();
         assert_eq!(stored.last_reviewed_sha, state.last_reviewed_sha);
@@ -1179,6 +1225,7 @@ mod tests {
                     last_action_at: Some(ts("2026-08-05T09:00:00Z")),
                     ..Default::default()
                 },
+                &[],
                 &[],
                 &[],
                 now(),
@@ -1260,7 +1307,7 @@ mod tests {
             "2026-08-05T08:30:00Z",
         )];
         ledger
-            .commit_detail(1, &MyState::default(), &[thread], &first, now())
+            .commit_detail(1, &MyState::default(), &[thread], &[], &first, now())
             .unwrap();
 
         let show = ledger.show(1).unwrap().unwrap();
@@ -1274,11 +1321,49 @@ mod tests {
         // A second detail pass with nothing wipes the earlier rows rather than
         // accumulating them.
         ledger
-            .commit_detail(1, &MyState::default(), &[], &[], now())
+            .commit_detail(1, &MyState::default(), &[], &[], &[], now())
             .unwrap();
         let show = ledger.show(1).unwrap().unwrap();
         assert!(show.threads.is_empty());
         assert!(show.attention.is_empty());
+    }
+
+    #[test]
+    fn commit_detail_replaces_reviewers_wholesale() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+
+        let approved = ReviewerVerdict {
+            login: "kaxil".into(),
+            verdict: Verdict::Approved,
+            at: ts("2026-08-05T08:00:00Z"),
+        };
+        let changes_requested = ReviewerVerdict {
+            login: "uranusjr".into(),
+            verdict: Verdict::ChangesRequested,
+            at: ts("2026-08-05T09:00:00Z"),
+        };
+        ledger
+            .commit_detail(
+                1,
+                &MyState::default(),
+                &[],
+                &[approved.clone(), changes_requested.clone()],
+                &[],
+                now(),
+            )
+            .unwrap();
+
+        let show = ledger.show(1).unwrap().unwrap();
+        // Most recently submitted first.
+        assert_eq!(show.reviewers, vec![changes_requested, approved]);
+
+        // A second detail pass with nobody left approving replaces the row
+        // rather than accumulating alongside it.
+        ledger
+            .commit_detail(1, &MyState::default(), &[], &[], &[], now())
+            .unwrap();
+        assert!(ledger.show(1).unwrap().unwrap().reviewers.is_empty());
     }
 
     #[test]
@@ -1292,6 +1377,7 @@ mod tests {
             .commit_detail(
                 1,
                 &MyState::default(),
+                &[],
                 &[],
                 &[
                     attn(
@@ -1313,6 +1399,7 @@ mod tests {
             .commit_detail(
                 2,
                 &MyState::default(),
+                &[],
                 &[],
                 &[attn(
                     AttentionReason::NeedsFirstLook { rule: "y".into() },
@@ -1340,6 +1427,7 @@ mod tests {
                 1,
                 &MyState::default(),
                 &[],
+                &[],
                 &[attn(
                     AttentionReason::Mention {
                         by: "potiuk".into(),
@@ -1362,7 +1450,14 @@ mod tests {
         track(&ledger, &pr(2));
         // #2 synced after its updatedAt: fresh, so excluded.
         ledger
-            .commit_detail(2, &MyState::default(), &[], &[], ts("2026-08-06T00:00:00Z"))
+            .commit_detail(
+                2,
+                &MyState::default(),
+                &[],
+                &[],
+                &[],
+                ts("2026-08-06T00:00:00Z"),
+            )
             .unwrap();
 
         let need = ledger.prs_needing_detail(false).unwrap();
@@ -1404,6 +1499,7 @@ mod tests {
                 1,
                 &MyState::default(),
                 &[],
+                &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
                 now(),
             )
@@ -1422,6 +1518,7 @@ mod tests {
             .commit_detail(
                 1,
                 &MyState::default(),
+                &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
                 now(),
@@ -1445,6 +1542,7 @@ mod tests {
             .commit_detail(
                 1,
                 &MyState::default(),
+                &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
                 now(),
@@ -1470,6 +1568,7 @@ mod tests {
                 1,
                 &MyState::default(),
                 &[],
+                &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
                 now(),
             )
@@ -1493,6 +1592,7 @@ mod tests {
                     number,
                     &MyState::default(),
                     &[],
+                    &[],
                     &[mention("potiuk", "2026-08-05T09:00:00Z")],
                     now(),
                 )
@@ -1513,6 +1613,7 @@ mod tests {
             .commit_detail(
                 1,
                 &MyState::default(),
+                &[],
                 &[],
                 &[
                     mention("potiuk", "2026-08-05T09:00:00Z"),
@@ -1584,6 +1685,7 @@ mod tests {
                 1,
                 &MyState::default(),
                 &[],
+                &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
                 now(),
             )
@@ -1597,6 +1699,7 @@ mod tests {
             .commit_detail(
                 2,
                 &MyState::default(),
+                &[],
                 &[],
                 &[attn(
                     AttentionReason::NeedsFirstLook { rule: "y".into() },
@@ -1623,6 +1726,7 @@ mod tests {
                 1,
                 &MyState::default(),
                 &[],
+                &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
                 now(),
             )
@@ -1637,6 +1741,7 @@ mod tests {
             .commit_detail(
                 1,
                 &ledger.my_state(1).unwrap(),
+                &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T11:00:00Z")],
                 now(),

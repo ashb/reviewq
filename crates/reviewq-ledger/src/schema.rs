@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 2;
+pub const SCHEMA_VERSION: usize = 3;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -74,8 +74,26 @@ ALTER TABLE my_state ADD COLUMN deferred_at TEXT;
 ALTER TABLE my_state ADD COLUMN done_at TEXT;
 ";
 
-static MIGRATIONS: LazyLock<Migrations<'static>> =
-    LazyLock::new(|| Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)]));
+/// Every reviewer's most recent submitted verdict, replaced wholesale on each
+/// detail sync — same lifecycle as `threads`. See
+/// [`ReviewerVerdict`](reviewq_core::model::ReviewerVerdict).
+const MIGRATION_3: &str = "
+CREATE TABLE reviewers (
+  pr_number     INTEGER NOT NULL REFERENCES prs(number),
+  login         TEXT NOT NULL,
+  verdict       TEXT NOT NULL,
+  submitted_at  TEXT NOT NULL,
+  PRIMARY KEY (pr_number, login)
+);
+";
+
+static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
+    Migrations::new(vec![
+        M::up(MIGRATION_1),
+        M::up(MIGRATION_2),
+        M::up(MIGRATION_3),
+    ])
+});
 
 /// Bring `conn` up to the latest schema. A database from a newer build (a
 /// version past the last migration this build knows) is refused by

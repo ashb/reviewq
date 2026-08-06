@@ -331,7 +331,14 @@ async fn detail_pass(
         if !attention.is_empty() {
             stats.queued += 1;
         }
-        ledger.commit_detail(number, &mine, &detail.threads, &attention, now)?;
+        ledger.commit_detail(
+            number,
+            &mine,
+            &detail.threads,
+            &detail.reviewers,
+            &attention,
+            now,
+        )?;
         progress("detail", index + 1, total);
     }
     Ok(())

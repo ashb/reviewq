@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use jiff::Timestamp;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
-use reviewq_core::model::{MyState, PrSnapshot, ThreadState};
+use reviewq_core::model::{MyState, PrSnapshot, ReviewerVerdict, ThreadState};
 use reviewq_ledger::{Ledger, PrShow};
 use serde::Serialize;
 
@@ -70,6 +70,13 @@ fn print_human(show: &PrShow) {
 
     for line in my_history_lines(pr, &show.my_state) {
         println!("  {line}");
+    }
+
+    if !show.reviewers.is_empty() {
+        println!("  reviewers:");
+        for r in &show.reviewers {
+            println!("    {}", reviewer_line(r));
+        }
     }
 
     if show.attention.is_empty() {
@@ -145,6 +152,10 @@ fn my_history_lines(pr: &PrSnapshot, my: &MyState) -> Vec<String> {
     lines
 }
 
+fn reviewer_line(r: &ReviewerVerdict) -> String {
+    format!("{} @{} {}", r.verdict.as_str(), r.login, fmt_ts(r.at))
+}
+
 fn thread_line(t: &ThreadState) -> String {
     let who = t.last_comment_author.as_deref().unwrap_or("someone");
     let at = t
@@ -182,8 +193,16 @@ struct ShowJson<'a> {
     last_action_at: Option<String>,
     done_sha: Option<&'a str>,
     done_at: Option<String>,
+    reviewers: Vec<ReviewerJson<'a>>,
     attention: Vec<AttentionJson<'a>>,
     threads: Vec<ThreadJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct ReviewerJson<'a> {
+    login: &'a str,
+    verdict: &'a str,
+    at: String,
 }
 
 #[derive(Serialize)]
@@ -222,6 +241,15 @@ fn json(show: &PrShow) -> ShowJson<'_> {
         last_action_at: show.my_state.last_action_at.map(|t| t.to_string()),
         done_sha: show.my_state.done_sha.as_deref(),
         done_at: show.my_state.done_at.map(|t| t.to_string()),
+        reviewers: show
+            .reviewers
+            .iter()
+            .map(|r| ReviewerJson {
+                login: &r.login,
+                verdict: r.verdict.as_str(),
+                at: r.at.to_string(),
+            })
+            .collect(),
         attention: show
             .attention
             .iter()
@@ -313,6 +341,16 @@ mod tests {
 
         assert!(my_history_lines(&newer, &mine)[0].contains("superseded by new commits"));
         assert!(!my_history_lines(&pr(), &mine)[0].contains("superseded"));
+    }
+
+    #[test]
+    fn reviewer_line_names_the_verdict_reviewer_and_time() {
+        let r = ReviewerVerdict {
+            login: "kaxil".into(),
+            verdict: reviewq_core::model::Verdict::Approved,
+            at: ts("2026-08-03T09:00:00Z"),
+        };
+        assert_eq!(reviewer_line(&r), "APPROVED @kaxil 2026-08-03T09:00:00Z");
     }
 
     #[test]
