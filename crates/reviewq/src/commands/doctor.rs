@@ -4,7 +4,9 @@ use std::process::ExitCode;
 use anyhow::Result;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_forge::{build, resolve_token};
+use reviewq_ledger::Ledger;
 
+use super::sync::{CURSOR_KEY, TRUNCATED_KEY};
 use crate::{config, paths};
 
 /// Report everything that has to be true before a sync can work, and exit
@@ -29,6 +31,8 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
         format!("{} (not created yet)", db.display())
     };
     row("ledger", &db_note);
+
+    row("last sync", &last_sync_note(&db, &mut problems)?);
 
     let (_project, repo) = loaded.config.sole_repo()?;
     row("repo", &repo.slug());
@@ -93,6 +97,30 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// When the last sweep completed and whether it hit the search cap — a capped
+/// sweep means some PRs in that window were silently missed, so it counts as
+/// a problem rather than just a note. `Ledger::open` would create an empty
+/// file, so this reads the existing one directly rather than opening one that
+/// isn't there yet.
+fn last_sync_note(db: &Path, problems: &mut u32) -> Result<String> {
+    if !db.exists() {
+        return Ok("never".to_string());
+    }
+    let ledger = Ledger::open(db)?;
+    let Some(at) = ledger.get_meta(CURSOR_KEY)? else {
+        return Ok("never".to_string());
+    };
+    if ledger.get_meta(TRUNCATED_KEY)?.as_deref() == Some("1") {
+        *problems += 1;
+        Ok(format!(
+            "{at} {}",
+            warn("last sweep hit the search cap — some PRs were missed")
+        ))
+    } else {
+        Ok(at)
+    }
 }
 
 fn row(label: &str, value: &str) {

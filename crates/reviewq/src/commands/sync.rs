@@ -22,9 +22,9 @@ use crate::config::{Config, RepoRef};
 use crate::{config, paths};
 
 /// Cursor: the high-water mark of `updatedAt` we have swept up to.
-const CURSOR_KEY: &str = "last_sync_at";
+pub(crate) const CURSOR_KEY: &str = "last_sync_at";
 /// Whether the most recent sweep hit the search cap; surfaced by `doctor`.
-const TRUNCATED_KEY: &str = "last_sweep_truncated";
+pub(crate) const TRUNCATED_KEY: &str = "last_sweep_truncated";
 
 pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> {
     let loaded = config::load(config_path)?;
