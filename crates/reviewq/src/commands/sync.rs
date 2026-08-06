@@ -13,9 +13,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use jiff::{Timestamp, ToSpan};
-use reviewq_core::model::{ClassifyCtx, classify};
+use reviewq_core::model::{ClassifyCtx, PrSnapshot, classify};
 use reviewq_core::rules::Evaluation;
-use reviewq_forge::{Forge, build, resolve_token};
+use reviewq_forge::{Forge, PrDetail, build, resolve_token};
 use reviewq_ledger::{Ledger, TrackedReason};
 
 use crate::config::{Config, RepoRef};
@@ -289,59 +289,97 @@ async fn detail_pass(
             break;
         }
 
-        let number = tracked.pr.number;
-        let Some(detail) = forge
-            .fetch_pr_detail(&repo.owner, &repo.name, number, login)
-            .await?
+        let Some((detail, queued)) = refresh_one(
+            forge,
+            ledger,
+            repo,
+            login,
+            bots,
+            include_merged,
+            review_requested,
+            &tracked.pr,
+            &tracked.tracked_reason,
+            now,
+        )
+        .await?
         else {
             continue;
         };
         stats.cost += detail.cost;
         stats.remaining = detail.remaining;
-
-        // Classify against the head the detail fetch saw, not the sweep's: the
-        // head can move between the two, and re-review keys on it.
-        let mut pr = tracked.pr.clone();
-        pr.head_sha = detail.head_sha.clone();
-
-        // GitHub owns my review history; the ledger owns done/snooze/mute. Read
-        // the local state and overlay only the forge-derived fields.
-        let mut mine = ledger.my_state(number)?;
-        mine.last_reviewed_sha = detail.last_reviewed_sha.clone();
-        mine.last_verdict = detail.last_verdict;
-        mine.last_action_at = detail.last_action_at;
-
-        // A review requested of me — directly (tier-2) or via a team I'm on (the
-        // involvement search) — is the same actionable request.
-        let review_request = detail
-            .review_request
-            .clone()
-            .or_else(|| review_requested.contains(&number).then(Default::default));
-
-        let interest = interest_detail(&tracked.tracked_reason);
-        let ctx = ClassifyCtx {
-            bots,
-            interest: interest.as_deref(),
-            mentions: &detail.mentions,
-            review_request,
-            new_commits: detail.new_commits,
-            include_merged,
-        };
-        let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
-        if !attention.is_empty() {
+        if queued {
             stats.queued += 1;
         }
-        ledger.commit_detail(
-            number,
-            &mine,
-            &detail.threads,
-            &detail.reviewers,
-            &attention,
-            now,
-        )?;
         progress("detail", index + 1, total);
     }
     Ok(())
+}
+
+/// Fetch one PR's tier-2 detail, classify it against what the fetch saw, and
+/// commit the result — the per-item body `detail_pass` runs over the whole
+/// tracked set, factored out so `review` can refresh a single PR right after
+/// handing it off, without waiting for the next full sync. `None` when the PR
+/// is gone or inaccessible; the bool reports whether it now holds attention.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn refresh_one(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo: &RepoRef,
+    login: &str,
+    bots: &[String],
+    include_merged: bool,
+    review_requested: &HashSet<u64>,
+    pr: &PrSnapshot,
+    tracked_reason: &str,
+    now: Timestamp,
+) -> Result<Option<(PrDetail, bool)>> {
+    let number = pr.number;
+    let Some(detail) = forge
+        .fetch_pr_detail(&repo.owner, &repo.name, number, login)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    // Classify against the head the detail fetch saw, not the sweep's: the
+    // head can move between the two, and re-review keys on it.
+    let mut pr = pr.clone();
+    pr.head_sha = detail.head_sha.clone();
+
+    // GitHub owns my review history; the ledger owns done/snooze/mute. Read
+    // the local state and overlay only the forge-derived fields.
+    let mut mine = ledger.my_state(number)?;
+    mine.last_reviewed_sha = detail.last_reviewed_sha.clone();
+    mine.last_verdict = detail.last_verdict;
+    mine.last_action_at = detail.last_action_at;
+
+    // A review requested of me — directly (tier-2) or via a team I'm on (the
+    // involvement search) — is the same actionable request.
+    let review_request = detail
+        .review_request
+        .clone()
+        .or_else(|| review_requested.contains(&number).then(Default::default));
+
+    let interest = interest_detail(tracked_reason);
+    let ctx = ClassifyCtx {
+        bots,
+        interest: interest.as_deref(),
+        mentions: &detail.mentions,
+        review_request,
+        new_commits: detail.new_commits,
+        include_merged,
+    };
+    let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
+    let queued = !attention.is_empty();
+    ledger.commit_detail(
+        number,
+        &mine,
+        &detail.threads,
+        &detail.reviewers,
+        &attention,
+        now,
+    )?;
+    Ok(Some((detail, queued)))
 }
 
 /// The bare interest rule from a stored `tracked_reason`
