@@ -21,12 +21,12 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use reviewq_core::model::PrSnapshot;
 
-/// One forge's read operations. Each is roughly a single logical request; the
+/// One forge's operations. Each is roughly a single logical request; the
 /// implementation handles pagination and wire formats.
 ///
-/// Read-only by design: reviewq never writes to a PR here. (Marking my own
-/// notification threads read, in a later milestone, is the one exception and
-/// will be its own method.)
+/// Read-only but for one exception: reviewq never comments, reviews, labels or
+/// approves, but [`mark_pr_notifications_read`](Self::mark_pr_notifications_read)
+/// marks my own notification threads read, which `reviewq done` calls.
 #[async_trait]
 pub trait Forge: Send + Sync {
     /// The authenticated account and the current rate-limit budget. The
@@ -65,6 +65,11 @@ pub trait Forge: Send + Sync {
         number: u64,
         login: &str,
     ) -> Result<Option<PrDetail>>;
+
+    /// Mark every unread notification thread for this PR read. The one write
+    /// operation reviewq performs; `reviewq done` calls it best-effort — a
+    /// failure here should not stop `done` from recording locally.
+    async fn mark_pr_notifications_read(&self, owner: &str, name: &str, number: u64) -> Result<()>;
 }
 
 /// Build the adapter for `host` authenticated with `token`, choosing it by

@@ -14,6 +14,14 @@
 //! (unmerged) PR, then draft (which only a mention pierces). A *merged* PR is
 //! deliberately not suppressed — post-merge activity can be the signal that
 //! something shipped broken.
+//!
+//! [`MyState::done_at`] is how `reviewq done` clears `mention`, `thread_reply`
+//! and `resolved_unanswered` without waiting for a sync to rebuild the
+//! (unchanged) underlying thread or mention data: each checks its triggering
+//! event against `done_at` in addition to its own mechanism. `done_at` is
+//! deliberately a *different* field from [`MyState::last_action_at`] (which a
+//! sync overwrites from GitHub on every run, knowing nothing of `done`) —
+//! sharing one field would mean the very next sync erases the ack.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -118,8 +126,8 @@ pub fn classify(
 
     let mut out = Vec::new();
     out.extend(mention);
-    out.extend(thread_reply_attention(threads, ctx));
-    out.extend(resolved_unanswered_attention(pr, threads));
+    out.extend(thread_reply_attention(threads, mine, ctx));
+    out.extend(resolved_unanswered_attention(pr, threads, mine));
     out.extend(re_review_attention(pr, mine, ctx));
     out.extend(review_requested_attention(pr, mine, ctx));
     // needs-first-look is for the open queue only: starting a first review of an
@@ -137,13 +145,13 @@ fn is_bot(login: &str, bots: &[String]) -> bool {
 }
 
 /// The newest non-bot mention of me that lands after my last action (any
-/// mention, if I have never acted).
+/// mention, if I have never acted) and after my last `done`.
 fn mention_attention(mine: &MyState, _now: Timestamp, ctx: &ClassifyCtx<'_>) -> Option<Attention> {
     let latest = ctx
         .mentions
         .iter()
         .filter(|m| !is_bot(&m.by, ctx.bots))
-        .filter(|m| mine.last_action_at.is_none_or(|acted| m.at > acted))
+        .filter(|m| !acknowledged(m.at, mine))
         .max_by_key(|m| m.at)?;
     Some(Attention {
         reason: AttentionReason::Mention {
@@ -153,13 +161,33 @@ fn mention_attention(mine: &MyState, _now: Timestamp, ctx: &ClassifyCtx<'_>) -> 
     })
 }
 
+/// Whether `event` predates or coincides with my last action on the PR *or*
+/// my last `reviewq done` — i.e. it's already accounted for, whichever of the
+/// two happened.
+fn acknowledged(event: Timestamp, mine: &MyState) -> bool {
+    mine.last_action_at.is_some_and(|acted| event <= acted)
+        || mine.done_at.is_some_and(|done| event <= done)
+}
+
 /// Unresolved threads I own in which someone other than me (and not a bot) has
-/// spoken since my last comment.
-fn thread_reply_attention(threads: &[ThreadState], ctx: &ClassifyCtx<'_>) -> Option<Attention> {
+/// spoken since my last comment in that thread — that's `spoken_after_me`, the
+/// "my reply" half of this reason's clearing rule — and since my last
+/// `reviewq done`, the other half. Deliberately *not* gated on
+/// [`MyState::last_action_at`]: that field is PR-wide, so acting in one thread
+/// must not silently clear a pending reply in a different one.
+fn thread_reply_attention(
+    threads: &[ThreadState],
+    mine: &MyState,
+    ctx: &ClassifyCtx<'_>,
+) -> Option<Attention> {
     let replied: Vec<&ThreadState> = threads
         .iter()
         .filter(|t| t.i_own && !t.is_resolved)
         .filter(|t| spoken_after_me(t) && !last_speaker_is_bot(t, ctx.bots))
+        .filter(|t| {
+            mine.done_at
+                .is_none_or(|done| t.last_comment_at > Some(done))
+        })
         .collect();
 
     let newest = replied.iter().max_by_key(|t| t.last_comment_at)?;
@@ -173,8 +201,20 @@ fn thread_reply_attention(threads: &[ThreadState], ctx: &ClassifyCtx<'_>) -> Opt
 }
 
 /// Threads I own that someone else resolved while I still held the last word —
-/// a "go verify the fix" state that only an explicit ack clears.
-fn resolved_unanswered_attention(pr: &PrSnapshot, threads: &[ThreadState]) -> Option<Attention> {
+/// a "go verify the fix" state that only an explicit `reviewq done` clears
+/// (per the reason table, unlike `thread_reply` a reply elsewhere doesn't).
+fn resolved_unanswered_attention(
+    pr: &PrSnapshot,
+    threads: &[ThreadState],
+    mine: &MyState,
+) -> Option<Attention> {
+    // No per-thread resolve time is stored, so the PR's updatedAt is the
+    // closest event stamp we have — and so also the closest we have to compare
+    // a `done` against.
+    if mine.done_at.is_some_and(|done| pr.updated_at <= done) {
+        return None;
+    }
+
     let resolved: Vec<&ThreadState> = threads
         .iter()
         .filter(|t| t.i_own && t.is_resolved)
@@ -187,8 +227,6 @@ fn resolved_unanswered_attention(pr: &PrSnapshot, threads: &[ThreadState]) -> Op
             by,
             threads: resolved.len(),
         },
-        // No per-thread resolve time is stored; the PR's updatedAt is the
-        // closest event stamp we have.
         since: pr.updated_at,
     })
 }
@@ -433,6 +471,104 @@ mod tests {
             ..mine
         };
         assert!(classify(&pr(), &acked, &[], now(), &ctx).is_empty());
+    }
+
+    fn thread(last_comment_at: &str, my_last_comment_at: &str) -> ThreadState {
+        ThreadState {
+            thread_id: "T1".into(),
+            i_own: true,
+            is_resolved: false,
+            resolved_by: None,
+            last_comment_author: Some("kaxil".into()),
+            last_comment_at: Some(ts(last_comment_at)),
+            my_last_comment_at: Some(ts(my_last_comment_at)),
+        }
+    }
+
+    #[test]
+    fn thread_reply_is_cleared_by_a_done_after_the_reply() {
+        let threads = [thread("2026-08-05T08:30:00Z", "2026-08-04T11:00:00Z")];
+        let ctx = ClassifyCtx::default();
+
+        let before = classify(&pr(), &MyState::default(), &threads, now(), &ctx);
+        assert_eq!(before.len(), 1);
+        assert!(matches!(
+            before[0].reason,
+            AttentionReason::ThreadReply { .. }
+        ));
+
+        let acked = MyState {
+            done_at: Some(ts("2026-08-05T09:00:00Z")),
+            ..Default::default()
+        };
+        assert!(classify(&pr(), &acked, &threads, now(), &ctx).is_empty());
+    }
+
+    #[test]
+    fn thread_reply_is_not_cleared_by_action_elsewhere_on_the_pr() {
+        // last_action_at is PR-wide (a sync overwrites it from any comment or
+        // review of mine anywhere on the PR); it must never silently clear a
+        // pending reply in an unrelated thread. Only `done_at` may.
+        let threads = [thread("2026-08-05T08:30:00Z", "2026-08-04T11:00:00Z")];
+        let ctx = ClassifyCtx::default();
+        let mine = MyState {
+            last_action_at: Some(ts("2026-08-05T10:00:00Z")),
+            ..Default::default()
+        };
+        let out = classify(&pr(), &mine, &threads, now(), &ctx);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].reason, AttentionReason::ThreadReply { .. }));
+    }
+
+    #[test]
+    fn a_done_ack_survives_a_sync_reverting_last_action_at_to_none() {
+        // A sync derives `last_action_at` fresh from GitHub every run, which
+        // knows nothing about `done` — if a mention were cleared through that
+        // field, the very next sync (finding no comment of mine at all) would
+        // set it back to `None` and resurrect the mention. `done_at` is a
+        // separate field a sync never touches, so the ack survives.
+        let mentions = [Mention {
+            by: "potiuk".into(),
+            at: ts("2026-08-05T08:00:00Z"),
+        }];
+        let ctx = ClassifyCtx {
+            mentions: &mentions,
+            ..Default::default()
+        };
+        let acked = MyState {
+            done_at: Some(ts("2026-08-05T09:00:00Z")),
+            last_action_at: None,
+            ..Default::default()
+        };
+        assert!(classify(&pr(), &acked, &[], now(), &ctx).is_empty());
+    }
+
+    #[test]
+    fn resolved_unanswered_is_cleared_by_a_done_after_the_resolution() {
+        let threads = [ThreadState {
+            thread_id: "T1".into(),
+            i_own: true,
+            is_resolved: true,
+            resolved_by: Some("potiuk".into()),
+            last_comment_author: Some("ashb".into()),
+            last_comment_at: Some(ts("2026-08-02T14:20:00Z")),
+            my_last_comment_at: Some(ts("2026-08-02T14:20:00Z")),
+        }];
+        let ctx = ClassifyCtx::default();
+
+        let before = classify(&pr(), &MyState::default(), &threads, now(), &ctx);
+        assert_eq!(before.len(), 1);
+        assert!(matches!(
+            before[0].reason,
+            AttentionReason::ResolvedUnanswered { .. }
+        ));
+
+        // pr().updated_at is 2026-08-05T09:00:00Z; `done` at `now` postdates it.
+        let acked = MyState {
+            done_at: Some(now()),
+            ..Default::default()
+        };
+        assert!(classify(&pr(), &acked, &threads, now(), &ctx).is_empty());
     }
 
     #[test]

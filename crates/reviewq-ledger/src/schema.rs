@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 1;
+pub const SCHEMA_VERSION: usize = 2;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -66,8 +66,16 @@ CREATE TABLE attention (
 CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
+/// `reviewq defer`'s queue-ordering hint and `reviewq done`'s local
+/// acknowledgement stamp: see [`MyState::deferred_at`] and
+/// [`MyState::done_at`] (`reviewq_core::model::MyState`).
+const MIGRATION_2: &str = "
+ALTER TABLE my_state ADD COLUMN deferred_at TEXT;
+ALTER TABLE my_state ADD COLUMN done_at TEXT;
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> =
-    LazyLock::new(|| Migrations::new(vec![M::up(MIGRATION_1)]));
+    LazyLock::new(|| Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)]));
 
 /// Bring `conn` up to the latest schema. A database from a newer build (a
 /// version past the last migration this build knows) is refused by

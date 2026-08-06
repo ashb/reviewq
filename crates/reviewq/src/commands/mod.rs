@@ -1,5 +1,7 @@
+mod actions;
 mod doctor;
 mod list;
+mod review;
 mod show;
 mod sync;
 
@@ -23,6 +25,14 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::List(args) => list::run(config, &args),
         Command::Next(args) => list::next(config, &args),
         Command::Show(args) => show::run(config, &args),
+        Command::Done(args) => actions::done(config, &args).await,
+        Command::Snooze(args) => actions::snooze(&args),
+        Command::Mute(args) => actions::mute(&args),
+        Command::Unmute(args) => actions::unmute(&args),
+        Command::Defer(args) => actions::defer(&args),
+        Command::Undefer(args) => actions::undefer(&args),
+        Command::Track(args) => actions::track(&args),
+        Command::Review(args) => review::run(config, &args),
         Command::Doctor => doctor::run(config).await,
     }
 }

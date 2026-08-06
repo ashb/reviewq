@@ -85,6 +85,10 @@ pub struct QueueItem {
     pub tracked_reason: String,
     /// The reason setting this PR's queue position.
     pub top: AttentionRow,
+    /// `reviewq defer` was called and nothing has happened since (`top.since`
+    /// predates it): sorted after every non-deferred item regardless of
+    /// priority, but still shown rather than hidden.
+    pub deferred: bool,
 }
 
 /// Everything `reviewq show` needs about one PR.
@@ -252,7 +256,7 @@ impl Ledger {
             .query_row(
                 r"
                 SELECT last_reviewed_sha, last_verdict, last_action_at, done_sha,
-                       snoozed_until, muted
+                       snoozed_until, muted, deferred_at, done_at
                 FROM my_state WHERE number = ?1
                 ",
                 params![number as i64],
@@ -263,10 +267,137 @@ impl Ledger {
             .map(Option::unwrap_or_default)
     }
 
+    /// Record `reviewq done`: the head SHA I've acknowledged, and when.
+    /// Touches only `done_sha`/`done_at` — never `last_reviewed_sha`,
+    /// `last_verdict` or `last_action_at` (forge-derived, owned by
+    /// [`commit_detail`](Self::commit_detail)'s next run) nor any other
+    /// user-set field — so this and a concurrent `sync` can never lose each
+    /// other's write, in either direction. The PR must already be in the
+    /// ledger (a foreign key error otherwise); callers check with
+    /// [`show`](Self::show) first for a clearer message.
+    pub fn set_done(&self, number: u64, done_sha: &str, done_at: Timestamp) -> Result<()> {
+        self.conn
+            .execute(
+                r"
+                INSERT INTO my_state (number, done_sha, done_at) VALUES (?1, ?2, ?3)
+                ON CONFLICT(number) DO UPDATE SET
+                  done_sha = excluded.done_sha,
+                  done_at = excluded.done_at
+                ",
+                params![number as i64, done_sha, done_at.to_string()],
+            )
+            .with_context(|| format!("recording done for #{number}"))?;
+        Ok(())
+    }
+
+    /// Record `reviewq snooze`. Touches only `snoozed_until`; see
+    /// [`set_done`](Self::set_done) for why that matters.
+    pub fn set_snoozed_until(&self, number: u64, until: Timestamp) -> Result<()> {
+        self.conn
+            .execute(
+                r"
+                INSERT INTO my_state (number, snoozed_until) VALUES (?1, ?2)
+                ON CONFLICT(number) DO UPDATE SET snoozed_until = excluded.snoozed_until
+                ",
+                params![number as i64, until.to_string()],
+            )
+            .with_context(|| format!("snoozing #{number}"))?;
+        Ok(())
+    }
+
+    /// Record `reviewq mute`/`unmute`. Touches only `muted`.
+    pub fn set_muted(&self, number: u64, muted: bool) -> Result<()> {
+        self.conn
+            .execute(
+                r"
+                INSERT INTO my_state (number, muted) VALUES (?1, ?2)
+                ON CONFLICT(number) DO UPDATE SET muted = excluded.muted
+                ",
+                params![number as i64, muted as i64],
+            )
+            .with_context(|| format!("setting muted for #{number}"))?;
+        Ok(())
+    }
+
+    /// Record `reviewq defer`/`undefer`. Touches only `deferred_at`.
+    pub fn set_deferred_at(&self, number: u64, deferred_at: Option<Timestamp>) -> Result<()> {
+        self.conn
+            .execute(
+                r"
+                INSERT INTO my_state (number, deferred_at) VALUES (?1, ?2)
+                ON CONFLICT(number) DO UPDATE SET deferred_at = excluded.deferred_at
+                ",
+                params![number as i64, deferred_at.map(|t| t.to_string())],
+            )
+            .with_context(|| format!("setting deferred_at for #{number}"))?;
+        Ok(())
+    }
+
+    /// Drop a PR's attention rows immediately, without waiting for the next
+    /// sync to reclassify — how `snooze` and `mute` take effect on the queue
+    /// right away. Clears every reason, `review_requested` included: that's
+    /// what snooze/mute both mean (`classify` suppresses everything for
+    /// either). `done` uses the narrower
+    /// [`clear_done_attention`](Self::clear_done_attention) instead.
+    pub fn clear_attention(&self, number: u64) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM attention WHERE pr_number = ?1",
+                params![number as i64],
+            )
+            .with_context(|| format!("clearing attention for #{number}"))?;
+        Ok(())
+    }
+
+    /// The instant-hide half of `reviewq done`: every reason `done` is allowed
+    /// to clear per the reason table, but not `review_requested` — only my
+    /// review or the request being withdrawn clears that one.
+    pub fn clear_done_attention(&self, number: u64) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM attention WHERE pr_number = ?1 AND reason != 'review_requested'",
+                params![number as i64],
+            )
+            .with_context(|| format!("clearing done attention for #{number}"))?;
+        Ok(())
+    }
+
+    /// Force-track a PR that matched no interest rule and named nobody.
+    /// Returns `false`, changing nothing, if the PR is already tracked —
+    /// `track` is a fallback for the untracked case, not a way to relabel an
+    /// existing tracked reason (an unconditional overwrite here could drop a
+    /// PR's `interest:` reason, and with it `needs_first_look`, permanently:
+    /// [`merge_reason`] never downgrades `involved:` back down). The PR must
+    /// already have a row (from a sweep); the caller checks with
+    /// [`show`](Self::show) first.
+    pub fn track(&self, number: u64) -> Result<bool> {
+        if tracked_reason(&self.conn, number)?.is_some() {
+            return Ok(false);
+        }
+        self.conn
+            .execute(
+                "UPDATE prs SET tracked_reason = ?2 WHERE number = ?1",
+                params![
+                    number as i64,
+                    TrackedReason::Involved("manual".into()).render()
+                ],
+            )
+            .with_context(|| format!("force-tracking #{number}"))?;
+        Ok(true)
+    }
+
     /// Persist a PR's tier-2 detail and freshly-classified attention in one
-    /// transaction: my history, its threads (replaced wholesale), the
-    /// attention rows (likewise), and the detail-sync watermark. Atomic so an
-    /// interrupted detail pass leaves each PR either fully updated or untouched.
+    /// transaction: the forge-derived half of my history (`last_reviewed_sha`,
+    /// `last_verdict`, `last_action_at` — see
+    /// [`write_forge_state`]), its threads (replaced wholesale), the attention
+    /// rows (likewise), and the detail-sync watermark. Atomic so an
+    /// interrupted detail pass leaves each PR either fully updated or
+    /// untouched. `my_state` is read by the caller beforehand for
+    /// [`classify`](reviewq_core::model::classify) to decide against, but only
+    /// its forge-derived fields are written back here — the user-set fields
+    /// (`done_sha`, `snoozed_until`, `muted`, `deferred_at`, `done_at`) are
+    /// never touched, so a `reviewq done`/`snooze`/`mute`/`defer` racing this
+    /// call can never be lost, in either direction.
     pub fn commit_detail(
         &self,
         number: u64,
@@ -276,7 +407,7 @@ impl Ledger {
         now: Timestamp,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        write_my_state(&tx, number, my_state)?;
+        write_forge_state(&tx, number, my_state)?;
         replace_threads(&tx, number, threads)?;
         replace_attention(&tx, number, attention)?;
         // Stored at whole-second precision so the lexicographic comparison in
@@ -317,14 +448,19 @@ impl Ledger {
 
     /// The queue: tracked, open PRs that currently want attention, each with its
     /// highest-priority reason, ordered most-urgent first (priority band, then
-    /// oldest within the band, then PR number).
+    /// oldest within the band, then PR number) — except a deferred PR (see
+    /// [`QueueItem::deferred`]), which sorts after every non-deferred item
+    /// regardless of priority.
     pub fn queue(&self) -> Result<Vec<QueueItem>> {
         // Open PRs, plus merged PRs when a project opted into post-merge review
         // (those only carry attention rows when it did). Closed-unmerged never.
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, a.reason, a.detail, a.since
-            FROM prs p JOIN attention a ON a.pr_number = p.number
+            SELECT {PR_COLUMNS}, p.tracked_reason, a.reason, a.detail, a.since,
+                   ms.deferred_at
+            FROM prs p
+            JOIN attention a ON a.pr_number = p.number
+            LEFT JOIN my_state ms ON ms.number = p.number
             WHERE p.state IN ('OPEN', 'MERGED') AND p.tracked_reason IS NOT NULL
             ",
         ))?;
@@ -333,12 +469,19 @@ impl Ledger {
                 let pr = snapshot_from_row(row, 0)?;
                 let tracked_reason: String = row.get(12)?;
                 let attention = attention_from_row(row, 13)?;
-                Ok((pr, tracked_reason, attention))
+                let deferred_at: Option<String> = row.get(16)?;
+                let deferred_at = deferred_at.as_deref().map(parse_ts).transpose()?;
+                Ok((pr, tracked_reason, attention, deferred_at))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut items: Vec<QueueItem> = Vec::new();
-        for (pr, tracked_reason, attention) in rows {
+        let mut deferred_since: std::collections::HashMap<u64, Timestamp> =
+            std::collections::HashMap::new();
+        for (pr, tracked_reason, attention, deferred_at) in rows {
+            if let Some(deferred_at) = deferred_at {
+                deferred_since.insert(pr.number, deferred_at);
+            }
             match items.iter_mut().find(|i| i.pr.number == pr.number) {
                 Some(existing) => {
                     if attention_is_more_urgent(&attention, &existing.top) {
@@ -349,11 +492,20 @@ impl Ledger {
                     pr,
                     tracked_reason,
                     top: attention,
+                    deferred: false,
                 }),
             }
         }
+        // A defer only survives if nothing has happened since: the top reason's
+        // `since` must not be newer than the moment it was deferred.
+        for item in &mut items {
+            item.deferred = deferred_since
+                .get(&item.pr.number)
+                .is_some_and(|&deferred_at| item.top.since <= deferred_at);
+        }
         items.sort_by(|a, b| {
-            (a.top.priority, a.top.since, a.pr.number).cmp(&(
+            (a.deferred, a.top.priority, a.top.since, a.pr.number).cmp(&(
+                b.deferred,
                 b.top.priority,
                 b.top.since,
                 b.pr.number,
@@ -631,6 +783,8 @@ fn row_to_my_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyState> {
     let verdict: Option<String> = row.get(1)?;
     let last_action_at: Option<String> = row.get(2)?;
     let snoozed_until: Option<String> = row.get(4)?;
+    let deferred_at: Option<String> = row.get(6)?;
+    let done_at: Option<String> = row.get(7)?;
     Ok(MyState {
         last_reviewed_sha: row.get(0)?,
         last_verdict: verdict.as_deref().and_then(Verdict::from_wire),
@@ -638,6 +792,8 @@ fn row_to_my_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyState> {
         done_sha: row.get(3)?,
         snoozed_until: snoozed_until.as_deref().map(parse_ts).transpose()?,
         muted: row.get::<_, i64>(5)? != 0,
+        deferred_at: deferred_at.as_deref().map(parse_ts).transpose()?,
+        done_at: done_at.as_deref().map(parse_ts).transpose()?,
     })
 }
 
@@ -673,32 +829,33 @@ fn attention_is_more_urgent(candidate: &AttentionRow, best: &AttentionRow) -> bo
     (candidate.priority, candidate.since) < (best.priority, best.since)
 }
 
-fn write_my_state(conn: &Connection, number: u64, s: &MyState) -> Result<()> {
+/// Write only the forge-derived third of `my_state` — `last_reviewed_sha`,
+/// `last_verdict`, `last_action_at` — the fields GitHub itself reports and
+/// [`commit_detail`](Ledger::commit_detail) overlays fresh on every sync.
+/// Never writes `done_sha`/`snoozed_until`/`muted`/`deferred_at`/`done_at`,
+/// even though `s` (as read by the caller) carries whatever those happened to
+/// be at read time: writing them back here would risk clobbering a
+/// concurrent `reviewq done`/`snooze`/`mute`/`defer` with a stale copy. Each
+/// of those has its own targeted setter (`Ledger::set_done`, etc.) that writes
+/// only its own column, for the same reason in reverse.
+fn write_forge_state(conn: &Connection, number: u64, s: &MyState) -> Result<()> {
     conn.execute(
         r"
-        INSERT INTO my_state (
-          number, last_reviewed_sha, last_verdict, last_action_at, done_sha,
-          snoozed_until, muted
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+        INSERT INTO my_state (number, last_reviewed_sha, last_verdict, last_action_at)
+        VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT(number) DO UPDATE SET
           last_reviewed_sha=excluded.last_reviewed_sha,
           last_verdict=excluded.last_verdict,
-          last_action_at=excluded.last_action_at,
-          done_sha=excluded.done_sha,
-          snoozed_until=excluded.snoozed_until,
-          muted=excluded.muted
+          last_action_at=excluded.last_action_at
         ",
         params![
             number as i64,
             s.last_reviewed_sha,
             s.last_verdict.map(|v| v.as_str()),
             s.last_action_at.map(|t| t.to_string()),
-            s.done_sha,
-            s.snoozed_until.map(|t| t.to_string()),
-            s.muted as i64,
         ],
     )
-    .with_context(|| format!("writing my_state for #{number}"))?;
+    .with_context(|| format!("writing forge-derived my_state for #{number}"))?;
     Ok(())
 }
 
@@ -974,19 +1131,105 @@ mod tests {
     }
 
     #[test]
-    fn my_state_round_trips_every_field() {
+    fn commit_detail_writes_only_the_forge_derived_fields() {
         let ledger = Ledger::open_in_memory().unwrap();
         track(&ledger, &pr(1));
         let state = MyState {
             last_reviewed_sha: Some("deadbeef".into()),
             last_verdict: Some(Verdict::ChangesRequested),
             last_action_at: Some(ts("2026-08-04T10:00:00Z")),
+            // A real caller (sync) would have read these off a prior state
+            // before overlaying the three forge fields above; commit_detail
+            // must not write them back regardless of what's in `state`.
             done_sha: Some("cafebabe".into()),
             snoozed_until: Some(ts("2026-08-09T00:00:00Z")),
             muted: true,
+            deferred_at: Some(ts("2026-08-06T00:00:00Z")),
+            done_at: Some(ts("2026-08-06T00:00:00Z")),
         };
         ledger.commit_detail(1, &state, &[], &[], now()).unwrap();
-        assert_eq!(ledger.my_state(1).unwrap(), state);
+
+        let stored = ledger.my_state(1).unwrap();
+        assert_eq!(stored.last_reviewed_sha, state.last_reviewed_sha);
+        assert_eq!(stored.last_verdict, state.last_verdict);
+        assert_eq!(stored.last_action_at, state.last_action_at);
+        assert_eq!(stored.done_sha, None);
+        assert_eq!(stored.snoozed_until, None);
+        assert!(!stored.muted);
+        assert_eq!(stored.deferred_at, None);
+        assert_eq!(stored.done_at, None);
+    }
+
+    #[test]
+    fn commit_detail_never_clobbers_a_concurrent_user_action() {
+        // The scenario the M4 review flagged: `reviewq done` sets `done_at`,
+        // then a `sync` that was already mid-flight (and so read `my_state`
+        // before `done` ran) commits its own forge-derived overlay. The
+        // done_at set moments ago must survive that commit untouched.
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        ledger
+            .set_done(1, "head0000", ts("2026-08-05T10:00:00Z"))
+            .unwrap();
+
+        ledger
+            .commit_detail(
+                1,
+                &MyState {
+                    last_action_at: Some(ts("2026-08-05T09:00:00Z")),
+                    ..Default::default()
+                },
+                &[],
+                &[],
+                now(),
+            )
+            .unwrap();
+
+        let stored = ledger.my_state(1).unwrap();
+        assert_eq!(stored.done_sha.as_deref(), Some("head0000"));
+        assert_eq!(stored.done_at, Some(ts("2026-08-05T10:00:00Z")));
+        assert_eq!(stored.last_action_at, Some(ts("2026-08-05T09:00:00Z")));
+    }
+
+    #[test]
+    fn set_done_touches_only_its_own_columns() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        ledger.set_muted(1, true).unwrap();
+
+        ledger
+            .set_done(1, "abc123", ts("2026-08-05T10:00:00Z"))
+            .unwrap();
+
+        let stored = ledger.my_state(1).unwrap();
+        assert_eq!(stored.done_sha.as_deref(), Some("abc123"));
+        assert_eq!(stored.done_at, Some(ts("2026-08-05T10:00:00Z")));
+        assert!(stored.muted, "an unrelated field must survive");
+    }
+
+    #[test]
+    fn set_snoozed_until_and_set_deferred_at_round_trip() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+
+        ledger
+            .set_snoozed_until(1, ts("2026-08-09T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            ledger.my_state(1).unwrap().snoozed_until,
+            Some(ts("2026-08-09T00:00:00Z"))
+        );
+
+        ledger
+            .set_deferred_at(1, Some(ts("2026-08-06T00:00:00Z")))
+            .unwrap();
+        assert_eq!(
+            ledger.my_state(1).unwrap().deferred_at,
+            Some(ts("2026-08-06T00:00:00Z"))
+        );
+
+        ledger.set_deferred_at(1, None).unwrap();
+        assert_eq!(ledger.my_state(1).unwrap().deferred_at, None);
     }
 
     #[test]
@@ -1216,5 +1459,189 @@ mod tests {
         ledger.clear_archived_attention(false).unwrap();
         assert!(ledger.queue().unwrap().is_empty());
         assert!(ledger.show(1).unwrap().unwrap().attention.is_empty());
+    }
+
+    #[test]
+    fn set_muted_writes_without_touching_threads_or_attention() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        ledger
+            .commit_detail(
+                1,
+                &MyState::default(),
+                &[],
+                &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                now(),
+            )
+            .unwrap();
+
+        ledger.set_muted(1, true).unwrap();
+        assert!(ledger.my_state(1).unwrap().muted);
+        // Unlike clear_attention, a bare state write leaves attention alone —
+        // the command layer calls both, but they're independent operations.
+        assert_eq!(ledger.show(1).unwrap().unwrap().attention.len(), 1);
+    }
+
+    #[test]
+    fn clear_attention_drops_only_the_named_pr() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        track(&ledger, &pr(2));
+        for number in [1, 2] {
+            ledger
+                .commit_detail(
+                    number,
+                    &MyState::default(),
+                    &[],
+                    &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                    now(),
+                )
+                .unwrap();
+        }
+
+        ledger.clear_attention(1).unwrap();
+        let queue = ledger.queue().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].pr.number, 2);
+    }
+
+    #[test]
+    fn clear_done_attention_preserves_review_requested() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        ledger
+            .commit_detail(
+                1,
+                &MyState::default(),
+                &[],
+                &[
+                    mention("potiuk", "2026-08-05T09:00:00Z"),
+                    attn(
+                        AttentionReason::ReviewRequested { team: None },
+                        "2026-08-05T09:00:00Z",
+                    ),
+                ],
+                now(),
+            )
+            .unwrap();
+
+        ledger.clear_done_attention(1).unwrap();
+        let attention = ledger.show(1).unwrap().unwrap().attention;
+        assert_eq!(attention.len(), 1);
+        assert_eq!(attention[0].reason, "review_requested");
+    }
+
+    #[test]
+    fn track_sets_involved_manual_and_does_not_downgrade() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        ledger.upsert_pr(&pr(1), None, now()).unwrap();
+        assert!(ledger.list_tracked().unwrap().is_empty());
+
+        assert!(ledger.track(1).unwrap());
+        let tracked = ledger.list_tracked().unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].tracked_reason, "involved: manual");
+
+        // A later sweep re-asserting interest must not clobber it.
+        ledger
+            .upsert_pr(
+                &pr(1),
+                Some(TrackedReason::Interest("label area:task-sdk".into())),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.list_tracked().unwrap()[0].tracked_reason,
+            "involved: manual"
+        );
+    }
+
+    #[test]
+    fn track_is_a_no_op_on_an_already_tracked_pr() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        // Tracked by interest, not by track() — this is the case that must
+        // never be silently downgraded to `involved: manual`, which would
+        // permanently drop needs_first_look (interest_detail only strips an
+        // `interest:` prefix, and merge_reason never demotes `involved:` back).
+        track(&ledger, &pr(1));
+
+        assert!(!ledger.track(1).unwrap(), "already tracked — a no-op");
+        assert_eq!(
+            ledger.list_tracked().unwrap()[0].tracked_reason,
+            "interest: label area:task-sdk"
+        );
+    }
+
+    #[test]
+    fn a_deferred_pr_sorts_after_every_non_deferred_item_regardless_of_priority() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        track(&ledger, &pr(2));
+
+        // #1 holds the most urgent reason there is...
+        ledger
+            .commit_detail(
+                1,
+                &MyState::default(),
+                &[],
+                &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                now(),
+            )
+            .unwrap();
+        // ...but gets deferred after that mention fired.
+        ledger
+            .set_deferred_at(1, Some(ts("2026-08-05T10:00:00Z")))
+            .unwrap();
+        // #2 only needs a first look — the least urgent reason — and stays put.
+        ledger
+            .commit_detail(
+                2,
+                &MyState::default(),
+                &[],
+                &[attn(
+                    AttentionReason::NeedsFirstLook { rule: "y".into() },
+                    "2026-07-01T00:00:00Z",
+                )],
+                now(),
+            )
+            .unwrap();
+
+        let queue = ledger.queue().unwrap();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].pr.number, 2, "the deferred PR sorts last");
+        assert!(!queue[0].deferred);
+        assert_eq!(queue[1].pr.number, 1);
+        assert!(queue[1].deferred);
+    }
+
+    #[test]
+    fn a_defer_clears_itself_once_something_new_happens() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        track(&ledger, &pr(1));
+        ledger
+            .commit_detail(
+                1,
+                &MyState::default(),
+                &[],
+                &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                now(),
+            )
+            .unwrap();
+        ledger
+            .set_deferred_at(1, Some(ts("2026-08-05T10:00:00Z")))
+            .unwrap();
+        assert!(ledger.queue().unwrap()[0].deferred);
+
+        // A fresh sync reclassifies with a newer mention — after the defer.
+        ledger
+            .commit_detail(
+                1,
+                &ledger.my_state(1).unwrap(),
+                &[],
+                &[mention("potiuk", "2026-08-05T11:00:00Z")],
+                now(),
+            )
+            .unwrap();
+        assert!(!ledger.queue().unwrap()[0].deferred);
     }
 }

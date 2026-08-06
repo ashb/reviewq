@@ -35,6 +35,35 @@ pub enum Command {
     /// reasons and its threads.
     Show(ShowArgs),
 
+    /// Record the current head as handled and mark matching GitHub
+    /// notifications read. Drops the PR off the queue until something new
+    /// happens on it.
+    Done(NumberArgs),
+
+    /// Suppress everything on a PR — including mentions — until `duration` has
+    /// passed, e.g. `3d`, `12h`, `1w`.
+    Snooze(SnoozeArgs),
+
+    /// Suppress everything on a PR, including mentions, until `unmute`.
+    Mute(NumberArgs),
+
+    /// Undo `mute`.
+    Unmute(NumberArgs),
+
+    /// Push a PR to the bottom of the queue without hiding it. Clears itself
+    /// the next time something new happens on the PR.
+    Defer(NumberArgs),
+
+    /// Undo `defer`.
+    Undefer(NumberArgs),
+
+    /// Force-track a PR that matched no interest rule.
+    Track(NumberArgs),
+
+    /// Exec `handoff.review_command` with the PR number substituted. Does not
+    /// imply `done`.
+    Review(NumberArgs),
+
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
 }
@@ -70,6 +99,22 @@ pub struct ShowArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Shared by every action command that names one PR and takes no other input.
+#[derive(Debug, Args)]
+pub struct NumberArgs {
+    /// The PR number.
+    pub number: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct SnoozeArgs {
+    /// The PR number.
+    pub number: u64,
+
+    /// How long to suppress it, e.g. `3d`, `12h`, `1w2d`.
+    pub duration: String,
 }
 
 #[cfg(test)]

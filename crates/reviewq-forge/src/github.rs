@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use jiff::Timestamp;
 use octocrab::Octocrab;
+use octocrab::models::activity::Notification;
 use reviewq_core::model::{Mention, PrSnapshot, PrState, ReviewRequest, ThreadState, Verdict};
 use serde::Deserialize;
 
@@ -157,6 +158,48 @@ impl Forge for GithubForge {
             .repository
             .and_then(|r| r.pull_request)
             .map(|pr| pr.into_detail(login, cost, remaining)))
+    }
+
+    async fn mark_pr_notifications_read(&self, owner: &str, name: &str, number: u64) -> Result<()> {
+        // Deliberately not `.all(true)` — that opts into *every* notification
+        // for the repo, read ones included ("If set, show notifications
+        // marked as read", per octocrab's docs), which on a busy repo means
+        // paginating the whole read backlog on every single `reviewq done`.
+        // The default is already unread-only, matching what `done` needs.
+        let first_page = self
+            .inner
+            .activity()
+            .notifications()
+            .list_for_repo(owner, name)
+            .per_page(50)
+            .send()
+            .await
+            .with_context(|| format!("listing notifications for {owner}/{name}"))?;
+        let notifications: Vec<Notification> = self
+            .inner
+            .all_pages(first_page)
+            .await
+            .with_context(|| format!("paginating notifications for {owner}/{name}"))?;
+
+        // The subject URL is the PR's REST API URL (".../pulls/{number}"); it's
+        // the only field that names which PR a notification belongs to.
+        let suffix = format!("/pulls/{number}");
+        for n in notifications {
+            let is_this_pr = n
+                .subject
+                .url
+                .as_ref()
+                .is_some_and(|url| url.as_str().ends_with(&suffix));
+            if is_this_pr {
+                self.inner
+                    .activity()
+                    .notifications()
+                    .mark_as_read(n.id)
+                    .await
+                    .with_context(|| format!("marking notification {} read", n.id))?;
+            }
+        }
+        Ok(())
     }
 }
 

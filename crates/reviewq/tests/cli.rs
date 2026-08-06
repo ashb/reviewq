@@ -39,7 +39,10 @@ fn help_and_version_succeed() {
 
 #[test]
 fn every_subcommand_is_reachable() {
-    for name in ["sync", "list", "next", "show", "doctor"] {
+    for name in [
+        "sync", "list", "next", "show", "done", "snooze", "mute", "unmute", "defer", "undefer",
+        "track", "review", "doctor",
+    ] {
         let output = run(&[name, "--help"]);
         assert!(
             output.status.success(),
@@ -47,6 +50,63 @@ fn every_subcommand_is_reachable() {
             stderr(&output)
         );
     }
+}
+
+/// `done`/`snooze`/`mute`/`unmute`/`defer`/`undefer`/`track` are ledger-only —
+/// no config needed — so a missing PR is reported the same clear way for all
+/// of them, against a hermetic, empty ledger. `done` additionally needs no
+/// network for this case: it fails on the same existence check before ever
+/// touching config.
+#[test]
+fn an_action_on_an_unknown_pr_is_a_clear_error() {
+    // Unique per test run, not just per file name, so concurrent `cargo test`
+    // invocations (or a leftover file from a killed run) can't collide.
+    let db = std::env::temp_dir().join(format!(
+        "reviewq-cli-action-unknown-pr-{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db);
+
+    for args in [
+        vec!["done", "999"],
+        vec!["snooze", "999", "3d"],
+        vec!["mute", "999"],
+        vec!["unmute", "999"],
+        vec!["defer", "999"],
+        vec!["undefer", "999"],
+        vec!["track", "999"],
+    ] {
+        let output = Command::new(BIN)
+            .args(&args)
+            .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
+            .env("REVIEWQ_DB", &db)
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("binary runs");
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(
+            stderr(&output).contains("not in the ledger"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn snooze_rejects_a_bad_duration_before_touching_the_ledger() {
+    // REVIEWQ_DB points under a directory that cannot exist: if the duration
+    // were ever validated after opening the ledger instead of before, this
+    // would fail loudly (a ledger-open error) rather than silently passing.
+    let output = Command::new(BIN)
+        .args(["snooze", "1", "not-a-duration"])
+        .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
+        .env("REVIEWQ_DB", "/nonexistent/reviewq/reviewq.db")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("binary runs");
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("invalid duration"));
 }
 
 #[test]
@@ -60,7 +120,8 @@ fn list_rejects_contradictory_buckets() {
 fn an_empty_queue_reports_itself_and_exits_empty() {
     // `list` with no flag is the queue. Against a fresh ledger it is empty, and
     // must say so with the dedicated exit code rather than printing nothing.
-    let db = std::env::temp_dir().join("reviewq-cli-empty-queue.db");
+    let db =
+        std::env::temp_dir().join(format!("reviewq-cli-empty-queue-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
     let output = Command::new(BIN)
         .args(["list"])

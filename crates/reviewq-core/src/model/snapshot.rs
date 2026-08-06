@@ -98,6 +98,17 @@ pub struct MyState {
     pub snoozed_until: Option<Timestamp>,
     /// Suppress everything forever, mentions included.
     pub muted: bool,
+    /// `reviewq defer` was called and nothing has happened on the PR since:
+    /// push it to the bottom of the queue without hiding it. Purely a queue-
+    /// ordering hint — `classify` never reads it.
+    pub deferred_at: Option<Timestamp>,
+    /// When `reviewq done` last ran. Distinct from
+    /// [`last_action_at`](Self::last_action_at), which GitHub itself derives
+    /// (a comment or review) and which a sync overwrites wholesale on every
+    /// run: `done_at` is the only record of a purely local acknowledgement, so
+    /// nothing else may ever assign it, or the next sync silently undoes the
+    /// `done`.
+    pub done_at: Option<Timestamp>,
 }
 
 /// My last review verdict on a PR.
