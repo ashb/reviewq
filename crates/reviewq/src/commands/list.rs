@@ -124,7 +124,8 @@ fn print_queue_row(multi: bool, item: &Located<QueueItem>) {
             .if_supports_color(Stdout, |s| s.dimmed().to_string()),
         item.item
             .top
-            .detail
+            .reason
+            .to_string()
             .if_supports_color(Stdout, |s| s.cyan().to_string()),
         tag,
         truncate(&item.item.pr.title, 60),
@@ -185,7 +186,8 @@ struct QueueJson<'a> {
     repo: String,
     number: u64,
     reason: &'a str,
-    detail: &'a str,
+    /// Rendered on the way out — the ledger stores the reason, not its prose.
+    detail: String,
     since: String,
     tracked_reason: &'a str,
     title: &'a str,
@@ -196,8 +198,8 @@ fn queue_json(item: &Located<QueueItem>) -> QueueJson<'_> {
     QueueJson {
         repo: item.repo.slug(),
         number: item.item.pr.number,
-        reason: &item.item.top.reason,
-        detail: &item.item.top.detail,
+        reason: item.item.top.reason.discriminant(),
+        detail: item.item.top.reason.to_string(),
         since: item.item.top.since.to_string(),
         tracked_reason: &item.item.tracked_reason,
         title: &item.item.pr.title,

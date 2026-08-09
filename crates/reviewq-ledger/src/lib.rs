@@ -125,17 +125,24 @@ pub struct TrackedPr {
 }
 
 /// One stored attention reason, as read back from the `attention` table.
+///
+/// Carries the reason itself rather than a rendering of it: how a reason reads
+/// is the frontend's business, so a caller wanting text calls `to_string()` on
+/// [`reason`](Self::reason). That's also why a change to the wording in
+/// `reviewq-core` applies to already-stored rows — nothing prerendered is kept.
 #[derive(Debug, Clone)]
 pub struct AttentionRow {
-    /// The reason's stable discriminant, e.g. `thread_reply`.
-    pub reason: String,
-    /// The rendered, human-readable evidence string.
-    pub detail: String,
+    /// The reason that fired, with its evidence.
+    pub reason: AttentionReason,
     /// When the triggering event happened.
     pub since: Timestamp,
-    /// Queue priority recovered from [`reason`](Self::reason); 1 is most urgent.
-    /// A row from a newer build with an unknown reason sorts last.
-    pub priority: u8,
+}
+
+impl AttentionRow {
+    /// Queue priority; 1 is most urgent.
+    pub fn priority(&self) -> u8 {
+        self.reason.priority()
+    }
 }
 
 /// A PR on the queue: its snapshot, why it is tracked, and the single
@@ -609,7 +616,7 @@ impl Ledger {
         // (those only carry attention rows when it did). Closed-unmerged never.
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, a.reason, a.detail, a.since,
+            SELECT {PR_COLUMNS}, p.tracked_reason, a.since, a.payload,
                    ms.deferred_at
             FROM prs p
             JOIN attention a ON a.repo_id = p.repo_id AND a.pr_number = p.number
@@ -622,7 +629,7 @@ impl Ledger {
                 let pr = snapshot_from_row(row, 0)?;
                 let tracked_reason: String = row.get(12)?;
                 let attention = attention_from_row(row, 13)?;
-                let deferred_at: Option<String> = row.get(16)?;
+                let deferred_at: Option<String> = row.get(15)?;
                 let deferred_at = deferred_at.as_deref().map(parse_ts).transpose()?;
                 Ok((pr, tracked_reason, attention, deferred_at))
             })?
@@ -657,9 +664,9 @@ impl Ledger {
                 .is_some_and(|&deferred_at| item.top.since <= deferred_at);
         }
         items.sort_by(|a, b| {
-            (a.deferred, a.top.priority, a.top.since, a.pr.number).cmp(&(
+            (a.deferred, a.top.priority(), a.top.since, a.pr.number).cmp(&(
                 b.deferred,
-                b.top.priority,
+                b.top.priority(),
                 b.top.since,
                 b.pr.number,
             ))
@@ -719,7 +726,7 @@ impl Ledger {
         queue.sort_by_key(|l| {
             (
                 l.item.deferred,
-                l.item.top.priority,
+                l.item.top.priority(),
                 l.item.top.since,
                 l.item.pr.number,
                 l.repo.slug(),
@@ -812,14 +819,14 @@ impl Ledger {
     /// A PR's attention rows, most-urgent first.
     fn attention(&self, repo_id: i64, number: u64) -> Result<Vec<AttentionRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT reason, detail, since FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
+            "SELECT since, payload FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
         )?;
         let mut rows = stmt
             .query_map(params![repo_id, number as i64], |row| {
                 attention_from_row(row, 0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.sort_by_key(|a| (a.priority, a.since));
+        rows.sort_by_key(|a| (a.priority(), a.since));
         Ok(rows)
     }
 }
@@ -1085,21 +1092,25 @@ fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadState> {
 }
 
 /// Read an [`AttentionRow`] from `(reason, detail, since)` starting at `base`.
+/// Build an [`AttentionRow`] from `since`, `payload` at `base`.
+///
+/// The stored `reason` discriminant isn't read: the payload carries the whole
+/// variant, discriminant included, so reading both would be two sources for one
+/// fact. The column exists for the primary key.
 fn attention_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<AttentionRow> {
-    let reason: String = row.get(base)?;
-    let priority = AttentionReason::priority_for(&reason).unwrap_or(u8::MAX);
+    let payload: String = row.get(base + 1)?;
+    let reason: AttentionReason = serde_json::from_str(&payload)
+        .map_err(|err| FromSqlConversionFailure(base + 1, Type::Text, Box::new(err)))?;
     Ok(AttentionRow {
-        detail: row.get(base + 1)?,
-        since: parse_ts(&row.get::<_, String>(base + 2)?)?,
         reason,
-        priority,
+        since: parse_ts(&row.get::<_, String>(base)?)?,
     })
 }
 
 /// Whether `candidate` should outrank the current best: lower priority band,
 /// or the same band but an older event.
 fn attention_is_more_urgent(candidate: &AttentionRow, best: &AttentionRow) -> bool {
-    (candidate.priority, candidate.since) < (best.priority, best.since)
+    (candidate.priority(), candidate.since) < (best.priority(), best.since)
 }
 
 /// Write only the forge-derived third of `my_state` — `last_reviewed_sha`,
@@ -1207,14 +1218,14 @@ fn replace_attention(
     )?;
     for a in attention {
         conn.execute(
-            "INSERT INTO attention (repo_id, pr_number, reason, detail, since) \
+            "INSERT INTO attention (repo_id, pr_number, reason, since, payload) \
              VALUES (?1,?2,?3,?4,?5)",
             params![
                 repo_id,
                 number as i64,
                 a.reason.discriminant(),
-                a.reason.to_string(),
                 a.since.to_string(),
+                serde_json::to_string(&a.reason).context("serialising an attention reason")?,
             ],
         )
         .with_context(|| {
@@ -1882,8 +1893,8 @@ mod tests {
         let queue = ledger.queue(repo_id).unwrap();
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].pr.number, 1);
-        assert_eq!(queue[0].top.reason, "mention");
-        assert_eq!(queue[0].top.priority, 1);
+        assert_eq!(queue[0].top.reason.discriminant(), "mention");
+        assert_eq!(queue[0].top.priority(), 1);
         assert_eq!(queue[1].pr.number, 2);
     }
 
@@ -1912,6 +1923,36 @@ mod tests {
         let waiting = ledger.waiting(repo_id).unwrap();
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].pr.number, 2);
+    }
+
+    #[test]
+    fn an_attention_row_is_rendered_from_storage_not_frozen_at_write_time() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        let reason = AttentionReason::Mention {
+            by: "potiuk".into(),
+        };
+        wants_attention(&ledger, repo_id, 1, reason.clone(), "2026-08-05T09:00:00Z");
+
+        // What comes back is the reason itself, so its prose is whatever
+        // reviewq-core renders *now* — not what it rendered when this was
+        // synced. That's the point of storing the payload: improving the
+        // wording doesn't need a re-sync to take effect.
+        let stored = &ledger.show(repo_id, 1).unwrap().expect("stored").attention[0];
+        assert_eq!(stored.reason, reason);
+        assert_eq!(stored.reason.to_string(), reason.to_string());
+        assert_eq!(stored.priority(), 1);
+
+        // And no column holds prerendered prose for it to disagree with.
+        let columns: Vec<String> = ledger
+            .conn
+            .prepare("SELECT * FROM attention")
+            .unwrap()
+            .column_names()
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        assert!(!columns.contains(&"detail".to_string()), "{columns:?}");
     }
 
     #[test]
@@ -2291,7 +2332,7 @@ mod tests {
         ledger.clear_done_attention(repo_id, 1).unwrap();
         let attention = ledger.show(repo_id, 1).unwrap().unwrap().attention;
         assert_eq!(attention.len(), 1);
-        assert_eq!(attention[0].reason, "review_requested");
+        assert_eq!(attention[0].reason.discriminant(), "review_requested");
     }
 
     #[test]

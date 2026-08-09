@@ -19,8 +19,13 @@ pub struct Attention {
 /// An attention reason together with the evidence that produced it.
 ///
 /// Every variant renders, via [`Display`](fmt::Display), to a human-readable
-/// string naming its rule and quoting its evidence. Those strings are a stable
-/// API — they are snapshot-tested, and changing one is a user-visible change.
+/// string quoting its evidence. Those strings are a stable API — they are
+/// snapshot-tested, and changing one is a user-visible change.
+///
+/// The rendering deliberately does not name the rule that fired: the caller
+/// already has that as [`discriminant`](Self::discriminant), and repeating it
+/// spent a third of a narrow column restating what the evidence says anyway.
+/// "@kaxil mentioned you" needs no `mention:` in front of it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum AttentionReason {
@@ -84,10 +89,13 @@ impl AttentionReason {
         }
     }
 
-    /// Stable identifier stored in the ledger's `attention.reason` column.
+    /// Stable identifier stored in the ledger's `attention.reason` column, and
+    /// reported as `reason` in `--json` output.
     ///
-    /// Kept separate from the rendered string so that evidence wording can be
-    /// improved without invalidating stored rows.
+    /// The ledger keys a PR's attention rows on this, so one reason kind holds
+    /// at most one row per PR. It is not what a person reads — that's
+    /// [`Display`](fmt::Display) — so renaming a reason in prose never touches
+    /// stored data.
     pub fn discriminant(&self) -> &'static str {
         match self {
             Self::Mention { .. } => "mention",
@@ -98,31 +106,15 @@ impl AttentionReason {
             Self::NeedsFirstLook { .. } => "needs_first_look",
         }
     }
-
-    /// The priority of a stored [`discriminant`](Self::discriminant), without
-    /// reconstructing the variant. The ledger stores only the discriminant, so
-    /// this is how a queue read recovers the sort band. `None` for an
-    /// unrecognised string — a row from a newer build than this one.
-    pub fn priority_for(discriminant: &str) -> Option<u8> {
-        Some(match discriminant {
-            "mention" => 1,
-            "thread_reply" => 2,
-            "resolved_unanswered" => 3,
-            "re_review" => 4,
-            "review_requested" => 5,
-            "needs_first_look" => 6,
-            _ => return None,
-        })
-    }
 }
 
 impl fmt::Display for AttentionReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Mention { by } => write!(f, "mention: @{by} mentioned you"),
+            Self::Mention { by } => write!(f, "@{by} mentioned you"),
 
             Self::ThreadReply { by, threads } => {
-                write!(f, "thread-reply: @{by} replied in ")?;
+                write!(f, "@{by} replied in ")?;
                 match threads {
                     1 => write!(f, "a thread you own"),
                     n => write!(f, "{n} threads you own"),
@@ -130,7 +122,7 @@ impl fmt::Display for AttentionReason {
             }
 
             Self::ResolvedUnanswered { by, threads } => {
-                write!(f, "resolved-unanswered: @{by} resolved ")?;
+                write!(f, "@{by} resolved ")?;
                 match threads {
                     1 => write!(f, "your thread"),
                     n => write!(f, "{n} of your threads"),
@@ -144,19 +136,19 @@ impl fmt::Display for AttentionReason {
             } => {
                 let sha = short_sha(since_sha);
                 match new_commits {
-                    1 => write!(f, "re-review: 1 new commit since your review of {sha}"),
-                    n => write!(f, "re-review: {n} new commits since your review of {sha}"),
+                    1 => write!(f, "1 new commit since your review of {sha}"),
+                    n => write!(f, "{n} new commits since your review of {sha}"),
                 }
             }
 
-            Self::ReviewRequested { team: None } => {
-                write!(f, "review-requested: you were asked to review")
-            }
+            // "you were asked to review" spent 24 characters saying what the
+            // queue is for. Whose queue this is never needs restating.
+            Self::ReviewRequested { team: None } => write!(f, "review requested"),
             Self::ReviewRequested { team: Some(team) } => {
-                write!(f, "review-requested: @{team} was asked to review")
+                write!(f, "review requested via @{team}")
             }
 
-            Self::NeedsFirstLook { rule } => write!(f, "needs-first-look: matches {rule}"),
+            Self::NeedsFirstLook { rule } => write!(f, "matches {rule}"),
         }
     }
 }
@@ -194,9 +186,10 @@ fn short_sha(sha: &str) -> &str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn priorities_are_unique_and_contiguous() {
-        let all = [
+    /// One of each variant, so a test covering "all of them" keeps covering all
+    /// of them when a variant is added.
+    fn every_variant() -> [AttentionReason; 6] {
+        [
             AttentionReason::Mention { by: "a".into() },
             AttentionReason::ThreadReply {
                 by: "a".into(),
@@ -212,43 +205,32 @@ mod tests {
             },
             AttentionReason::ReviewRequested { team: None },
             AttentionReason::NeedsFirstLook { rule: "a".into() },
-        ];
+        ]
+    }
+
+    #[test]
+    fn priorities_are_unique_and_contiguous() {
+        let all = every_variant();
 
         let mut priorities: Vec<u8> = all.iter().map(AttentionReason::priority).collect();
         priorities.sort_unstable();
         assert_eq!(priorities, (1..=6).collect::<Vec<u8>>());
+    }
 
-        // The by-discriminant lookup the ledger uses must agree with the
-        // variant's own priority, or a queue read would sort differently from a
-        // fresh classification.
-        for reason in &all {
-            assert_eq!(
-                AttentionReason::priority_for(reason.discriminant()),
-                Some(reason.priority()),
-            );
+    #[test]
+    fn every_variant_survives_a_round_trip_through_json() {
+        // The ledger stores reasons as JSON and renders them on read, so a
+        // variant that didn't round-trip would come back as a lost queue row.
+        for reason in every_variant() {
+            let json = serde_json::to_string(&reason).expect("serialises");
+            let back: AttentionReason = serde_json::from_str(&json).expect("deserialises");
+            assert_eq!(back, reason, "{json}");
         }
-        assert_eq!(AttentionReason::priority_for("nonsense"), None);
     }
 
     #[test]
     fn discriminants_are_unique() {
-        let all = [
-            AttentionReason::Mention { by: "a".into() },
-            AttentionReason::ThreadReply {
-                by: "a".into(),
-                threads: 1,
-            },
-            AttentionReason::ResolvedUnanswered {
-                by: "a".into(),
-                threads: 1,
-            },
-            AttentionReason::ReReview {
-                new_commits: 1,
-                since_sha: "a".into(),
-            },
-            AttentionReason::ReviewRequested { team: None },
-            AttentionReason::NeedsFirstLook { rule: "a".into() },
-        ];
+        let all = every_variant();
 
         let mut names: Vec<&str> = all.iter().map(AttentionReason::discriminant).collect();
         names.sort_unstable();

@@ -179,8 +179,11 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
         for a in &show.attention {
             println!(
                 "    {} {}",
-                format!("[p{}]", a.priority).if_supports_color(Stdout, |s| s.dimmed().to_string()),
-                a.detail.if_supports_color(Stdout, |s| s.cyan().to_string()),
+                format!("[p{}]", a.priority())
+                    .if_supports_color(Stdout, |s| s.dimmed().to_string()),
+                a.reason
+                    .to_string()
+                    .if_supports_color(Stdout, |s| s.cyan().to_string()),
             );
         }
     }
@@ -339,7 +342,8 @@ struct ReviewerJson<'a> {
 #[derive(Serialize)]
 struct AttentionJson<'a> {
     reason: &'a str,
-    detail: &'a str,
+    /// Rendered on the way out — the ledger stores the reason, not its prose.
+    detail: String,
     priority: u8,
     since: String,
 }
@@ -386,9 +390,9 @@ fn json<'a>(show: &'a PrShow, url: Option<&'a str>) -> ShowJson<'a> {
             .attention
             .iter()
             .map(|a| AttentionJson {
-                reason: &a.reason,
-                detail: &a.detail,
-                priority: a.priority,
+                reason: a.reason.discriminant(),
+                detail: a.reason.to_string(),
+                priority: a.priority(),
                 since: a.since.to_string(),
             })
             .collect(),

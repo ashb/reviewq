@@ -2,4 +2,4 @@
 source: crates/reviewq-core/tests/scenarios.rs
 expression: "Identical to `snoozed` but the snooze has lapsed: the same reasons reappear unchanged."
 ---
-[p4] re-review: 2 new commits since your review of 1111111 (since 2026-08-04T20:00:00Z)
+[p4] 2 new commits since your review of 1111111 (since 2026-08-04T20:00:00Z)

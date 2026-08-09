@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 4;
+pub const SCHEMA_VERSION: usize = 5;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -233,12 +233,49 @@ ALTER TABLE reviewers_v4 RENAME TO reviewers;
 ALTER TABLE sync_meta_v4 RENAME TO sync_meta;
 ";
 
+/// `attention.detail` held the *rendered* reason string, which is a display
+/// concern and does not belong in storage: improving the wording left every
+/// stored row showing the old text, and since `prs_needing_detail` only
+/// refetches PRs whose detail is stale, a quiet PR would have kept it forever.
+///
+/// The table now stores the reason itself, serialised, in `payload`, and the
+/// string is rendered on read. `reason` stays as the discriminant — that's
+/// data, and the primary key needs it to keep one row per reason kind.
+///
+/// Existing rows cannot be carried over, because prose cannot be parsed back
+/// into a variant. They are dropped, and every PR that had one is marked
+/// detail-stale so the next sync recomputes it. Attention is derived data — a
+/// detail pass is what produces it — so a sync rebuilds all of it. The queue is
+/// empty in between, which `list` already explains how to fix.
+const MIGRATION_5: &str = r"
+-- Before dropping the rows, mark their PRs for a fresh detail pass.
+UPDATE prs SET detail_synced_at = NULL
+WHERE EXISTS (
+  SELECT 1 FROM attention a
+  WHERE a.repo_id = prs.repo_id AND a.pr_number = prs.number
+);
+
+CREATE TABLE attention_v5 (
+  repo_id     INTEGER NOT NULL,
+  pr_number   INTEGER NOT NULL,
+  reason      TEXT NOT NULL,
+  since       TEXT NOT NULL,
+  payload     TEXT NOT NULL,
+  PRIMARY KEY (repo_id, pr_number, reason),
+  FOREIGN KEY (repo_id, pr_number) REFERENCES prs(repo_id, number)
+);
+
+DROP TABLE attention;
+ALTER TABLE attention_v5 RENAME TO attention;
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
         M::up(MIGRATION_2),
         M::up(MIGRATION_3),
         M::up(MIGRATION_4),
+        M::up(MIGRATION_5),
     ])
 });
 

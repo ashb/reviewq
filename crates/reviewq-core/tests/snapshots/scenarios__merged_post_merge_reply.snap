@@ -2,4 +2,4 @@
 source: crates/reviewq-core/tests/scenarios.rs
 expression: "A project that opts into post-merge review: someone replied in my thread after the PR merged, so it still surfaces (thread-reply). needs-first-look never fires on merged."
 ---
-[p2] thread-reply: @potiuk replied in a thread you own (since 2026-08-05T09:30:00Z)
+[p2] @potiuk replied in a thread you own (since 2026-08-05T09:30:00Z)

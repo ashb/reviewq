@@ -2,4 +2,4 @@
 source: crates/reviewq-core/tests/scenarios.rs
 expression: "Someone replied in an unresolved thread I own: thread-reply."
 ---
-[p2] thread-reply: @kaxil replied in a thread you own (since 2026-08-05T08:30:00Z)
+[p2] @kaxil replied in a thread you own (since 2026-08-05T08:30:00Z)
