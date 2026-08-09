@@ -1618,19 +1618,33 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "etcetera",
  "jiff",
  "owo-colors",
+ "reviewq-app",
  "reviewq-core",
  "reviewq-forge",
  "reviewq-ledger",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "reviewq-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "etcetera",
+ "jiff",
+ "reviewq-core",
+ "reviewq-forge",
+ "reviewq-ledger",
+ "serde",
+ "tempfile",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

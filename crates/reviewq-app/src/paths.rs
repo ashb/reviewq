@@ -14,6 +14,8 @@ pub fn config_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
+/// The directory [`config_file`] sits in, `$XDG_CONFIG_HOME/reviewq`. Reported
+/// by `doctor` and created on first run.
 pub fn config_dir() -> Result<PathBuf> {
     let base = etcetera::choose_base_strategy().context("cannot determine home directory")?;
     Ok(base.config_dir().join("reviewq"))
@@ -27,6 +29,8 @@ pub fn database_file() -> Result<PathBuf> {
     Ok(data_dir()?.join("reviewq.db"))
 }
 
+/// The directory [`database_file`] sits in, `$XDG_DATA_HOME/reviewq`. Created
+/// by `Ledger::open` when it first writes the ledger.
 pub fn data_dir() -> Result<PathBuf> {
     let base = etcetera::choose_base_strategy().context("cannot determine home directory")?;
     Ok(base.data_dir().join("reviewq"))

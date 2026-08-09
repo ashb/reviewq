@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/reviewq",
+    "crates/reviewq-app",
     "crates/reviewq-core",
     "crates/reviewq-forge",
     "crates/reviewq-ledger",
@@ -20,6 +21,7 @@ todo = "deny"
 unimplemented = "deny"
 
 [workspace.dependencies]
+reviewq-app = { path = "crates/reviewq-app" }
 reviewq-core = { path = "crates/reviewq-core" }
 reviewq-forge = { path = "crates/reviewq-forge" }
 reviewq-ledger = { path = "crates/reviewq-ledger" }

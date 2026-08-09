@@ -12,8 +12,8 @@ use jiff::Timestamp;
 use reviewq_ledger::Ledger;
 
 use crate::cli::NumberArgs;
-use crate::config::RepoRef;
-use crate::{config, paths};
+use reviewq_app::config::RepoRef;
+use reviewq_app::{config, paths};
 
 pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCode> {
     let loaded = config::load(config_path)?;
@@ -105,7 +105,7 @@ async fn refresh_after_review(config: &config::Config, repo: &RepoRef, number: u
         .find(|p| p.repos.contains(repo))
         .with_context(|| format!("{} is no longer configured", repo.slug()))?;
 
-    super::sync::refresh_one(
+    reviewq_app::sync::refresh_one(
         forge.as_ref(),
         &ledger,
         repo_id,

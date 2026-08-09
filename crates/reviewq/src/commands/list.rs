@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::cli::{ListArgs, NextArgs};
 use crate::commands::EXIT_EMPTY;
-use crate::paths;
+use reviewq_app::paths;
 
 pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;

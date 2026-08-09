@@ -22,7 +22,7 @@ purity:
 	@tree=$$(cargo tree --package reviewq-core --edges normal --prefix none --no-dedupe) \
 		|| { echo "purity check could not run: cargo tree failed"; exit 1; }; \
 	found=$$(printf '%s\n' "$$tree" | awk '{print $$1}' | sort -u \
-		| grep -xE 'tokio|octocrab|rusqlite|reqwest|hyper|reviewq-forge|reviewq' || true); \
+		| grep -xE 'tokio|octocrab|rusqlite|reqwest|hyper|reviewq-forge|reviewq-app|reviewq' || true); \
 	if [ -n "$$found" ]; then \
 		echo "reviewq-core gained an IO dependency:"; printf '%s\n' "$$found" | sed 's/^/  /'; \
 		exit 1; \

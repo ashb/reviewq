@@ -5,8 +5,6 @@
 
 mod cli;
 mod commands;
-mod config;
-mod paths;
 
 use std::process::ExitCode;
 

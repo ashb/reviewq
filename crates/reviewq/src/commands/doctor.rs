@@ -6,8 +6,8 @@ use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_forge::{build, resolve_token};
 use reviewq_ledger::Ledger;
 
-use super::sync::{CURSOR_KEY, TRUNCATED_KEY};
-use crate::{config, paths};
+use reviewq_app::sync::{CURSOR_KEY, TRUNCATED_KEY};
+use reviewq_app::{config, paths};
 
 /// Report everything that has to be true before a sync can work, and exit
 /// non-zero if any of it isn't.

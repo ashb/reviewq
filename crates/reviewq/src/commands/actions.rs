@@ -10,9 +10,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 
-use super::resolve::{open_for_number, repo_for};
 use crate::cli::{NumberArgs, SnoozeArgs};
-use crate::config;
+use reviewq_app::config;
+use reviewq_app::resolve::{open_for_number, repo_for};
 
 pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCode> {
     let (ledger, repo_id, show) = open_for_number(args.number)?;

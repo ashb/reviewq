@@ -1,3 +1,11 @@
+//! The config file: its shape, its defaults, and its validation.
+//!
+//! Everything here is deserialised straight from `config.toml`, so field names
+//! are part of the file format — renaming one is a breaking change unless a
+//! `#[serde(rename)]` keeps the old key working. Validation happens once at
+//! load, so a bad glob or an unresolvable forge host is an error before any
+//! work starts rather than halfway through a sync.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -12,19 +20,26 @@ use reviewq_forge::{
 /// than serialised from `Config::default()`) so the comments survive.
 pub const DEFAULT_CONFIG: &str = include_str!("config.default.toml");
 
+/// The whole config file, as loaded and validated.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Who "me" is. The only required section — every reason is computed
+    /// relative to this account.
     pub identity: Identity,
     /// One or more projects, each bundling its repos with the interest rules
     /// that apply to them. `[[project]]` in TOML.
     #[serde(rename = "project", default)]
     pub projects: Vec<Project>,
+    /// Accounts whose activity never counts as someone wanting my attention.
     #[serde(default)]
     pub bots: Bots,
+    /// How `reviewq review` hands a PR off to another tool.
     #[serde(default)]
     pub handoff: Handoff,
+    /// Sweep window, overlap and page size.
     #[serde(default)]
     pub sync: Sync,
+    /// Presentation preferences that the terminal can't be asked about.
     #[serde(default)]
     pub output: Output,
     /// Global default for which relationships make a PR involve me; a project
@@ -40,6 +55,7 @@ pub struct Config {
     pub forges: ForgeTable,
 }
 
+/// Who reviewq is computing a queue for.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Identity {
     /// My GitHub login. Reasons are computed relative to this account.
@@ -70,9 +86,15 @@ pub struct Project {
     pub include_merged: bool,
 }
 
+/// One repo to watch, as named in config. The ledger's own [`RepoKey`] is the
+/// same identity from the other side of the boundary; [`RepoRef::key`] converts.
+///
+/// [`RepoKey`]: reviewq_ledger::RepoKey
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RepoRef {
+    /// The repo's owner — a user or org login.
     pub owner: String,
+    /// The repo's name, without the owner.
     pub name: String,
     /// The host the repo lives on; selects its `[forge]` entry. Defaults to
     /// public GitHub.
@@ -81,6 +103,7 @@ pub struct RepoRef {
 }
 
 impl RepoRef {
+    /// `owner/name` — how a repo is written in output and in search queries.
     pub fn slug(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
@@ -107,9 +130,14 @@ fn default_host() -> String {
 pub struct InterestRule {
     /// Optional label; when set it becomes the rule's reason string.
     pub name: Option<String>,
+    /// Match a PR carrying any of these labels.
     pub labels: Vec<String>,
+    /// Match a PR touching any file these globs match.
     pub paths: Vec<String>,
+    /// Match a PR whose author has any of these associations to the repo, e.g.
+    /// `FIRST_TIME_CONTRIBUTOR`.
     pub author_associations: Vec<String>,
+    /// Match a PR in any of these milestones.
     pub milestones: Vec<String>,
 }
 
@@ -154,12 +182,17 @@ impl InterestRule {
     }
 }
 
+/// Accounts to discount when deciding whether something wants my attention: a
+/// bot's comment or review is noise, not a person waiting on me.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Bots {
+    /// The logins to discount, `[bot]` suffix included.
     pub logins: Vec<String>,
 }
 
+/// How `reviewq review` hands off. reviewq never reviews anything itself — it
+/// execs whatever tool does.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Handoff {
@@ -170,6 +203,8 @@ pub struct Handoff {
     pub review_command: Vec<String>,
 }
 
+/// How much of the forge a sync reaches for, and how carefully it overlaps
+/// with what the last one already saw.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Sync {
@@ -182,6 +217,8 @@ pub struct Sync {
     pub page_size: u32,
 }
 
+/// Presentation choices a terminal can't be queried for, so they have to be
+/// configured.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Output {
@@ -262,8 +299,13 @@ impl Default for Involvement {
 /// was just created for them.
 #[derive(Debug)]
 pub struct Loaded {
+    /// The parsed, validated config.
     pub config: Config,
+    /// Where it was read from — worth reporting, since it may have been found
+    /// rather than named.
     pub path: PathBuf,
+    /// This load just wrote the default config, so nothing in it reflects any
+    /// choice the user has made yet.
     pub created: bool,
 }
 

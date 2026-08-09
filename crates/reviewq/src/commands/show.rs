@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::cli::ShowArgs;
 use crate::commands::EXIT_EMPTY;
-use crate::{config, paths};
+use reviewq_app::{config, paths};
 
 pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
     let target = &args.target;
