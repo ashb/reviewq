@@ -2508,6 +2508,7 @@ dependencies = [
  "reviewq-app",
  "reviewq-core",
  "reviewq-ledger",
+ "tokio",
  "tui-markdown",
 ]
 

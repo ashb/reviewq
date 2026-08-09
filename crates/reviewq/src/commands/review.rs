@@ -3,13 +3,10 @@
 //! handoff shows up right away. reviewq only ever hands off — it never decides
 //! a review is finished, so this does not imply `done`.
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
-use jiff::Timestamp;
-use reviewq_ledger::Ledger;
 
 use crate::cli::NumberArgs;
 use reviewq_app::config::RepoRef;
@@ -43,7 +40,7 @@ pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCo
 
     match status.code() {
         Some(0) => {
-            if let Err(err) = refresh_after_review(&loaded.config, &repo, args.number).await {
+            if let Err(err) = refresh_after_review(config_path, args.number).await {
                 tracing::warn!(number = args.number, %err, "could not refresh PR state after review");
             }
             Ok(ExitCode::SUCCESS)
@@ -87,38 +84,15 @@ fn resolve_repo(config: &config::Config, number: u64) -> Result<RepoRef> {
 
 /// Refresh this PR's tier-2 detail right after handing it off, so a review
 /// made during the handoff shows up immediately rather than waiting for the
-/// next `reviewq sync`. Skipped (not an error) for a PR the ledger has never
-/// heard of — `review` names any PR, tracked or not. Best-effort: token or
-/// network trouble here must not turn a successful review session into a
-/// failing `reviewq review` exit.
-async fn refresh_after_review(config: &config::Config, repo: &RepoRef, number: u64) -> Result<()> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    let repo_id = ledger.ensure_repo(&repo.key())?;
-    let Some(show) = ledger.show(repo_id, number)? else {
-        return Ok(());
-    };
-
-    let forge = config.forge_for(&repo.host)?;
-    let project = config
-        .projects
-        .iter()
-        .find(|p| p.repos.contains(repo))
-        .with_context(|| format!("{} is no longer configured", repo.slug()))?;
-
-    reviewq_app::sync::refresh_one(
-        forge.as_ref(),
-        &ledger,
-        repo_id,
-        repo,
-        &config.identity.login,
-        &config.bots.logins,
-        project.include_merged,
-        &HashSet::new(),
-        &show.pr,
-        show.tracked_reason.as_deref().unwrap_or(""),
-        Timestamp::now(),
-    )
-    .await?;
+/// next `reviewq sync`.
+///
+/// A PR the ledger has never heard of is skipped rather than an error —
+/// `review` names any PR, tracked or not — which is exactly what
+/// [`Refreshed::Untracked`] reports. Best-effort overall: token or network
+/// trouble here must not turn a successful review session into a failing
+/// `reviewq review` exit, so the caller only warns.
+async fn refresh_after_review(config_path: Option<&Path>, number: u64) -> Result<()> {
+    reviewq_app::sync::sync_one(config_path, number).await?;
     Ok(())
 }
 

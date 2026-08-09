@@ -79,8 +79,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Fetch updates from the forge and rebuild the ledger.
-    Sync,
+    /// Fetch updates from the forge and rebuild the ledger. With a PR number,
+    /// refresh just that one.
+    Sync(SyncArgs),
 
     /// Show the queue: PRs that want attention, most-urgent first.
     List(ListArgs),
@@ -126,6 +127,15 @@ pub enum Command {
 
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Refresh only this PR, skipping the sweep and the involvement searches.
+    /// Much cheaper than a full sync, but it can't discover a PR the ledger
+    /// hasn't seen, nor a review requested of a team you're in.
+    #[arg(value_parser = pr_number)]
+    pub number: Option<u64>,
 }
 
 #[derive(Debug, Args)]

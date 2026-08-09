@@ -9,7 +9,9 @@
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
+use reviewq_app::sync::Refreshed;
 use reviewq_ledger::{Ledger, Located, PrShow, QueueItem};
+use tokio::runtime::Handle;
 
 use crate::keys::{self, Action};
 use crate::theme::Theme;
@@ -38,6 +40,12 @@ pub struct App {
     pub detail_scroll: u16,
     /// The key reference is up, covering the panes beneath it.
     pub help: bool,
+    /// A one-line note in the header: what is happening, or what just did.
+    pub status: Option<String>,
+    /// A PR whose sync has been asked for but not yet run. Held rather than
+    /// acted on immediately so the loop can draw the "syncing" note *before*
+    /// blocking on the network, instead of after.
+    pending_sync: Option<u64>,
     /// How many rows the focused pane last displayed, so a paging key moves by a
     /// screenful rather than a guessed constant. Written by the renderer, which
     /// is the only thing that knows the laid-out height; 1 until the first draw.
@@ -80,6 +88,8 @@ impl App {
             focus: Focus::default(),
             detail_scroll: 0,
             help: false,
+            status: None,
+            pending_sync: None,
             page: 1,
             detail_lines: 0,
             ledger,
@@ -167,13 +177,64 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             terminal.draw(|frame| ui::draw(frame, self))?;
-            // Blocking read: nothing animates yet, so waking on a timer would
-            // only burn cycles redrawing an identical screen.
+
+            // A sync runs here rather than in `on_key`, because the draw above
+            // is what puts "syncing …" on screen before the network call
+            // blocks. Looping straight back afterwards redraws with the result.
+            if let Some(number) = self.pending_sync.take() {
+                self.sync_selected(number);
+                continue;
+            }
+
+            // Blocking read: nothing animates, so waking on a timer would only
+            // burn cycles redrawing an identical screen.
             if let Event::Key(key) = event::read()? {
                 self.on_key(key)?;
             }
         }
         Ok(())
+    }
+
+    /// Fetch one PR's detail from the forge, then re-read the queue.
+    ///
+    /// Blocks the interface for the duration. That is the honest behaviour for
+    /// something the user explicitly asked for and is waiting on — a single
+    /// GraphQL query — and it avoids a background task, a channel and a spinner
+    /// for a round trip that is normally well under a second.
+    ///
+    /// A failure becomes the status line rather than ending the session: a bad
+    /// token or a dropped connection shouldn't throw away the queue you were
+    /// reading.
+    fn sync_selected(&mut self, number: u64) {
+        self.status = match self.fetch(number) {
+            Ok(Refreshed::Updated { queued, .. }) => Some(format!(
+                "#{number} synced — {}",
+                if queued {
+                    "wants attention"
+                } else {
+                    "wants nothing"
+                }
+            )),
+            Ok(Refreshed::Gone) => Some(format!("#{number} no longer exists on the forge")),
+            Ok(Refreshed::Untracked) => Some(format!("#{number} is not in the ledger")),
+            Err(err) => Some(format!("#{number} sync failed: {err:#}")),
+        };
+        // The fetch may have changed what is on the queue, and does change the
+        // selected PR's detail either way.
+        if let Err(err) = self.reload() {
+            self.status = Some(format!("reload failed: {err:#}"));
+        }
+    }
+
+    /// Run the async refresh from this synchronous loop.
+    ///
+    /// `block_in_place` hands the worker thread's other tasks to a sibling
+    /// before blocking on it, which is what makes `block_on` legal inside a
+    /// runtime — the multi-threaded runtime `main` already builds.
+    fn fetch(&self, number: u64) -> Result<Refreshed> {
+        tokio::task::block_in_place(|| {
+            Handle::current().block_on(reviewq_app::sync::sync_one(None, number))
+        })
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -205,6 +266,13 @@ impl App {
             Some(Action::PageUp) => self.scroll(-page)?,
             Some(Action::First) => self.scroll_to_start()?,
             Some(Action::Last) => self.scroll_to_end()?,
+            Some(Action::SyncSelected) => {
+                if let Some(item) = self.current() {
+                    let number = item.item.pr.number;
+                    self.status = Some(format!("syncing #{number}…"));
+                    self.pending_sync = Some(number);
+                }
+            }
         }
         Ok(())
     }

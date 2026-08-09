@@ -9,11 +9,45 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use reviewq_app::sync::{RepoSummary, SyncProgress, summary_line};
+use reviewq_app::sync::{Refreshed, RepoSummary, SyncProgress, summary_line};
 
-pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> {
+use crate::cli::SyncArgs;
+use crate::commands::EXIT_EMPTY;
+
+pub async fn run(config_path: Option<&Path>, args: &SyncArgs, logging: bool) -> Result<ExitCode> {
+    if let Some(number) = args.number {
+        return one(config_path, number).await;
+    }
     let mut progress = StderrProgress::new(logging);
     reviewq_app::sync::run(config_path, &mut progress).await
+}
+
+/// `reviewq sync <number>`: refresh one PR's detail and say what changed.
+async fn one(config_path: Option<&Path>, number: u64) -> Result<ExitCode> {
+    match reviewq_app::sync::sync_one(config_path, number).await? {
+        Refreshed::Untracked => {
+            eprintln!("#{number} is not in the ledger — run `reviewq sync` first");
+            Ok(ExitCode::from(EXIT_EMPTY))
+        }
+        Refreshed::Gone => {
+            eprintln!("#{number} no longer exists on the forge — dropped from the queue");
+            Ok(ExitCode::SUCCESS)
+        }
+        Refreshed::Updated {
+            repo,
+            queued,
+            cost,
+            remaining,
+        } => {
+            let state = if queued {
+                "wants attention"
+            } else {
+                "wants nothing"
+            };
+            println!("sync {repo}#{number}: {state}; {cost} pts, {remaining} left");
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 /// The CLI's progress sink: pages on stderr, so stdout carries only the

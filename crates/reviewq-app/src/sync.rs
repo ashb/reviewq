@@ -362,10 +362,104 @@ async fn detail_pass(
     Ok(())
 }
 
+/// What refreshing one PR did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refreshed {
+    /// Its detail was fetched and stored.
+    Updated {
+        /// `owner/name` it was fetched from.
+        repo: String,
+        /// It now holds at least one attention reason — it's on the queue.
+        queued: bool,
+        /// GraphQL points the fetch spent.
+        cost: u32,
+        /// Points left in the hourly budget afterwards.
+        remaining: u32,
+    },
+    /// The ledger has never heard of this number, so there is nothing to
+    /// refresh — a full `sync` has to find it first.
+    Untracked,
+    /// The forge no longer has it. Recorded as unavailable, so it leaves the
+    /// queue and stops being refetched.
+    Gone,
+}
+
+/// Refresh one PR by number, resolving from the ledger and config whatever
+/// [`refresh_one`] needs.
+///
+/// The entry point for wanting one PR up to date without a whole sync: the
+/// `sync <number>` command, the TUI's sync key, and `review`'s refresh after a
+/// handoff all come through here rather than repeating the resolution dance.
+///
+/// Which repo the number belongs to comes from the ledger, not config, so a
+/// bare number resolves the same way it does for `show`/`done`/`mute`.
+pub async fn sync_one(config_path: Option<&Path>, number: u64) -> Result<Refreshed> {
+    let db = paths::database_file()?;
+    let Some(key) = reviewq_ledger::repos_with_pr(&db, number)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(Refreshed::Untracked);
+    };
+
+    let loaded = config::load(config_path)?;
+    let cfg = &loaded.config;
+    let repo = cfg
+        .repos()
+        .find(|r| r.key() == key)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "#{number} was last synced from {}/{}, which is no longer configured",
+                key.owner, key.name
+            )
+        })?;
+    let project = cfg
+        .projects
+        .iter()
+        .find(|p| p.repos.contains(&repo))
+        .with_context(|| format!("{} is no longer configured", repo.slug()))?;
+
+    let ledger = Ledger::open(&db)?;
+    let repo_id = ledger.ensure_repo(&key)?;
+    let Some(show) = ledger.show(repo_id, number)? else {
+        return Ok(Refreshed::Untracked);
+    };
+
+    let forge = cfg.forge_for(&repo.host)?;
+    let outcome = refresh_one(
+        forge.as_ref(),
+        &ledger,
+        repo_id,
+        &repo,
+        &cfg.identity.login,
+        &cfg.bots.logins,
+        project.include_merged,
+        // No involvement search has run, so a review requested of a *team* isn't
+        // known here. A full sync is what resolves those; this only refreshes
+        // what one PR's own detail can say.
+        &HashSet::new(),
+        &show.pr,
+        show.tracked_reason.as_deref().unwrap_or(""),
+        Timestamp::now(),
+    )
+    .await?;
+
+    Ok(match outcome {
+        None => Refreshed::Gone,
+        Some((detail, queued)) => Refreshed::Updated {
+            repo: repo.slug(),
+            queued,
+            cost: detail.cost,
+            remaining: detail.remaining,
+        },
+    })
+}
+
 /// Fetch one PR's tier-2 detail, classify it against what the fetch saw, and
 /// commit the result — the per-item body `detail_pass` runs over the whole
-/// tracked set, factored out so `review` can refresh a single PR right after
-/// handing it off, without waiting for the next full sync.
+/// tracked set, factored out so [`sync_one`] can refresh a single PR without
+/// waiting for a whole sync.
 ///
 /// `None` when the forge has no such PR, having first recorded that via
 /// [`Ledger::mark_detail_unavailable`] — one unreachable PR must not abort a

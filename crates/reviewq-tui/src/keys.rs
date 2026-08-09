@@ -26,6 +26,8 @@ pub enum Action {
     First,
     /// Jump to the last row.
     Last,
+    /// Fetch the selected PR's detail from the forge.
+    SyncSelected,
     /// Show or hide the key reference.
     Help,
 }
@@ -130,6 +132,14 @@ pub const BINDINGS: &[Binding] = &[
         keys: "Tab",
         what: "switch pane",
         group: "View",
+        footer: true,
+    },
+    Binding {
+        action: Action::SyncSelected,
+        chords: &[key(KeyCode::Char('s'))],
+        keys: "s",
+        what: "sync this PR",
+        group: "Forge",
         footer: true,
     },
     Binding {

@@ -70,6 +70,14 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(color(t.dim)),
         ));
     }
+    // A status note replaces nothing — it sits after the counts, so what it's
+    // reporting on stays visible next to it.
+    if let Some(status) = &app.status {
+        spans.push(Span::styled(
+            format!("  ·  {status}"),
+            Style::default().fg(color(t.warn)),
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -366,14 +374,18 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// A binding's footer label, which for the two focus-sensitive ones says what
-/// they'll do *now* — `j` moving in one pane and scrolling in the other reads as
-/// a bug otherwise.
+/// A binding's footer label.
+///
+/// Shorter than the overlay's `what` where that matters — the footer is the
+/// thing that has to fit 80 columns as bindings accumulate, and the overlay is
+/// where the roomier wording lives. `Down` is the exception that changes meaning
+/// rather than length: `j` moving in one pane and scrolling in the other reads
+/// as a bug unless the label says which.
 fn footer_label(binding: &keys::Binding, focus: Focus) -> &'static str {
     match (binding.action, focus) {
         (Action::Down, Focus::Detail) => "scroll",
-        (Action::SwitchPane, Focus::Queue) => "to description",
-        (Action::SwitchPane, Focus::Detail) => "to queue",
+        (Action::SwitchPane, _) => "pane",
+        (Action::SyncSelected, _) => "sync PR",
         _ => binding.what,
     }
 }
@@ -734,12 +746,12 @@ Adds a `deferrable` flag to `S3KeySensor`.
         assert_eq!(app.focus, Focus::Queue);
         let queue_focused = render(&mut app, 100, 24).join("\n");
         assert!(queue_focused.contains("move"), "{queue_focused}");
-        assert!(queue_focused.contains("description"), "{queue_focused}");
+        assert!(queue_focused.contains("Tab pane"), "{queue_focused}");
 
         app.focus = Focus::Detail;
         let detail_focused = render(&mut app, 100, 24).join("\n");
         assert!(detail_focused.contains("scroll"), "{detail_focused}");
-        assert!(detail_focused.contains("to queue"), "{detail_focused}");
+        assert!(detail_focused.contains("Tab pane"), "{detail_focused}");
     }
 
     #[test]
@@ -761,6 +773,17 @@ Adds a `deferrable` flag to `S3KeySensor`.
             "footer is {} cols: {footer}",
             footer.chars().count()
         );
+    }
+
+    #[test]
+    fn a_status_note_appears_in_the_header_beside_the_counts() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        app.status = Some("syncing #70135…".to_string());
+        let header = render(&mut app, 100, 20).first().expect("header").clone();
+
+        assert!(header.contains("syncing #70135"), "{header}");
+        // What it's reporting on is still readable next to it.
+        assert!(header.contains("2 on the queue"), "{header}");
     }
 
     #[test]
