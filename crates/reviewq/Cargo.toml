@@ -10,6 +10,7 @@ reviewq-app.workspace = true
 reviewq-core.workspace = true
 reviewq-forge.workspace = true
 reviewq-ledger.workspace = true
+reviewq-tui.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true

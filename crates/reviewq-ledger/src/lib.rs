@@ -166,6 +166,10 @@ pub struct QueueItem {
 pub struct PrShow {
     /// The stored snapshot.
     pub pr: PrSnapshot,
+    /// The PR's description, as raw markdown — rendering it is the frontend's
+    /// business. `None` for a PR that has had no detail pass yet, since the
+    /// sweep never fetches a body; empty for one that genuinely has none.
+    pub body: Option<String>,
     /// The rendered `tracked_reason`, if tracked.
     pub tracked_reason: Option<String>,
     /// My history on the PR.
@@ -589,6 +593,7 @@ impl Ledger {
         threads: &[ThreadState],
         reviewers: &[ReviewerVerdict],
         attention: &[Attention],
+        body: Option<&str>,
         now: Timestamp,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -600,9 +605,15 @@ impl Ledger {
         // `prs_needing_detail` against GitHub's whole-second `updatedAt` is
         // correct. A sub-second stamp would sort *before* an equal-second
         // `updatedAt` (`.` < `Z`), re-fetching that PR every sync forever.
+        //
+        // `body` is written from the same fetch, so an edited description lands
+        // with everything else the detail pass saw. A `None` leaves whatever is
+        // stored alone rather than blanking it — a caller with no body to offer
+        // isn't asserting the PR has none.
         tx.execute(
-            "UPDATE prs SET detail_synced_at = ?3 WHERE repo_id = ?1 AND number = ?2",
-            params![repo_id, number as i64, whole_second(now).to_string()],
+            "UPDATE prs SET detail_synced_at = ?3, body = COALESCE(?4, body) \
+             WHERE repo_id = ?1 AND number = ?2",
+            params![repo_id, number as i64, whole_second(now).to_string(), body],
         )
         .with_context(|| format!("stamping detail_synced_at for #{number}"))?;
         tx.commit().context("committing PR detail")?;
@@ -784,7 +795,7 @@ impl Ledger {
             .conn
             .query_row(
                 &format!(
-                    "SELECT {PR_COLUMNS}, p.tracked_reason FROM prs p \
+                    "SELECT {PR_COLUMNS}, p.tracked_reason, p.body FROM prs p \
                      WHERE p.repo_id = ?1 AND p.number = ?2"
                 ),
                 params![repo_id, number as i64],
@@ -792,12 +803,13 @@ impl Ledger {
                     Ok((
                         snapshot_from_row(row, 0)?,
                         row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
                     ))
                 },
             )
             .optional()
             .with_context(|| format!("reading PR #{number}"))?;
-        let Some((pr, tracked_reason)) = base else {
+        let Some((pr, tracked_reason, body)) = base else {
             return Ok(None);
         };
 
@@ -807,6 +819,7 @@ impl Ledger {
         let attention = self.attention(repo_id, number)?;
         Ok(Some(PrShow {
             pr,
+            body,
             tracked_reason,
             my_state,
             threads,
@@ -1680,7 +1693,7 @@ mod tests {
             done_at: Some(ts("2026-08-06T00:00:00Z")),
         };
         ledger
-            .commit_detail(repo_id, 1, &state, &[], &[], &[], now())
+            .commit_detail(repo_id, 1, &state, &[], &[], &[], None, now())
             .unwrap();
 
         let stored = ledger.my_state(repo_id, 1).unwrap();
@@ -1717,6 +1730,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                None,
                 now(),
             )
             .unwrap();
@@ -1803,6 +1817,7 @@ mod tests {
                 &[thread],
                 &[],
                 &first,
+                None,
                 now(),
             )
             .unwrap();
@@ -1818,7 +1833,7 @@ mod tests {
         // A second detail pass with nothing wipes the earlier rows rather than
         // accumulating them.
         ledger
-            .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], now())
+            .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], None, now())
             .unwrap();
         let show = ledger.show(repo_id, 1).unwrap().unwrap();
         assert!(show.threads.is_empty());
@@ -1848,6 +1863,7 @@ mod tests {
                 &[],
                 &[approved.clone(), changes_requested.clone()],
                 &[],
+                None,
                 now(),
             )
             .unwrap();
@@ -1859,7 +1875,7 @@ mod tests {
         // A second detail pass with nobody left approving replaces the row
         // rather than accumulating alongside it.
         ledger
-            .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], now())
+            .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], None, now())
             .unwrap();
         assert!(
             ledger
@@ -1897,6 +1913,7 @@ mod tests {
                         "2026-08-05T09:00:00Z",
                     ),
                 ],
+                None,
                 now(),
             )
             .unwrap();
@@ -1912,6 +1929,7 @@ mod tests {
                     AttentionReason::NeedsFirstLook { rule: "y".into() },
                     "2026-07-01T00:00:00Z",
                 )],
+                None,
                 now(),
             )
             .unwrap();
@@ -1942,6 +1960,7 @@ mod tests {
                     },
                     "2026-08-05T09:00:00Z",
                 )],
+                None,
                 now(),
             )
             .unwrap();
@@ -2092,6 +2111,7 @@ mod tests {
                 &[],
                 &[],
                 &[attn(reason, since)],
+                None,
                 now(),
             )
             .unwrap();
@@ -2225,6 +2245,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                None,
                 ts("2026-08-06T00:00:00Z"),
             )
             .unwrap();
@@ -2274,6 +2295,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();
@@ -2295,6 +2317,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();
@@ -2320,6 +2343,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();
@@ -2353,6 +2377,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();
@@ -2378,6 +2403,7 @@ mod tests {
                     &[],
                     &[],
                     &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                    None,
                     now(),
                 )
                 .unwrap();
@@ -2407,6 +2433,7 @@ mod tests {
                         "2026-08-05T09:00:00Z",
                     ),
                 ],
+                None,
                 now(),
             )
             .unwrap();
@@ -2477,6 +2504,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();
@@ -2496,6 +2524,7 @@ mod tests {
                     AttentionReason::NeedsFirstLook { rule: "y".into() },
                     "2026-07-01T00:00:00Z",
                 )],
+                None,
                 now(),
             )
             .unwrap();
@@ -2520,6 +2549,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();
@@ -2537,6 +2567,7 @@ mod tests {
                 &[],
                 &[],
                 &[mention("potiuk", "2026-08-05T11:00:00Z")],
+                None,
                 now(),
             )
             .unwrap();

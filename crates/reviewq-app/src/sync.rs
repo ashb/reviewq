@@ -434,6 +434,7 @@ pub async fn refresh_one(
         &detail.threads,
         &detail.reviewers,
         &attention,
+        Some(&detail.body),
         now,
     )?;
     Ok(Some((detail, queued)))

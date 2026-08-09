@@ -489,6 +489,10 @@ struct DetailRepo {
 struct DetailPr {
     number: u64,
     head_ref_oid: String,
+    /// The PR's description. GraphQL types it non-null, but an empty
+    /// description is the common case, so it's defaulted rather than required.
+    #[serde(default)]
+    body: String,
     review_requests: NodeList<ReviewRequestNode>,
     reviews: NodeList<ReviewNode>,
     comments: NodeList<CommentNode>,
@@ -712,6 +716,7 @@ impl DetailPr {
         PrDetail {
             number: self.number,
             head_sha: self.head_ref_oid,
+            body: self.body,
             last_reviewed_sha,
             last_verdict,
             last_action_at: action_times.into_iter().max(),
@@ -794,6 +799,7 @@ query($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       number
       headRefOid
+      body
       reviewRequests(first: 20) {
         nodes { requestedReviewer {
           __typename

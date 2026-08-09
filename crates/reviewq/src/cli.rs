@@ -121,6 +121,9 @@ pub enum Command {
     /// imply `done`.
     Review(NumberArgs),
 
+    /// Browse the queue interactively.
+    Tui,
+
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
 }

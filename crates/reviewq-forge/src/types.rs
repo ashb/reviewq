@@ -83,6 +83,11 @@ pub struct PrDetail {
     /// Head SHA at fetch time; lets the caller detect a head that moved between
     /// the sweep and this fetch.
     pub head_sha: String,
+    /// The PR's description, as raw markdown. Empty when there isn't one.
+    ///
+    /// Fetched here rather than in the sweep because nothing classifies on it —
+    /// it exists to be shown, and only a tracked PR is ever shown.
+    pub body: String,
     /// Head SHA as of my most recent review, if I have reviewed.
     pub last_reviewed_sha: Option<String>,
     /// The verdict of that review.

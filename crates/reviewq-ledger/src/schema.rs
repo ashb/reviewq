@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 5;
+pub const SCHEMA_VERSION: usize = 6;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -269,6 +269,14 @@ DROP TABLE attention;
 ALTER TABLE attention_v5 RENAME TO attention;
 ";
 
+/// The PR description, for display. Null until the PR's next detail pass —
+/// which a sweep will schedule anyway, since anything that edits a body also
+/// moves `updated_at`. Nothing classifies on it, so a null body is only ever a
+/// missing panel, never a wrong queue.
+const MIGRATION_6: &str = r"
+ALTER TABLE prs ADD COLUMN body TEXT;
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -276,6 +284,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(MIGRATION_3),
         M::up(MIGRATION_4),
         M::up(MIGRATION_5),
+        M::up(MIGRATION_6),
     ])
 });
 
