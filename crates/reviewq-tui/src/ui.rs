@@ -359,7 +359,6 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         ("PgUp/Dn", "page"),
         ("g/G", "top/end"),
         ("Tab", switch_to),
-        ("r", "reload"),
         ("q", "quit"),
     ] {
         if !spans.is_empty() {

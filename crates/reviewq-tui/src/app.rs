@@ -88,9 +88,11 @@ impl App {
     /// Re-read the queue from the ledger, keeping the selection on the same PR
     /// where it still exists.
     ///
-    /// Identity is `(repo, number)` rather than the row index: an action can
-    /// drop a PR off the queue or change its urgency, and holding the index
-    /// would silently move the selection to an unrelated PR.
+    /// Identity is `(repo, number)` rather than the row index, because an action
+    /// that writes to the ledger can drop a PR off the queue or change its
+    /// urgency, and holding the index would silently move the selection to an
+    /// unrelated PR. Only the initial load calls this so far, where there is no
+    /// selection to keep — it is written this way for the actions that will.
     fn reload(&mut self) -> Result<()> {
         let held = self
             .current()
@@ -191,7 +193,6 @@ impl App {
             (_, KeyCode::Char('k') | KeyCode::Up) => self.scroll(-1)?,
             (_, KeyCode::Char('g') | KeyCode::Home) => self.scroll_to_start()?,
             (_, KeyCode::Char('G') | KeyCode::End) => self.scroll_to_end()?,
-            (_, KeyCode::Char('r')) => self.reload()?,
             _ => {}
         }
         Ok(())
