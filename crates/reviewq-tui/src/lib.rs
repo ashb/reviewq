@@ -12,6 +12,8 @@
 mod app;
 mod ui;
 
+pub mod keys;
+
 pub mod theme;
 
 use anyhow::Result;

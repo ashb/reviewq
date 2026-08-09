@@ -9,11 +9,12 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 use reviewq_core::model::{PrState, Verdict};
 use reviewq_ledger::{Located, QueueItem, RepoKey};
 
 use crate::app::{App, Focus};
+use crate::keys::{self, Action};
 use crate::theme::{Theme, color};
 
 /// Draw the whole screen: header, the queue beside the detail, footer.
@@ -46,6 +47,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // what stops a scroll running off the end of a short description.
     app.set_detail_lines(lines);
     footer(frame, rows[2], app);
+
+    // Last, so it covers the panes rather than being drawn under them.
+    if app.help {
+        help_overlay(frame, rows[1], &app.theme);
+    }
 }
 
 fn header(frame: &mut Frame, area: Rect, app: &App) {
@@ -343,34 +349,101 @@ fn section(name: &str, t: &Theme) -> Line<'static> {
 
 fn footer(frame: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
-    // The movement keys drive whichever pane has focus, so the label says which
-    // — otherwise `j` doing two different things looks like a bug.
-    let moves = match app.focus {
-        Focus::Queue => "move",
-        Focus::Detail => "scroll",
-    };
-    let switch_to = match app.focus {
-        Focus::Queue => "description",
-        Focus::Detail => "queue",
-    };
     let mut spans = Vec::new();
-    for (key, label) in [
-        ("↑↓/jk", moves),
-        ("PgUp/Dn", "page"),
-        ("g/G", "top/end"),
-        ("Tab", switch_to),
-        ("q", "quit"),
-    ] {
+    for binding in keys::described().filter(|b| b.footer) {
         if !spans.is_empty() {
             spans.push(Span::raw("   "));
         }
-        spans.push(Span::styled(key, Style::default().fg(color(t.key)).bold()));
         spans.push(Span::styled(
-            format!(" {label}"),
+            binding.keys,
+            Style::default().fg(color(t.key)).bold(),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", footer_label(binding, app.focus)),
             Style::default().fg(color(t.dim)),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A binding's footer label, which for the two focus-sensitive ones says what
+/// they'll do *now* — `j` moving in one pane and scrolling in the other reads as
+/// a bug otherwise.
+fn footer_label(binding: &keys::Binding, focus: Focus) -> &'static str {
+    match (binding.action, focus) {
+        (Action::Down, Focus::Detail) => "scroll",
+        (Action::SwitchPane, Focus::Queue) => "to description",
+        (Action::SwitchPane, Focus::Detail) => "to queue",
+        _ => binding.what,
+    }
+}
+
+/// The key reference, centred over the panes.
+///
+/// Sized to its content rather than to a fraction of the screen, so it doesn't
+/// leave a wide empty box on a big terminal. [`Clear`] blanks the cells beneath
+/// instead of painting a background colour, which keeps the overlay from having
+/// to guess the terminal's own — the same reason nothing else here fills.
+fn help_overlay(frame: &mut Frame, screen: Rect, t: &Theme) {
+    let mut rows: Vec<Line> = Vec::new();
+    let mut group = "";
+    for binding in keys::described() {
+        if binding.group != group {
+            if !rows.is_empty() {
+                rows.push(Line::from(""));
+            }
+            rows.push(Line::from(Span::styled(
+                binding.group.to_string(),
+                Style::default()
+                    .fg(color(t.focus))
+                    .add_modifier(Modifier::BOLD),
+            )));
+            group = binding.group;
+        }
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<12}", binding.keys),
+                Style::default().fg(color(t.key)),
+            ),
+            Span::styled(binding.what, Style::default().fg(color(t.text))),
+        ]));
+    }
+    rows.push(Line::from(""));
+    rows.push(Line::from(Span::styled(
+        "  any key to close",
+        Style::default().fg(color(t.dim)),
+    )));
+
+    let width = rows
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(4) as u16;
+    let height = rows.len().saturating_add(2) as u16;
+    let area = centred(screen, width.min(screen.width), height.min(screen.height));
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color(t.focus)))
+        .padding(Padding::horizontal(1))
+        .title(Span::styled(" Keys ", Style::default().fg(color(t.focus))));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// The `width` x `height` rect at the middle of `area`, clamped to fit.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// `#42`, or `owner/name#42` with more than one repo known — the same rule
@@ -666,7 +739,104 @@ Adds a `deferrable` flag to `S3KeySensor`.
         app.focus = Focus::Detail;
         let detail_focused = render(&mut app, 100, 24).join("\n");
         assert!(detail_focused.contains("scroll"), "{detail_focused}");
-        assert!(detail_focused.contains("Tab queue"), "{detail_focused}");
+        assert!(detail_focused.contains("to queue"), "{detail_focused}");
+    }
+
+    #[test]
+    fn the_footer_stays_short_and_points_at_the_key_reference() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let screen = render(&mut app, 100, 24);
+        let footer = screen.last().expect("footer row").clone();
+
+        // Only the essentials, and one of them is how to find the rest.
+        assert!(footer.contains("? / h keys"), "{footer}");
+        assert!(footer.contains("quit"), "{footer}");
+        // The bindings that moved into the overlay are not down here.
+        assert!(!footer.contains("PgDn"), "{footer}");
+        assert!(!footer.contains("first"), "{footer}");
+        // Narrow terminals are the reason the rest moved to the overlay, so it
+        // has to fit a conventional 80 columns with room to spare.
+        assert!(
+            footer.chars().count() <= 72,
+            "footer is {} cols: {footer}",
+            footer.chars().count()
+        );
+    }
+
+    #[test]
+    fn the_help_overlay_lists_every_binding_grouped() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        app.help = true;
+        let screen = render(&mut app, 100, 24).join("\n");
+
+        assert!(screen.contains("Keys"), "{screen}");
+        for group in ["Navigate", "View", "Session"] {
+            assert!(screen.contains(group), "missing group {group}:\n{screen}");
+        }
+        // Including the ones the footer no longer has room for.
+        for what in [
+            "page down",
+            "page up",
+            "first",
+            "last",
+            "switch pane",
+            "quit",
+        ] {
+            assert!(screen.contains(what), "missing binding {what}:\n{screen}");
+        }
+        assert!(screen.contains("any key to close"), "{screen}");
+    }
+
+    #[test]
+    fn the_help_overlay_occludes_what_sits_under_it() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let plain = render(&mut app, 100, 24).join("\n");
+        assert!(plain.contains("Adds a deferrable flag"), "{plain}");
+
+        app.help = true;
+        let covered = render(&mut app, 100, 24).join("\n");
+        // A line the overlay is drawn across is cut, not shown through it. The
+        // overlay is sized to its content, so only the rows and columns it
+        // actually occupies are cleared — everything outside it still renders,
+        // which is why the header survives below.
+        assert!(
+            !covered.contains("Adds a deferrable flag"),
+            "the overlay should cut the line it covers:\n{covered}"
+        );
+        assert!(covered.contains("2 on the queue"), "{covered}");
+        assert!(covered.contains("Navigate"), "{covered}");
+    }
+
+    #[test]
+    fn the_help_overlay_fits_a_terminal_too_small_for_it() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        app.help = true;
+        for (w, h) in [(30u16, 6u16), (24, 4), (100, 40)] {
+            let screen = render(&mut app, w, h);
+            assert_eq!(screen.len(), h as usize);
+            assert!(
+                screen.iter().all(|row| row.chars().count() <= w as usize),
+                "a row overflowed {w} cols at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn centred_clamps_to_the_area_it_is_given() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+        };
+        let fits = centred(area, 10, 4);
+        assert_eq!((fits.x, fits.y, fits.width, fits.height), (5, 3, 10, 4));
+
+        // Asking for more than there is yields the whole area, never a rect
+        // that starts off-screen.
+        let oversized = centred(area, 100, 100);
+        assert_eq!((oversized.x, oversized.y), (0, 0));
+        assert_eq!((oversized.width, oversized.height), (20, 10));
     }
 
     #[test]

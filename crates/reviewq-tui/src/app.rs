@@ -7,10 +7,11 @@
 //! which is network-bound, will need to move off this thread.
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
 use reviewq_ledger::{Ledger, Located, PrShow, QueueItem};
 
+use crate::keys::{self, Action};
 use crate::theme::Theme;
 use crate::ui;
 
@@ -35,6 +36,8 @@ pub struct App {
     /// First visible line of the detail pane. A PR description easily outruns
     /// the pane, so it scrolls independently of the queue's selection.
     pub detail_scroll: u16,
+    /// The key reference is up, covering the panes beneath it.
+    pub help: bool,
     /// How many rows the focused pane last displayed, so a paging key moves by a
     /// screenful rather than a guessed constant. Written by the renderer, which
     /// is the only thing that knows the laid-out height; 1 until the first draw.
@@ -76,6 +79,7 @@ impl App {
             repo_count: 0,
             focus: Focus::default(),
             detail_scroll: 0,
+            help: false,
             page: 1,
             detail_lines: 0,
             ledger,
@@ -177,23 +181,30 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
-        // `ctrl-d`/`ctrl-u` move a whole screenful, matching PageDown/PageUp
-        // rather than the half-page vim gives them — they're bound as synonyms
-        // here because that's how they were asked for.
+        let action = keys::action_for(key);
+
+        // While the key reference is up it owns the keyboard: any key closes it,
+        // so it can be dismissed without first remembering how.
+        if self.help {
+            self.help = false;
+            return Ok(());
+        }
+
+        // `ctrl-d`/`ctrl-u` move a whole screenful rather than the half-page vim
+        // gives them, matching PageDown/PageUp — they're synonyms because that's
+        // how they were asked for.
         let page = self.page() as isize;
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => self.quit = true,
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => self.scroll(page)?,
-            (KeyModifiers::CONTROL, KeyCode::Char('u')) => self.scroll(-page)?,
-            (_, KeyCode::PageDown) => self.scroll(page)?,
-            (_, KeyCode::PageUp) => self.scroll(-page)?,
-            (_, KeyCode::Char('q') | KeyCode::Esc) => self.quit = true,
-            (_, KeyCode::Tab | KeyCode::Char('\t')) => self.toggle_focus(),
-            (_, KeyCode::Char('j') | KeyCode::Down) => self.scroll(1)?,
-            (_, KeyCode::Char('k') | KeyCode::Up) => self.scroll(-1)?,
-            (_, KeyCode::Char('g') | KeyCode::Home) => self.scroll_to_start()?,
-            (_, KeyCode::Char('G') | KeyCode::End) => self.scroll_to_end()?,
-            _ => {}
+        match action {
+            None => {}
+            Some(Action::Quit) => self.quit = true,
+            Some(Action::Help) => self.help = true,
+            Some(Action::SwitchPane) => self.toggle_focus(),
+            Some(Action::Down) => self.scroll(1)?,
+            Some(Action::Up) => self.scroll(-1)?,
+            Some(Action::PageDown) => self.scroll(page)?,
+            Some(Action::PageUp) => self.scroll(-page)?,
+            Some(Action::First) => self.scroll_to_start()?,
+            Some(Action::Last) => self.scroll_to_end()?,
         }
         Ok(())
     }
