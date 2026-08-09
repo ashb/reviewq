@@ -1671,6 +1671,7 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
