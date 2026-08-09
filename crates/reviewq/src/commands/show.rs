@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use jiff::Timestamp;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
-use reviewq_core::model::{MyState, PrSnapshot, ReviewerVerdict, ThreadState};
+use reviewq_core::model::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};
 use reviewq_ledger::{Ledger, PrShow};
 use serde::Serialize;
 
@@ -43,10 +43,10 @@ fn print_human(show: &PrShow) {
     );
     println!(
         "  {} · @{} · {}{}",
-        pr.state.as_str(),
+        state_word(pr.state),
         pr.author,
         show.tracked_reason.as_deref().unwrap_or("untracked"),
-        if pr.is_draft { " · draft" } else { "" },
+        draft_tag(pr.is_draft),
     );
     println!("  updated {}", fmt_ts(pr.updated_at));
 
@@ -129,7 +129,7 @@ fn my_history_lines(pr: &PrSnapshot, my: &MyState) -> Vec<String> {
     if let Some(sha) = &my.last_reviewed_sha {
         let verdict = my
             .last_verdict
-            .map(|v| v.as_str().to_string())
+            .map(verdict_word)
             .unwrap_or_else(|| "no verdict".to_string());
         let at = my
             .last_action_at
@@ -143,9 +143,12 @@ fn my_history_lines(pr: &PrSnapshot, my: &MyState) -> Vec<String> {
             .map(fmt_ts)
             .unwrap_or_else(|| "unknown time".to_string());
         let stale = if sha != &pr.head_sha {
-            " — superseded by new commits since"
+            format!(
+                " — {}",
+                "superseded by new commits since".if_supports_color(Stdout, |s| s.yellow())
+            )
         } else {
-            ""
+            String::new()
         };
         lines.push(format!("done at {} on {at}{stale}", short_sha(sha)));
     }
@@ -153,7 +156,7 @@ fn my_history_lines(pr: &PrSnapshot, my: &MyState) -> Vec<String> {
 }
 
 fn reviewer_line(r: &ReviewerVerdict) -> String {
-    format!("{} @{} {}", r.verdict.as_str(), r.login, fmt_ts(r.at))
+    format!("{} @{} {}", verdict_word(r.verdict), r.login, fmt_ts(r.at))
 }
 
 fn thread_line(t: &ThreadState) -> String {
@@ -162,8 +165,42 @@ fn thread_line(t: &ThreadState) -> String {
         .last_comment_at
         .map(fmt_ts)
         .unwrap_or_else(|| "unknown time".to_string());
-    let owned = if t.i_own { " (you own)" } else { "" };
+    let owned = if t.i_own {
+        format!(" {}", "(you own)".if_supports_color(Stdout, |s| s.dimmed()))
+    } else {
+        String::new()
+    };
     format!("@{who} at {at}{owned}")
+}
+
+/// The PR's lifecycle state, coloured so a merged or closed PR reads
+/// differently from an open one at a glance.
+fn state_word(state: PrState) -> String {
+    let s = state.as_str();
+    match state {
+        PrState::Open => format!("{}", s.if_supports_color(Stdout, |s| s.green())),
+        PrState::Merged => format!("{}", s.if_supports_color(Stdout, |s| s.magenta())),
+        PrState::Closed => format!("{}", s.if_supports_color(Stdout, |s| s.red())),
+    }
+}
+
+fn draft_tag(is_draft: bool) -> String {
+    if is_draft {
+        format!(" · {}", "draft".if_supports_color(Stdout, |s| s.yellow()))
+    } else {
+        String::new()
+    }
+}
+
+/// A review verdict, coloured the same way everywhere it appears (my own
+/// history, and every other reviewer's).
+fn verdict_word(v: Verdict) -> String {
+    let s = v.as_str();
+    match v {
+        Verdict::Approved => format!("{}", s.if_supports_color(Stdout, |s| s.green())),
+        Verdict::ChangesRequested => format!("{}", s.if_supports_color(Stdout, |s| s.red())),
+        Verdict::Commented => format!("{}", s.if_supports_color(Stdout, |s| s.dimmed())),
+    }
 }
 
 fn short_sha(sha: &str) -> &str {
@@ -277,7 +314,6 @@ fn json(show: &PrShow) -> ShowJson<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reviewq_core::model::PrState;
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
