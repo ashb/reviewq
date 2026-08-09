@@ -25,6 +25,8 @@ pub struct Config {
     pub handoff: Handoff,
     #[serde(default)]
     pub sync: Sync,
+    #[serde(default)]
+    pub output: Output,
     /// Global default for which relationships make a PR involve me; a project
     /// may override it.
     #[serde(default)]
@@ -168,6 +170,16 @@ pub struct Sync {
     pub page_size: u32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Output {
+    /// Underline a hyperlinked PR title in `show`'s human output. Some
+    /// terminals (Ghostty, for one) give no hover indication that a
+    /// terminal hyperlink exists at all unless a modifier is already held,
+    /// so without this the link is invisible until you know to try it.
+    pub underline_links: bool,
+}
+
 impl Default for Bots {
     fn default() -> Self {
         Self {
@@ -196,6 +208,14 @@ impl Default for Sync {
             bootstrap_days: 14,
             overlap_minutes: 5,
             page_size: 50,
+        }
+    }
+}
+
+impl Default for Output {
+    fn default() -> Self {
+        Self {
+            underline_links: true,
         }
     }
 }
@@ -442,6 +462,7 @@ mod tests {
         assert_eq!(config.sync.bootstrap_days, 14);
         assert_eq!(config.handoff.review_command[0], "wiff");
         assert!(config.bots.logins.contains(&"codecov[bot]".to_string()));
+        assert!(config.output.underline_links);
 
         let (_project, repo) = config.sole_repo().unwrap();
         assert_eq!(repo.host, "github.com");

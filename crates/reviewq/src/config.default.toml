@@ -80,6 +80,13 @@ overlap_minutes = 5
 # GraphQL page size for the cheap sweep.
 page_size = 50
 
+[output]
+# Underline a hyperlinked PR title in `show`'s human output. Some terminals
+# (Ghostty, for one) give no hover indication a terminal hyperlink exists at
+# all unless a modifier is already held, so without this the link is
+# invisible until you know to try it.
+underline_links = true
+
 # Per-host forge settings, keyed by host. Public github.com is built in, so this
 # whole section is optional. A user entry overlays the built-in field by field.
 #

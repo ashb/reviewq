@@ -27,25 +27,29 @@ pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
         return Ok(ExitCode::from(EXIT_EMPTY));
     };
 
-    let url = pr_web_url(config_path, args.number);
+    let link = pr_link(config_path, args.number);
+    let url = link.as_ref().map(|l| l.url.as_str());
 
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json(&show, url.as_deref()))?
-        );
+        println!("{}", serde_json::to_string_pretty(&json(&show, url))?);
     } else {
-        print_human(&show, url.as_deref());
+        let underline = link.as_ref().is_none_or(|l| l.underline_links);
+        print_human(&show, url, underline);
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// The PR's forge URL, best-effort. `show` otherwise never touches config or
-/// the forge — it works purely off the ledger — so this must not turn a
-/// config or token problem into a failed `show`, and must not autocreate a
-/// config file the way `config::load`'s default path does; it only reads one
-/// already there.
-fn pr_web_url(config_path: Option<&Path>, number: u64) -> Option<String> {
+/// The PR's forge URL, and whether to underline it once hyperlinked, both
+/// best-effort. `show` otherwise never touches config or the forge — it
+/// works purely off the ledger — so this must not turn a config or token
+/// problem into a failed `show`, and must not autocreate a config file the
+/// way `config::load`'s default path does; it only reads one already there.
+struct PrLink {
+    url: String,
+    underline_links: bool,
+}
+
+fn pr_link(config_path: Option<&Path>, number: u64) -> Option<PrLink> {
     let path = match config_path {
         Some(p) => p.to_path_buf(),
         None => paths::config_file().ok()?,
@@ -56,7 +60,10 @@ fn pr_web_url(config_path: Option<&Path>, number: u64) -> Option<String> {
     let loaded = config::load(config_path).ok()?;
     let (_project, repo) = loaded.config.sole_repo().ok()?;
     let forge = loaded.config.forge_for(repo).ok()?;
-    Some(forge.web_url(&repo.owner, &repo.name, number))
+    Some(PrLink {
+        url: forge.web_url(&repo.owner, &repo.name, number),
+        underline_links: loaded.config.output.underline_links,
+    })
 }
 
 /// Wrap `text` in an OSC 8 terminal hyperlink to `url`. Terminal-gated: piped
@@ -73,12 +80,28 @@ fn render_hyperlink(text: &str, url: Option<&str>, is_terminal: bool) -> String 
     }
 }
 
-fn print_human(show: &PrShow, url: Option<&str>) {
+/// Style `text`, optionally bold and/or underlined. Each call produces one
+/// self-contained styled span (its own reset), so callers can concatenate
+/// several without one span's reset clobbering another's still-open style.
+fn styled(text: &str, bold: bool, underline: bool) -> String {
+    text.if_supports_color(Stdout, |s| match (bold, underline) {
+        (true, true) => s.bold().underline().to_string(),
+        (true, false) => s.bold().to_string(),
+        (false, true) => s.underline().to_string(),
+        (false, false) => s.to_string(),
+    })
+    .to_string()
+}
+
+fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
     let pr = &show.pr;
+    // Underlining a plain (non-hyperlinked) title would suggest it's
+    // clickable when it isn't, so it's tied to whether there's a url at all.
+    let underline = url.is_some() && underline_links;
     let header = format!(
         "{} {}",
-        format!("#{}", pr.number).if_supports_color(Stdout, |s| s.bold().to_string()),
-        pr.title,
+        styled(&format!("#{}", pr.number), true, underline),
+        styled(&pr.title, false, underline),
     );
     println!("{}", hyperlink(&header, url));
     println!(
@@ -456,5 +479,14 @@ mod tests {
     #[test]
     fn render_hyperlink_is_plain_text_without_a_url() {
         assert_eq!(render_hyperlink("#1 title", None, true), "#1 title");
+    }
+
+    #[test]
+    fn styled_is_plain_text_off_a_terminal() {
+        // if_supports_color checks real stdout, never a terminal under
+        // `cargo test`, so every combination is untouched here regardless.
+        for (bold, underline) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(styled("text", bold, underline), "text");
+        }
     }
 }
