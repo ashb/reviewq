@@ -64,6 +64,17 @@ impl RepoKey {
     }
 }
 
+/// An item from a whole-database read, tagged with the repo it came from. The
+/// per-repo reads return bare items because their caller already knows the
+/// `repo_id` it asked about; a merged read spanning every repo has to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located<T> {
+    /// The repo the item belongs to.
+    pub repo: RepoKey,
+    /// The item itself.
+    pub item: T,
+}
+
 /// An open ledger — one handle over the whole database, every repo it knows
 /// about included. Every method that reads or writes PR-scoped state takes
 /// the `repo_id` [`ensure_repo`](Self::ensure_repo) resolves, rather than the
@@ -680,6 +691,57 @@ impl Ledger {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Run a per-repo read against every repo in [`repos`](Self::repos) and
+    /// flatten the results, each tagged with the repo it came from.
+    fn across_repos<T>(
+        &self,
+        read: impl Fn(&Self, i64) -> Result<Vec<T>>,
+    ) -> Result<Vec<Located<T>>> {
+        let mut out = Vec::new();
+        for (repo_id, repo) in self.repos()? {
+            out.extend(read(self, repo_id)?.into_iter().map(|item| Located {
+                repo: repo.clone(),
+                item,
+            }));
+        }
+        Ok(out)
+    }
+
+    /// Every repo's [`queue`](Self::queue), merged into one. Each repo's slice
+    /// arrives already sorted, so the merge re-sorts by the same key to
+    /// interleave them — with the repo slug as a final tiebreak, so two repos
+    /// that happen to share a PR number and an urgency don't order by
+    /// whichever was registered first.
+    pub fn queue_all(&self) -> Result<Vec<Located<QueueItem>>> {
+        let mut queue = self.across_repos(Self::queue)?;
+        queue.sort_by_key(|l| {
+            (
+                l.item.deferred,
+                l.item.top.priority,
+                l.item.top.since,
+                l.item.pr.number,
+                l.repo.slug(),
+            )
+        });
+        Ok(queue)
+    }
+
+    /// Every repo's [`waiting`](Self::waiting), merged and ordered by repo then
+    /// PR number.
+    pub fn waiting_all(&self) -> Result<Vec<Located<TrackedPr>>> {
+        let mut waiting = self.across_repos(Self::waiting)?;
+        waiting.sort_by_key(|l| (l.repo.slug(), l.item.pr.number));
+        Ok(waiting)
+    }
+
+    /// Every repo's [`list_tracked`](Self::list_tracked), merged and ordered by
+    /// repo then PR number.
+    pub fn tracked_all(&self) -> Result<Vec<Located<TrackedPr>>> {
+        let mut tracked = self.across_repos(Self::list_tracked)?;
+        tracked.sort_by_key(|l| (l.repo.slug(), l.item.pr.number));
+        Ok(tracked)
     }
 
     /// Everything `reviewq show` needs about one PR, or `None` if it is not
@@ -1889,6 +1951,141 @@ mod tests {
             .expect("the repo");
         assert_eq!(seen, repo());
         assert_eq!(reader.list_tracked(seen_id).unwrap().len(), 1);
+    }
+
+    /// Give an already-tracked PR one attention reason, putting it on the queue.
+    fn wants_attention(
+        ledger: &Ledger,
+        repo_id: i64,
+        number: u64,
+        reason: AttentionReason,
+        since: &str,
+    ) {
+        ledger
+            .commit_detail(
+                repo_id,
+                number,
+                &MyState::default(),
+                &[],
+                &[],
+                &[attn(reason, since)],
+                now(),
+            )
+            .unwrap();
+    }
+
+    fn repo_named(owner: &str) -> RepoKey {
+        RepoKey {
+            host: "github.com".into(),
+            owner: owner.into(),
+            name: "repo".into(),
+        }
+    }
+
+    #[test]
+    fn queue_all_interleaves_every_repo_by_urgency() {
+        let (ledger, first) = ledger_with_repo();
+        let second = ledger.ensure_repo(&repo_named("someone")).unwrap();
+
+        // The urgent PR is on the repo registered second, so concatenating each
+        // repo's already-sorted queue would leave it last.
+        track(&ledger, first, &pr(1));
+        wants_attention(
+            &ledger,
+            first,
+            1,
+            AttentionReason::NeedsFirstLook { rule: "x".into() },
+            "2026-08-01T00:00:00Z",
+        );
+        track(&ledger, second, &pr(2));
+        wants_attention(
+            &ledger,
+            second,
+            2,
+            AttentionReason::Mention {
+                by: "potiuk".into(),
+            },
+            "2026-08-05T09:00:00Z",
+        );
+
+        let got: Vec<(String, u64)> = ledger
+            .queue_all()
+            .unwrap()
+            .iter()
+            .map(|l| (l.repo.slug(), l.item.pr.number))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("someone/repo".to_string(), 2),
+                ("apache/airflow".to_string(), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_all_breaks_a_tie_on_repo_not_registration_order() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let zzz = ledger.ensure_repo(&repo_named("zzz")).unwrap();
+        let aaa = ledger.ensure_repo(&repo_named("aaa")).unwrap();
+
+        // Same number, same reason, same instant — everything but the repo ties.
+        for repo_id in [zzz, aaa] {
+            track(&ledger, repo_id, &pr(1));
+            wants_attention(
+                &ledger,
+                repo_id,
+                1,
+                AttentionReason::Mention {
+                    by: "potiuk".into(),
+                },
+                "2026-08-05T09:00:00Z",
+            );
+        }
+
+        let slugs: Vec<String> = ledger
+            .queue_all()
+            .unwrap()
+            .iter()
+            .map(|l| l.repo.slug())
+            .collect();
+        assert_eq!(slugs, vec!["aaa/repo", "zzz/repo"]);
+    }
+
+    #[test]
+    fn tracked_all_and_waiting_all_order_by_repo_then_number() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let zzz = ledger.ensure_repo(&repo_named("zzz")).unwrap();
+        let aaa = ledger.ensure_repo(&repo_named("aaa")).unwrap();
+        track(&ledger, zzz, &pr(2));
+        track(&ledger, zzz, &pr(1));
+        track(&ledger, aaa, &pr(3));
+
+        let expected = vec![
+            ("aaa/repo".to_string(), 3),
+            ("zzz/repo".to_string(), 1),
+            ("zzz/repo".to_string(), 2),
+        ];
+        let key = |l: &Located<TrackedPr>| (l.repo.slug(), l.item.pr.number);
+        assert_eq!(
+            ledger
+                .tracked_all()
+                .unwrap()
+                .iter()
+                .map(key)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        // Nothing has attention, so every tracked PR is also waiting.
+        assert_eq!(
+            ledger
+                .waiting_all()
+                .unwrap()
+                .iter()
+                .map(key)
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[test]

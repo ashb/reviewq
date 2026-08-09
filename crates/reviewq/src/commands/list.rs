@@ -15,48 +15,19 @@ use std::process::ExitCode;
 use anyhow::Result;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_core::model::PrState;
-use reviewq_ledger::{Ledger, QueueItem, RepoKey, TrackedPr};
+use reviewq_ledger::{Ledger, Located, QueueItem, RepoKey, TrackedPr};
 use serde::Serialize;
 
 use crate::cli::{ListArgs, NextArgs};
 use crate::commands::EXIT_EMPTY;
 use crate::paths;
 
-/// One item plus the repo it came from — the ledger's own return types don't
-/// carry that, since a `Ledger` handle spans every repo.
-struct Located<'a, T> {
-    repo: &'a RepoKey,
-    item: T,
-}
-
-/// Run `f` against every repo the ledger knows about and flatten the
-/// results, each tagged with the repo it came from.
-fn collect<'a, T>(
-    ledger: &Ledger,
-    repos: &'a [(i64, RepoKey)],
-    f: impl Fn(&Ledger, i64) -> Result<Vec<T>>,
-) -> Result<Vec<Located<'a, T>>> {
-    let mut out = Vec::new();
-    for (repo_id, repo) in repos {
-        out.extend(
-            f(ledger, *repo_id)?
-                .into_iter()
-                .map(|item| Located { repo, item }),
-        );
-    }
-    Ok(out)
-}
-
 pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
-    let repos = ledger.repos()?;
-    let multi = repos.len() > 1;
+    let multi = ledger.repos()?.len() > 1;
 
     if args.all {
-        let mut tracked = collect(&ledger, &repos, |l, id| l.list_tracked(id))?;
-        tracked.sort_by(|a, b| {
-            (a.repo.slug(), a.item.pr.number).cmp(&(b.repo.slug(), b.item.pr.number))
-        });
+        let tracked = ledger.tracked_all()?;
         if args.json {
             print_tracked_json(&tracked)?;
         } else {
@@ -66,10 +37,7 @@ pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
     }
 
     if args.waiting {
-        let mut waiting = collect(&ledger, &repos, |l, id| l.waiting(id))?;
-        waiting.sort_by(|a, b| {
-            (a.repo.slug(), a.item.pr.number).cmp(&(b.repo.slug(), b.item.pr.number))
-        });
+        let waiting = ledger.waiting_all()?;
         if args.json {
             print_tracked_json(&waiting)?;
         } else if waiting.is_empty() {
@@ -82,7 +50,7 @@ pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
         return Ok(empty_code(waiting.is_empty()));
     }
 
-    let queue = sorted_queue(&ledger, &repos)?;
+    let queue = ledger.queue_all()?;
     if args.json {
         print_queue_json(&queue)?;
     } else if queue.is_empty() {
@@ -97,9 +65,8 @@ pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
 
 pub fn next(_config_path: Option<&Path>, args: &NextArgs) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
-    let repos = ledger.repos()?;
-    let multi = repos.len() > 1;
-    let top = sorted_queue(&ledger, &repos)?.into_iter().next();
+    let multi = ledger.repos()?.len() > 1;
+    let top = ledger.queue_all()?.into_iter().next();
 
     match top {
         None => {
@@ -121,28 +88,6 @@ pub fn next(_config_path: Option<&Path>, args: &NextArgs) -> Result<ExitCode> {
     }
 }
 
-/// Every known repo's queue, merged and re-sorted by the same key
-/// [`Ledger::queue`] itself sorts by — each repo's slice already comes back
-/// sorted, but the merge needs to interleave them correctly.
-fn sorted_queue<'a>(
-    ledger: &Ledger,
-    repos: &'a [(i64, RepoKey)],
-) -> Result<Vec<Located<'a, QueueItem>>> {
-    let mut queue = collect(ledger, repos, |l, id| l.queue(id))?;
-    queue.sort_by(|a, b| {
-        let key = |l: &Located<'_, QueueItem>| {
-            (
-                l.item.deferred,
-                l.item.top.priority,
-                l.item.top.since,
-                l.item.pr.number,
-            )
-        };
-        key(a).cmp(&key(b))
-    });
-    Ok(queue)
-}
-
 fn empty_code(empty: bool) -> ExitCode {
     if empty {
         ExitCode::from(EXIT_EMPTY)
@@ -161,7 +106,7 @@ fn number_label(multi: bool, repo: &RepoKey, number: u64) -> String {
     }
 }
 
-fn print_queue_row(multi: bool, item: &Located<'_, QueueItem>) {
+fn print_queue_row(multi: bool, item: &Located<QueueItem>) {
     // A merged PR only reaches the queue when a project opted into post-merge
     // review; tag it so it doesn't read as still-open.
     let tag = if item.item.pr.state.is_open() {
@@ -175,7 +120,7 @@ fn print_queue_row(multi: bool, item: &Located<'_, QueueItem>) {
     };
     println!(
         "  {:>7}  {}  {}{}",
-        number_label(multi, item.repo, item.item.pr.number)
+        number_label(multi, &item.repo, item.item.pr.number)
             .if_supports_color(Stdout, |s| s.dimmed().to_string()),
         item.item
             .top
@@ -186,10 +131,10 @@ fn print_queue_row(multi: bool, item: &Located<'_, QueueItem>) {
     );
 }
 
-fn print_tracked_row(multi: bool, item: &Located<'_, TrackedPr>) {
+fn print_tracked_row(multi: bool, item: &Located<TrackedPr>) {
     println!(
         "  {:>7}  {:<44}  {}",
-        number_label(multi, item.repo, item.item.pr.number)
+        number_label(multi, &item.repo, item.item.pr.number)
             .if_supports_color(Stdout, |s| s.dimmed().to_string()),
         item.item
             .tracked_reason
@@ -202,7 +147,7 @@ fn print_tracked_row(multi: bool, item: &Located<'_, TrackedPr>) {
 /// `list_tracked` already guarantees).
 const STATE_ORDER: [PrState; 3] = [PrState::Open, PrState::Merged, PrState::Closed];
 
-fn print_grouped(multi: bool, tracked: &[Located<'_, TrackedPr>]) {
+fn print_grouped(multi: bool, tracked: &[Located<TrackedPr>]) {
     if tracked.is_empty() {
         eprintln!("nothing tracked yet — run `reviewq sync`");
         return;
@@ -210,7 +155,7 @@ fn print_grouped(multi: bool, tracked: &[Located<'_, TrackedPr>]) {
 
     let mut first = true;
     for state in STATE_ORDER {
-        let group: Vec<&Located<'_, TrackedPr>> = tracked
+        let group: Vec<&Located<TrackedPr>> = tracked
             .iter()
             .filter(|t| t.item.pr.state == state)
             .collect();
@@ -247,7 +192,7 @@ struct QueueJson<'a> {
     author: &'a str,
 }
 
-fn queue_json<'a>(item: &'a Located<'_, QueueItem>) -> QueueJson<'a> {
+fn queue_json(item: &Located<QueueItem>) -> QueueJson<'_> {
     QueueJson {
         repo: item.repo.slug(),
         number: item.item.pr.number,
@@ -260,7 +205,7 @@ fn queue_json<'a>(item: &'a Located<'_, QueueItem>) -> QueueJson<'a> {
     }
 }
 
-fn print_queue_json(queue: &[Located<'_, QueueItem>]) -> Result<()> {
+fn print_queue_json(queue: &[Located<QueueItem>]) -> Result<()> {
     let items: Vec<QueueJson<'_>> = queue.iter().map(queue_json).collect();
     println!("{}", serde_json::to_string_pretty(&items)?);
     Ok(())
@@ -278,7 +223,7 @@ struct TrackedJson<'a> {
     updated_at: String,
 }
 
-fn print_tracked_json(tracked: &[Located<'_, TrackedPr>]) -> Result<()> {
+fn print_tracked_json(tracked: &[Located<TrackedPr>]) -> Result<()> {
     let items: Vec<TrackedJson<'_>> = tracked
         .iter()
         .map(|t| TrackedJson {
