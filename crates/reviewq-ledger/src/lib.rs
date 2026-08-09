@@ -16,6 +16,34 @@ use rusqlite::{Connection, Error::FromSqlConversionFailure, OptionalExtension, p
 
 pub use schema::SCHEMA_VERSION;
 
+/// How long a connection waits for whoever holds the write lock before giving
+/// up with `SQLITE_BUSY`. A single write is short; a whole detail pass runs
+/// many back to back, so a reader that arrives mid-sync may need to wait out
+/// several.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The pragmas every connection needs, however it was opened.
+///
+/// WAL matters as soon as two connections exist at once — a long-running
+/// reader alongside a sync that writes. Under the default rollback journal a
+/// committing writer takes an exclusive lock over the whole database, and with
+/// no busy handler installed a concurrent reader fails immediately rather than
+/// waiting; WAL lets readers proceed against the last committed snapshot
+/// instead. `journal_mode` persists in the file once set, so this only does
+/// real work the first time. An in-memory database can't use WAL and stays
+/// `memory`, which is harmless — nothing else ever opens it.
+fn prepare_conn(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .context("enabling foreign keys")?;
+    // `PRAGMA journal_mode` reports the mode it settled on as a result row,
+    // which plain `pragma_update` rejects; this variant tolerates one.
+    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
+        .context("enabling WAL")?;
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .context("setting the busy timeout")?;
+    Ok(())
+}
+
 /// Identifies a repo the ledger tracks state for: the forge host it lives on,
 /// plus owner/name on that host. Distinct from `reviewq`'s own `RepoRef` —
 /// the ledger doesn't depend on the CLI crate's config types.
@@ -150,8 +178,7 @@ impl Ledger {
     }
 
     fn from_conn(mut conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .context("enabling foreign keys")?;
+        prepare_conn(&conn)?;
         schema::migrate(&mut conn)?;
         Ok(Self { conn })
     }
@@ -751,8 +778,7 @@ pub fn repos_with_pr(path: &std::path::Path, number: u64) -> Result<Vec<RepoKey>
     }
     let mut conn =
         Connection::open(path).with_context(|| format!("opening ledger {}", path.display()))?;
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .context("enabling foreign keys")?;
+    prepare_conn(&conn)?;
     schema::migrate(&mut conn)?;
     let mut stmt = conn.prepare(
         "SELECT r.host, r.owner, r.name FROM prs p \
@@ -1824,6 +1850,45 @@ mod tests {
         let waiting = ledger.waiting(repo_id).unwrap();
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].pr.number, 2);
+    }
+
+    #[test]
+    fn a_file_backed_ledger_enables_wal_and_a_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("ledger.sqlite")).unwrap();
+
+        let mode: String = ledger
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+
+        let timeout: i64 = ledger
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+    }
+
+    #[test]
+    fn a_second_handle_sees_what_the_first_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let writer = Ledger::open(&path).unwrap();
+        // Open before the write, as a long-lived reader would be.
+        let reader = Ledger::open(&path).unwrap();
+        let repo_id = writer.ensure_repo(&repo()).unwrap();
+
+        track(&writer, repo_id, &pr(1));
+
+        let (seen_id, seen) = reader
+            .repos()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the repo");
+        assert_eq!(seen, repo());
+        assert_eq!(reader.list_tracked(seen_id).unwrap().len(), 1);
     }
 
     #[test]
