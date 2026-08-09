@@ -11,6 +11,27 @@ fn pr_number(s: &str) -> Result<u64, String> {
         .map_err(|_| format!("{s:?} is not a PR number"))
 }
 
+/// Like [`pr_number`], but also accepts a full pull-request URL pasted
+/// straight from a browser — `https://github.com/owner/repo/pull/N` (or the
+/// same on a GitHub Enterprise host). The owner/repo aren't used yet — the
+/// ledger is single-repo for now — so this is purely a paste convenience;
+/// it accepts a URL for any repo without checking it matches the one
+/// configured.
+fn pr_number_or_url(s: &str) -> Result<u64, String> {
+    let Some(after_scheme) = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+    else {
+        return pr_number(s);
+    };
+    after_scheme
+        .split("/pull/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("{s:?} doesn't look like a pull request URL"))
+}
+
 /// A deterministic PR review queue.
 ///
 /// Every queue item names the rule that produced it.
@@ -102,8 +123,8 @@ pub struct NextArgs {
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
-    /// The PR number.
-    #[arg(value_parser = pr_number)]
+    /// The PR number, or a full pull-request URL.
+    #[arg(value_parser = pr_number_or_url)]
     pub number: u64,
 
     /// Emit machine-readable JSON.
@@ -172,5 +193,65 @@ mod tests {
     #[test]
     fn garbage_after_the_hash_is_rejected() {
         assert!(Cli::try_parse_from(["reviewq", "mute", "#nope"]).is_err());
+    }
+
+    #[test]
+    fn show_accepts_a_full_pull_request_url() {
+        let cli = Cli::try_parse_from([
+            "reviewq",
+            "show",
+            "https://github.com/apache/airflow/pull/70135",
+        ])
+        .expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Show(ShowArgs { number: 70135, .. })
+        ));
+    }
+
+    #[test]
+    fn show_accepts_a_pull_request_url_on_an_enterprise_host() {
+        let cli = Cli::try_parse_from([
+            "reviewq",
+            "show",
+            "https://github.acme.example/acme/widgets/pull/7",
+        ])
+        .expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Show(ShowArgs { number: 7, .. })
+        ));
+    }
+
+    #[test]
+    fn show_still_accepts_a_bare_number_and_a_hash_number() {
+        for arg in ["42", "#42"] {
+            let cli = Cli::try_parse_from(["reviewq", "show", arg]).expect("parses");
+            assert!(matches!(
+                cli.command,
+                Command::Show(ShowArgs { number: 42, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_url_without_pull_in_it_is_rejected() {
+        assert!(
+            Cli::try_parse_from(["reviewq", "show", "https://github.com/apache/airflow"]).is_err()
+        );
+    }
+
+    #[test]
+    fn a_url_with_a_non_numeric_pull_segment_is_rejected() {
+        let err = Cli::try_parse_from([
+            "reviewq",
+            "show",
+            "https://github.com/apache/airflow/pull/abc",
+        ])
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("doesn't look like a pull request URL")
+        );
     }
 }
