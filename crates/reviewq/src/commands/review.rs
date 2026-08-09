@@ -9,7 +9,6 @@ use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
-use reviewq_forge::resolve_token;
 use reviewq_ledger::Ledger;
 
 use crate::cli::NumberArgs;
@@ -82,15 +81,13 @@ async fn refresh_after_review(config: &config::Config, number: u64) -> Result<()
 
 /// The env var name and value the handoff command should see its forge token
 /// under. The handoff command is a separate process with its own credential
-/// resolution (`wiff` looks for `GITHUB_TOKEN`, matching the host's own
-/// `token_env` convention) — this forwards whatever reviewq itself resolved
-/// rather than requiring a second, separate login. `None` if config or token
+/// resolution — this forwards whatever reviewq itself resolved rather than
+/// requiring a second, separate login. `None` if config, token or connection
 /// resolution fails; the handoff command then falls back to its own
 /// resolution and reports its own error, same as before this existed.
 fn handoff_token(config: &config::Config) -> Option<(String, String)> {
     let (_project, repo) = config.sole_repo().ok()?;
-    let host = config.forge_host_for(repo).ok()?;
-    let token = resolve_token(&host).ok()?;
-    let var = host.token_env.unwrap_or_else(|| "GITHUB_TOKEN".to_string());
-    Some((var, token.value))
+    let forge = config.forge_for(repo).ok()?;
+    let (var, value) = forge.handoff_credentials();
+    Some((var.to_string(), value.to_string()))
 }

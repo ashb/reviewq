@@ -77,6 +77,15 @@ pub trait Forge: Send + Sync {
     /// adapter; nothing above this trait renders one itself. No I/O, so it
     /// isn't `async`.
     fn web_url(&self, owner: &str, name: &str, number: u64) -> String;
+
+    /// The env var name and value to hand this forge's token to an external
+    /// tool that does its own separate credential resolution — `review`'s
+    /// handoff forwards a token it already resolved rather than requiring a
+    /// second, separate login. Which env var name that tool expects is a
+    /// provider convention (GitHub tooling — `gh`, `wiff` — reads
+    /// `GITHUB_TOKEN`), so each adapter answers for itself rather than the
+    /// caller guessing. No I/O, so it isn't `async`.
+    fn handoff_credentials(&self) -> (&str, &str);
 }
 
 /// Build the adapter for `host_name` (resolved to `host`) authenticated with

@@ -22,6 +22,13 @@ const OVERRIDE_ENV: &str = "REVIEWQ_GITHUB_TOKEN";
 /// A gh CLI convention honoured as a fallback for the GitHub provider.
 const GH_TOKEN_ENV: &str = "GH_TOKEN";
 
+/// GitHub's own token-env convention: `github.com`'s built-in `token_env`,
+/// and (via [`GithubForge`](crate::github::GithubForge)'s
+/// [`Forge::handoff_credentials`](crate::Forge::handoff_credentials)) the
+/// default external GitHub tooling (`gh`, `wiff`) expects when handed a
+/// token it didn't resolve itself.
+pub(crate) const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
+
 /// One host's row: which adapter family speaks to it, its API root, and the
 /// variables its token comes from. Every field is optional so a user entry can
 /// override one value of a built-in without restating the rest.
@@ -133,7 +140,7 @@ static BUILT_IN_HOSTS: LazyLock<BTreeMap<String, ForgeHost>> = LazyLock::new(|| 
         ForgeHost {
             provider: Some("github".to_string()),
             api_base: None,
-            token_env: Some("GITHUB_TOKEN".to_string()),
+            token_env: Some(GITHUB_TOKEN_ENV.to_string()),
             token_file_env: Some("GITHUB_TOKEN_FILE".to_string()),
             token_command: None,
         },

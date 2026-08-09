@@ -17,6 +17,7 @@ use reviewq_core::model::{
 };
 use serde::Deserialize;
 
+use crate::host::GITHUB_TOKEN_ENV;
 use crate::types::{PrDetail, RateLimit, SweepPage, Viewer};
 use crate::{Forge, ForgeHost};
 
@@ -27,6 +28,13 @@ pub struct GithubForge {
     /// doubling as its web root — kept alongside the API client so
     /// [`web_url`](Forge::web_url) needs no extra argument from the caller.
     web_host: String,
+    /// The token, kept alongside the API client (which only ever sees it as
+    /// an auth header) so [`handoff_credentials`](Forge::handoff_credentials)
+    /// can hand it to an external tool.
+    token: String,
+    /// The env var external GitHub tooling expects that token under: the
+    /// host's own `token_env` if configured, else GitHub's own convention.
+    token_env: String,
 }
 
 impl GithubForge {
@@ -43,6 +51,11 @@ impl GithubForge {
         Ok(Self {
             inner,
             web_host: host_name.to_string(),
+            token: token.to_string(),
+            token_env: host
+                .token_env
+                .clone()
+                .unwrap_or_else(|| GITHUB_TOKEN_ENV.to_string()),
         })
     }
 
@@ -215,6 +228,10 @@ impl Forge for GithubForge {
 
     fn web_url(&self, owner: &str, name: &str, number: u64) -> String {
         format!("https://{}/{owner}/{name}/pull/{number}", self.web_host)
+    }
+
+    fn handoff_credentials(&self) -> (&str, &str) {
+        (&self.token_env, &self.token)
     }
 }
 
@@ -759,6 +776,33 @@ mod tests {
         assert_eq!(
             forge.web_url("acme", "widgets", 7),
             "https://github.acme.example/acme/widgets/pull/7"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_credentials_default_to_githubs_own_convention() {
+        let host = ForgeHost {
+            provider: Some("github".to_string()),
+            ..Default::default()
+        };
+        let forge = GithubForge::new(&host, "github.com", "secret-token").unwrap();
+        assert_eq!(
+            forge.handoff_credentials(),
+            ("GITHUB_TOKEN", "secret-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_credentials_use_the_hosts_configured_token_env() {
+        let host = ForgeHost {
+            provider: Some("github".to_string()),
+            token_env: Some("ACME_GH_TOKEN".to_string()),
+            ..Default::default()
+        };
+        let forge = GithubForge::new(&host, "github.acme.example", "secret-token").unwrap();
+        assert_eq!(
+            forge.handoff_credentials(),
+            ("ACME_GH_TOKEN", "secret-token")
         );
     }
 
