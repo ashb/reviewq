@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ClassifyCtx, PrSnapshot, classify};
 use reviewq_core::rules::Evaluation;
-use reviewq_forge::{Forge, PrDetail, build, resolve_token};
+use reviewq_forge::{Forge, PrDetail};
 use reviewq_ledger::{Ledger, TrackedReason};
 
 use crate::config::{Config, RepoRef};
@@ -30,9 +30,7 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
     let loaded = config::load(config_path)?;
     let cfg = &loaded.config;
     let (project, repo) = cfg.sole_repo()?;
-    let host = cfg.forge_host_for(repo)?;
-    let token = resolve_token(&host)?;
-    let forge = build(&host, &token.value)?;
+    let forge = cfg.forge_for(repo)?;
     let ledger = Ledger::open(&paths::database_file()?)?;
 
     let now = Timestamp::now();

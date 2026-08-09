@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail};
 use reviewq_core::rules::{ConditionInput, Interest, RuleInput};
 use serde::{Deserialize, Serialize};
 
-use reviewq_forge::{DEFAULT_HOST, ForgeHost, ForgeTable, resolve_host};
+use reviewq_forge::{
+    DEFAULT_HOST, Forge, ForgeHost, ForgeTable, build, resolve_host, resolve_token,
+};
 
 /// Written verbatim to the config path on first run. Kept as a literal (rather
 /// than serialised from `Config::default()`) so the comments survive.
@@ -354,6 +356,20 @@ impl Config {
     /// The resolved forge settings for `repo`'s host, with a supported provider.
     pub fn forge_host_for(&self, repo: &RepoRef) -> Result<ForgeHost> {
         resolve_host(&self.forges, &repo.host)
+    }
+
+    /// Resolve `repo`'s host, resolve a token for it, and build a connected
+    /// [`Forge`] — the sequence every command that talks to the forge repeats.
+    /// Takes `repo` rather than assuming the sole one, so it works the same
+    /// whether a caller has one repo to pick from or many.
+    ///
+    /// `doctor` is the one command that calls the pieces directly instead of
+    /// this: it reports on each step (host, token) as it succeeds, so
+    /// collapsing them here would cost it that granularity.
+    pub fn forge_for(&self, repo: &RepoRef) -> Result<Box<dyn Forge>> {
+        let host = self.forge_host_for(repo)?;
+        let token = resolve_token(&host)?;
+        build(&host, &token.value)
     }
 
     /// The relationships that involve me in `project`: its own override if set,

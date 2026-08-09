@@ -9,7 +9,6 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
-use reviewq_forge::{build, resolve_token};
 use reviewq_ledger::{Ledger, PrShow};
 
 use crate::cli::{NumberArgs, SnoozeArgs};
@@ -39,9 +38,7 @@ pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitC
 async fn mark_notifications_read(config_path: Option<&Path>, number: u64) -> Result<()> {
     let loaded = config::load(config_path)?;
     let (_project, repo) = loaded.config.sole_repo()?;
-    let host = loaded.config.forge_host_for(repo)?;
-    let token = resolve_token(&host)?;
-    let forge = build(&host, &token.value)?;
+    let forge = loaded.config.forge_for(repo)?;
     forge
         .mark_pr_notifications_read(&repo.owner, &repo.name, number)
         .await

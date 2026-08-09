@@ -9,7 +9,7 @@ use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
-use reviewq_forge::{build, resolve_token};
+use reviewq_forge::resolve_token;
 use reviewq_ledger::Ledger;
 
 use crate::cli::NumberArgs;
@@ -62,9 +62,7 @@ async fn refresh_after_review(config: &config::Config, number: u64) -> Result<()
     };
 
     let (project, repo) = config.sole_repo()?;
-    let host = config.forge_host_for(repo)?;
-    let token = resolve_token(&host)?;
-    let forge = build(&host, &token.value)?;
+    let forge = config.forge_for(repo)?;
 
     super::sync::refresh_one(
         forge.as_ref(),
