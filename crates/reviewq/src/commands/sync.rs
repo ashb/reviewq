@@ -26,13 +26,10 @@ pub(crate) const CURSOR_KEY: &str = "last_sync_at";
 /// Whether the most recent sweep hit the search cap; surfaced by `doctor`.
 pub(crate) const TRUNCATED_KEY: &str = "last_sweep_truncated";
 
-pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> {
+pub async fn run(config_path: Option<&Path>, progress: &mut dyn SyncProgress) -> Result<ExitCode> {
     let loaded = config::load(config_path)?;
     let cfg = &loaded.config;
     let now = Timestamp::now();
-    // In-place progress only when stderr is an unshared terminal; with logs
-    // interleaved (`-v`) or piped, print a line per page instead.
-    let in_place = std::io::stderr().is_terminal() && !logging;
     // One handle for the whole run: every configured repo's sync writes
     // through it, each scoped by its own `repo_id`.
     let ledger = Ledger::open(&paths::database_file()?)?;
@@ -41,7 +38,7 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
         let rules = cfg.interest_for(project)?;
         for repo in &project.repos {
             let repo_id = ledger.ensure_repo(&repo.key())?;
-            sync_repo(cfg, &ledger, repo_id, project, repo, &rules, now, in_place).await?;
+            sync_repo(cfg, &ledger, repo_id, project, repo, &rules, now, progress).await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -60,7 +57,7 @@ async fn sync_repo(
     repo: &RepoRef,
     rules: &Interest,
     now: Timestamp,
-    in_place: bool,
+    progress: &mut dyn SyncProgress,
 ) -> Result<()> {
     let forge = cfg.forge_for(&repo.host)?;
 
@@ -78,7 +75,6 @@ async fn sync_repo(
     );
     tracing::info!(%query, "tier-1 sweep");
 
-    let mut progress = progress_reporter(in_place);
     let mut stats = Stats::default();
     let mut after: Option<String> = None;
 
@@ -124,7 +120,7 @@ async fn sync_repo(
                 &watermark.to_string(),
             )?;
         }
-        progress("updated", stats.swept, stats.total_count);
+        progress.page("updated", stats.swept, stats.total_count);
 
         match page.next {
             Some(cursor) => after = Some(cursor),
@@ -145,7 +141,7 @@ async fn sync_repo(
         cfg.sync.page_size,
         now,
         &mut stats,
-        &mut progress,
+        progress,
     )
     .await?;
 
@@ -160,7 +156,7 @@ async fn sync_repo(
         &review_requested,
         now,
         &mut stats,
-        &mut progress,
+        progress,
     )
     .await?;
 
@@ -168,13 +164,19 @@ async fn sync_repo(
     // carry (unless this project keeps merged PRs on the queue).
     ledger.clear_archived_attention(repo_id, project.include_merged)?;
 
-    finish_progress(in_place);
     let (tracked, total) = ledger.counts(repo_id)?;
-    print_summary(&repo.slug(), &stats, tracked, total);
-    if truncated {
+    let summary = RepoSummary {
+        repo: repo.slug(),
+        stats,
+        tracked,
+        total,
+        truncated,
+    };
+    progress.repo_finished(&summary);
+    if summary.truncated {
         tracing::warn!(
             repo = repo.slug(),
-            total = stats.total_count,
+            total = summary.stats.total_count,
             cap = reviewq_forge::SEARCH_CAP,
             "sweep hit the search cap; some PRs in this window were missed \
              (narrow sync.bootstrap_days or sync more often)"
@@ -232,7 +234,7 @@ async fn involvement_search(
     page_size: u32,
     now: Timestamp,
     stats: &mut Stats,
-    progress: &mut impl FnMut(&str, usize, u32),
+    progress: &mut dyn SyncProgress,
 ) -> Result<HashSet<u64>> {
     let mut involved = HashSet::new();
     let mut review_requested = HashSet::new();
@@ -275,7 +277,7 @@ async fn involvement_search(
                 }
             }
             fetched += page.prs.len();
-            progress(reason, fetched, page.total_count);
+            progress.page(reason, fetched, page.total_count);
             match page.next {
                 Some(cursor) => after = Some(cursor),
                 None => break,
@@ -310,7 +312,7 @@ async fn detail_pass(
     review_requested: &HashSet<u64>,
     now: Timestamp,
     stats: &mut Stats,
-    progress: &mut impl FnMut(&str, usize, u32),
+    progress: &mut dyn SyncProgress,
 ) -> Result<()> {
     let pending = ledger.prs_needing_detail(repo_id, include_merged)?;
     let total = pending.len() as u32;
@@ -350,7 +352,7 @@ async fn detail_pass(
         if queued {
             stats.queued += 1;
         }
-        progress("detail", index + 1, total);
+        progress.page("detail", index + 1, total);
     }
     Ok(())
 }
@@ -446,61 +448,120 @@ fn involvement_qualifier(reason: &str, login: &str) -> Option<String> {
     Some(format!("{qualifier}:{login}"))
 }
 
-#[derive(Default)]
-struct Stats {
-    swept: usize,
-    total_count: u32,
-    new: u64,
-    interest: u64,
-    involved: u64,
-    queued: u64,
-    truncated_unknown: u64,
-    cost: u32,
-    remaining: u32,
+/// Per-repo counters accumulated over one sync.
+#[derive(Default, Debug, Clone)]
+pub(crate) struct Stats {
+    pub(crate) swept: usize,
+    pub(crate) total_count: u32,
+    pub(crate) new: u64,
+    pub(crate) interest: u64,
+    pub(crate) involved: u64,
+    pub(crate) queued: u64,
+    pub(crate) truncated_unknown: u64,
+    pub(crate) cost: u32,
+    pub(crate) remaining: u32,
 }
 
-/// A progress sink for the paginated searches, on stderr so stdout (the
-/// summary) stays clean. `what` names the search (`updated`, `review-requested`,
-/// ...) so it's clear which class of PRs is streaming. When `in_place`, it
-/// rewrites one line with `\r`; otherwise it prints a line per page (so it
-/// doesn't collide with interleaved log lines, which have their own newlines).
-fn progress_reporter(in_place: bool) -> impl FnMut(&str, usize, u32) {
-    move |what: &str, fetched: usize, total: u32| {
+/// One repo's sync outcome: the counters it accumulated, plus what the ledger
+/// holds now that it's done.
+#[derive(Debug, Clone)]
+pub(crate) struct RepoSummary {
+    /// The repo's `owner/name`.
+    pub(crate) repo: String,
+    pub(crate) stats: Stats,
+    /// Tracked PRs in the ledger afterwards, and PRs stored in total.
+    pub(crate) tracked: u64,
+    pub(crate) total: u64,
+    /// The sweep hit the forge's search cap, so some PRs in the window were
+    /// missed.
+    pub(crate) truncated: bool,
+}
+
+/// What a sync reports as it runs, so its caller — not the sync itself —
+/// decides where that goes.
+///
+/// [`run`] writes to neither stdout nor stderr: [`StderrProgress`] reproduces
+/// what it used to print, and a frontend that owns the terminal (a TUI) can
+/// implement the same two methods over a channel instead.
+pub(crate) trait SyncProgress {
+    /// A page of a paginated pass landed. `what` names the pass (`updated`, an
+    /// involvement reason such as `review_requested`, or `detail`), `fetched`
+    /// is the running count and `total` is what the forge said there is.
+    fn page(&mut self, what: &str, fetched: usize, total: u32);
+
+    /// One repo finished — called once per repo, after its last page.
+    fn repo_finished(&mut self, summary: &RepoSummary);
+}
+
+/// The CLI's sink: page progress on stderr, so stdout carries only the
+/// per-repo summary and stays pipeable.
+pub(crate) struct StderrProgress {
+    /// Rewrite a single line with `\r` rather than printing one per page. Only
+    /// tidy when nothing else is writing to stderr, so it's off when logs are
+    /// interleaved (`-v`) or stderr isn't a terminal.
+    in_place: bool,
+    /// An in-place line is on screen without its newline yet.
+    open_line: bool,
+}
+
+impl StderrProgress {
+    pub(crate) fn new(logging: bool) -> Self {
+        Self {
+            in_place: std::io::stderr().is_terminal() && !logging,
+            open_line: false,
+        }
+    }
+}
+
+impl SyncProgress for StderrProgress {
+    fn page(&mut self, what: &str, fetched: usize, total: u32) {
         let msg = format!("{what}: {fetched}/{total} PRs");
         let mut err = std::io::stderr().lock();
-        if in_place {
+        if self.in_place {
             // \x1b[K clears the rest of the line after the (possibly shorter) update.
             let _ = write!(err, "\r  {msg}\x1b[K");
+            self.open_line = true;
         } else {
             let _ = writeln!(err, "  {msg}");
         }
         let _ = err.flush();
     }
-}
 
-/// Close the in-place progress line once paginated work is done.
-fn finish_progress(in_place: bool) {
-    if in_place {
-        let _ = writeln!(std::io::stderr());
+    fn repo_finished(&mut self, summary: &RepoSummary) {
+        // Close the progress line before the summary goes to stdout — but only
+        // if one was actually left open, so a repo that reported no pages at
+        // all doesn't emit a stray blank line.
+        if std::mem::take(&mut self.open_line) {
+            let _ = writeln!(std::io::stderr());
+        }
+        println!("{}", summary_line(summary));
     }
 }
 
-fn print_summary(repo: &str, stats: &Stats, tracked: u64, total: u64) {
-    // `swept`/`total_count` count what matched the search window; `interest`/
-    // `involved` count why PRs are tracked.
+/// The one-line per-repo summary, on stdout.
+///
+/// `swept`/`total_count` count what matched the search window; `interest`/
+/// `involved` count why PRs are tracked.
+fn summary_line(summary: &RepoSummary) -> String {
+    let s = &summary.stats;
     let mut line = format!(
-        "sync {repo}: swept {} of {} in window, tracked {tracked}/{total} (+{} new), \
+        "sync {}: swept {} of {} in window, tracked {}/{} (+{} new), \
          {} interest, {} involved, {} on the queue",
-        stats.swept, stats.total_count, stats.new, stats.interest, stats.involved, stats.queued,
+        summary.repo,
+        s.swept,
+        s.total_count,
+        summary.tracked,
+        summary.total,
+        s.new,
+        s.interest,
+        s.involved,
+        s.queued,
     );
-    if stats.truncated_unknown > 0 {
-        line.push_str(&format!(
-            ", {} unknown (truncated)",
-            stats.truncated_unknown
-        ));
+    if s.truncated_unknown > 0 {
+        line.push_str(&format!(", {} unknown (truncated)", s.truncated_unknown));
     }
-    line.push_str(&format!("; {} pts, {} left", stats.cost, stats.remaining));
-    println!("{line}");
+    line.push_str(&format!("; {} pts, {} left", s.cost, s.remaining));
+    line
 }
 
 #[cfg(test)]
@@ -517,5 +578,72 @@ mod tests {
     fn search_time_handles_no_fractional_part() {
         let ts: Timestamp = "2026-08-05T18:30:00Z".parse().unwrap();
         assert_eq!(search_time(ts), "2026-08-05T18:30:00+00:00");
+    }
+
+    fn summary() -> RepoSummary {
+        RepoSummary {
+            repo: "apache/airflow".into(),
+            stats: Stats {
+                swept: 12,
+                total_count: 12,
+                new: 3,
+                interest: 5,
+                involved: 2,
+                queued: 4,
+                truncated_unknown: 0,
+                cost: 61,
+                remaining: 4823,
+            },
+            tracked: 7,
+            total: 90,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn summary_line_reports_every_counter() {
+        assert_eq!(
+            summary_line(&summary()),
+            "sync apache/airflow: swept 12 of 12 in window, tracked 7/90 (+3 new), \
+             5 interest, 2 involved, 4 on the queue; 61 pts, 4823 left"
+        );
+    }
+
+    #[test]
+    fn summary_line_mentions_unclassifiable_prs_only_when_there_are_some() {
+        let mut with_unknown = summary();
+        with_unknown.stats.truncated_unknown = 2;
+        assert!(
+            summary_line(&with_unknown).contains("4 on the queue, 2 unknown (truncated); 61 pts")
+        );
+        assert!(!summary_line(&summary()).contains("unknown"));
+    }
+
+    /// A sink that records what it was told, standing in for the CLI's stderr
+    /// one wherever a test needs to drive a sync without printing.
+    #[derive(Default)]
+    struct RecordingProgress {
+        pages: Vec<(String, usize, u32)>,
+        finished: Vec<String>,
+    }
+
+    impl SyncProgress for RecordingProgress {
+        fn page(&mut self, what: &str, fetched: usize, total: u32) {
+            self.pages.push((what.to_string(), fetched, total));
+        }
+
+        fn repo_finished(&mut self, summary: &RepoSummary) {
+            self.finished.push(summary.repo.clone());
+        }
+    }
+
+    #[test]
+    fn a_recording_sink_captures_pages_and_completions_without_printing() {
+        let mut progress = RecordingProgress::default();
+        progress.page("updated", 30, 120);
+        progress.repo_finished(&summary());
+
+        assert_eq!(progress.pages, vec![("updated".to_string(), 30, 120)]);
+        assert_eq!(progress.finished, vec!["apache/airflow".to_string()]);
     }
 }

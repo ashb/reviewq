@@ -22,7 +22,10 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
     // only tidy when nothing else is writing there.
     let logging = cli.verbose > 0;
     match cli.command {
-        Command::Sync => sync::run(config, logging).await,
+        Command::Sync => {
+            let mut progress = sync::StderrProgress::new(logging);
+            sync::run(config, &mut progress).await
+        }
         Command::List(args) => list::run(config, &args),
         Command::Next(args) => list::next(config, &args),
         Command::Show(args) => show::run(config, &args),
