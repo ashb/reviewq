@@ -7,11 +7,11 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use jiff::Timestamp;
-use octocrab::Octocrab;
 use octocrab::models::activity::Notification;
+use octocrab::{GraphqlError, GraphqlPathSegment, GraphqlResponse, Octocrab};
 use reviewq_core::model::{
     Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
 };
@@ -171,9 +171,39 @@ impl Forge for GithubForge {
         vars.insert("name".into(), name.into());
         vars.insert("number".into(), number.into());
 
-        let data: DetailQuery = self
-            .graphql(&format!("fetch_detail #{number}"), DETAIL_QUERY, vars)
-            .await?;
+        // Not `self.graphql`: a PR that no longer exists comes back as a
+        // GraphQL error, which that helper collapses into one opaque failure —
+        // aborting a sync over a single unreachable PR. Posting directly keeps
+        // the error list so [`pull_request_is_gone`] can recognise that one
+        // case and let every other error through unchanged.
+        let op = format!("fetch_detail #{number}");
+        let payload = serde_json::json!({ "query": DETAIL_QUERY, "variables": vars });
+        tracing::debug!(op, "graphql request");
+        let response: GraphqlResponse<DetailQuery> = self
+            .inner
+            .post("/graphql", Some(&payload))
+            .await
+            .with_context(|| format!("GitHub GraphQL request failed ({op})"))?;
+
+        let data = match response {
+            GraphqlResponse::Ok(ok) => ok.data,
+            GraphqlResponse::Err(err) => {
+                if pull_request_is_gone(&err.errors) {
+                    tracing::warn!(
+                        owner,
+                        name,
+                        number,
+                        "PR could not be resolved on the forge — deleted, or never a \
+                         pull request; treating it as gone"
+                    );
+                    return Ok(None);
+                }
+                bail!(
+                    "GitHub GraphQL request failed ({op}): {}",
+                    render_graphql_errors(&err.errors)
+                );
+            }
+        };
         data.rate_limit.trace("sync:detail");
 
         let cost = data.rate_limit.cost;
@@ -394,6 +424,52 @@ query($owner: String!, $name: String!, $number: Int!) {
   rateLimit { limit cost remaining resetAt }
 }
 ";
+
+/// Join GraphQL error messages for an `anyhow` chain.
+///
+/// Written here rather than reusing octocrab's own `Display`, which isn't
+/// publicly re-exported and which pads the message with source locations and a
+/// backtrace note that say nothing useful about a failed sync.
+fn render_graphql_errors(errors: &[GraphqlError]) -> String {
+    if errors.is_empty() {
+        return "no error detail".to_string();
+    }
+    errors
+        .iter()
+        .map(|error| error.message.trim_end_matches('.'))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Whether `errors` say only that the pull request asked for doesn't exist.
+///
+/// GitHub answers a request for a PR that has been deleted — or a number that
+/// was never a PR — with `pullRequest: null` *and* a `NOT_FOUND` error, so the
+/// response is an error rather than the empty success the null alone would be.
+///
+/// It's recognised structurally rather than by that `NOT_FOUND` type, because
+/// octocrab's [`GraphqlError`] follows the GraphQL spec and drops GitHub's
+/// non-standard `type` field: what's left is the path the error is attached to
+/// and its message. Both are required to match, so an error about some other
+/// field can't be mistaken for this.
+///
+/// Requires *every* error to be that one thing. A response mixing an
+/// unreachable PR with a rate-limit or permission error is a real failure, and
+/// swallowing it would turn a broken token into a silently short sync.
+fn pull_request_is_gone(errors: &[GraphqlError]) -> bool {
+    !errors.is_empty()
+        && errors.iter().all(|error| {
+            let about_the_pull_request = error.path.as_deref().is_some_and(|path| {
+                path.iter().any(|segment| {
+                    matches!(segment, GraphqlPathSegment::Path(field) if field == "pullRequest")
+                })
+            });
+            about_the_pull_request
+                && error
+                    .message
+                    .starts_with("Could not resolve to a PullRequest")
+        })
+}
 
 #[derive(Debug, Deserialize)]
 struct DetailQuery {
@@ -751,6 +827,87 @@ query($owner: String!, $name: String!, $number: Int!) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GraphQL error as GitHub sends it, minus the `type` octocrab discards.
+    fn graphql_error(message: &str, path: &[&str]) -> GraphqlError {
+        GraphqlError {
+            message: message.to_string(),
+            locations: None,
+            path: Some(
+                path.iter()
+                    .map(|segment| GraphqlPathSegment::Path((*segment).to_string()))
+                    .collect(),
+            ),
+            extensions: None,
+        }
+    }
+
+    /// Verbatim from a real sync against a PR that had gone.
+    fn pr_not_found() -> GraphqlError {
+        graphql_error(
+            "Could not resolve to a PullRequest with the number of 70787.",
+            &["repository", "pullRequest"],
+        )
+    }
+
+    #[test]
+    fn a_missing_pull_request_is_recognised_as_gone() {
+        assert!(pull_request_is_gone(&[pr_not_found()]));
+    }
+
+    #[test]
+    fn an_empty_error_list_is_not_a_missing_pull_request() {
+        // Nothing went wrong is not the same as the PR being gone, and must not
+        // silently turn into an empty result.
+        assert!(!pull_request_is_gone(&[]));
+    }
+
+    #[test]
+    fn an_unrelated_failure_is_never_treated_as_gone() {
+        for error in [
+            // A real problem with the request, not with the PR.
+            graphql_error("API rate limit exceeded for user ID 1.", &["repository"]),
+            graphql_error(
+                "Resource not accessible by integration",
+                &["repository", "pullRequest"],
+            ),
+            // The repo is missing, which is a config or permissions problem —
+            // the message is about a Repository, and the path stops short.
+            graphql_error(
+                "Could not resolve to a Repository with the name 'apache/nope'.",
+                &["repository"],
+            ),
+        ] {
+            assert!(!pull_request_is_gone(&[error]));
+        }
+    }
+
+    #[test]
+    fn a_missing_pull_request_alongside_a_real_failure_still_fails() {
+        // Swallowing this would turn an expired token into a quietly short
+        // sync, which is far worse than an error.
+        let errors = vec![
+            pr_not_found(),
+            graphql_error("API rate limit exceeded for user ID 1.", &["repository"]),
+        ];
+        assert!(!pull_request_is_gone(&errors));
+    }
+
+    #[test]
+    fn graphql_errors_render_as_one_line_per_cause() {
+        assert_eq!(
+            render_graphql_errors(&[pr_not_found()]),
+            "Could not resolve to a PullRequest with the number of 70787"
+        );
+        assert_eq!(
+            render_graphql_errors(&[
+                pr_not_found(),
+                graphql_error("Something else.", &["repository"]),
+            ]),
+            "Could not resolve to a PullRequest with the number of 70787; Something else"
+        );
+        assert_eq!(render_graphql_errors(&[]), "no error detail");
+    }
 
     #[tokio::test]
     async fn web_url_matches_githubs_pull_layout() {

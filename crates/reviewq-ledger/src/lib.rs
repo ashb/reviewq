@@ -504,6 +504,32 @@ impl Ledger {
         Ok(())
     }
 
+    /// Record that a PR's detail can't be fetched because the forge no longer
+    /// has it — deleted, or a number that was never a pull request.
+    ///
+    /// Drops its attention, since a queue row pointing at a PR nobody can open
+    /// is worse than no row, and stamps `detail_synced_at` so the detail pass
+    /// stops retrying a fetch that will keep failing. It stays tracked and
+    /// stored: this is a statement about the forge, not a decision to forget it.
+    ///
+    /// Self-correcting if the PR comes back — a sweep seeing it again advances
+    /// `updated_at` past this stamp, which makes it due for detail once more.
+    pub fn mark_detail_unavailable(&self, repo_id: i64, number: u64, now: Timestamp) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
+            params![repo_id, number as i64],
+        )
+        .with_context(|| format!("clearing attention for unreachable #{number}"))?;
+        tx.execute(
+            "UPDATE prs SET detail_synced_at = ?3 WHERE repo_id = ?1 AND number = ?2",
+            params![repo_id, number as i64, now.to_string()],
+        )
+        .with_context(|| format!("stamping detail_synced_at for unreachable #{number}"))?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The instant-hide half of `reviewq done`: every reason `done` is allowed
     /// to clear per the reason table, but not `review_requested` — only my
     /// review or the request being withdrawn clears that one.
@@ -1923,6 +1949,62 @@ mod tests {
         let waiting = ledger.waiting(repo_id).unwrap();
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].pr.number, 2);
+    }
+
+    #[test]
+    fn marking_detail_unavailable_drops_it_off_the_queue_and_stops_the_retries() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        wants_attention(
+            &ledger,
+            repo_id,
+            1,
+            AttentionReason::Mention {
+                by: "potiuk".into(),
+            },
+            "2026-08-05T09:00:00Z",
+        );
+        assert_eq!(ledger.queue(repo_id).unwrap().len(), 1);
+
+        ledger
+            .mark_detail_unavailable(repo_id, 1, ts("2026-08-10T12:00:00Z"))
+            .unwrap();
+
+        assert!(
+            ledger.queue(repo_id).unwrap().is_empty(),
+            "a PR the forge can't resolve must not sit on the queue"
+        );
+        assert!(
+            ledger
+                .prs_needing_detail(repo_id, false)
+                .unwrap()
+                .is_empty(),
+            "and must not be refetched on every later sync"
+        );
+        // Still tracked: this records what the forge said, it doesn't forget the PR.
+        assert_eq!(ledger.list_tracked(repo_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_pr_that_reappears_becomes_due_for_detail_again() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        ledger
+            .mark_detail_unavailable(repo_id, 1, ts("2026-08-05T13:00:00Z"))
+            .unwrap();
+        assert!(
+            ledger
+                .prs_needing_detail(repo_id, false)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A later sweep sees it again, advancing updated_at past the stamp.
+        let mut back = pr(1);
+        back.updated_at = ts("2026-08-11T09:00:00Z");
+        ledger.upsert_pr(repo_id, &back, None, now()).unwrap();
+
+        assert_eq!(ledger.prs_needing_detail(repo_id, false).unwrap().len(), 1);
     }
 
     #[test]

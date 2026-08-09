@@ -365,8 +365,12 @@ async fn detail_pass(
 /// Fetch one PR's tier-2 detail, classify it against what the fetch saw, and
 /// commit the result — the per-item body `detail_pass` runs over the whole
 /// tracked set, factored out so `review` can refresh a single PR right after
-/// handing it off, without waiting for the next full sync. `None` when the PR
-/// is gone or inaccessible; the bool reports whether it now holds attention.
+/// handing it off, without waiting for the next full sync.
+///
+/// `None` when the forge has no such PR, having first recorded that via
+/// [`Ledger::mark_detail_unavailable`] — one unreachable PR must not abort a
+/// sync, and must not be retried on every subsequent one. Otherwise the bool
+/// reports whether the PR now holds attention.
 #[allow(clippy::too_many_arguments)]
 pub async fn refresh_one(
     forge: &dyn Forge,
@@ -386,6 +390,10 @@ pub async fn refresh_one(
         .fetch_pr_detail(&repo.owner, &repo.name, number, login)
         .await?
     else {
+        // The forge has no such PR. Record that so the queue stops advertising
+        // something nobody can open, and so the next sync doesn't spend another
+        // query rediscovering it.
+        ledger.mark_detail_unavailable(repo_id, number, now)?;
         return Ok(None);
     };
 
