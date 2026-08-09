@@ -84,6 +84,15 @@ impl RepoRef {
     pub fn slug(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
+
+    /// This repo's identity as the ledger knows it.
+    pub fn key(&self) -> reviewq_ledger::RepoKey {
+        reviewq_ledger::RepoKey {
+            host: self.host.clone(),
+            owner: self.owner.clone(),
+            name: self.name.clone(),
+        }
+    }
 }
 
 fn default_host() -> String {
@@ -154,7 +163,10 @@ pub struct Bots {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Handoff {
-    /// Argv for `reviewq review N`; `{number}` is substituted in each element.
+    /// Argv for `reviewq review N`; `{number}` and `{url}` (the PR's full web
+    /// URL) are substituted in each element. Prefer `{url}` where the tool
+    /// supports it — a bare number only works run from inside a checkout of
+    /// the right repo, since that's the only way to infer which one.
     pub review_command: Vec<String>,
 }
 
@@ -194,7 +206,7 @@ impl Default for Bots {
 impl Default for Handoff {
     fn default() -> Self {
         Self {
-            review_command: ["wiff", "forge", "pull", "{number}"]
+            review_command: ["wiff", "forge", "pull", "{url}"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -316,18 +328,6 @@ impl Config {
                 at()
             );
         }
-        // Multi-repo isn't wired into the ledger yet (PR numbers collide across
-        // repos without a composite key), so the config is modelled for many
-        // but gated to one. See the schema when lifting this.
-        if repos.len() > 1 {
-            bail!(
-                "{} repos configured in {}, but multi-repo isn't supported yet — \
-                 configure a single repo for now",
-                repos.len(),
-                at()
-            );
-        }
-
         let mut seen = std::collections::HashSet::new();
         for repo in &repos {
             if repo.owner.trim().is_empty() || repo.name.trim().is_empty() {
@@ -362,34 +362,26 @@ impl Config {
         self.projects.iter().flat_map(|p| p.repos.iter())
     }
 
-    /// The sole repo and the project that owns it. Valid because the loader
-    /// currently gates the config to exactly one repo.
-    pub fn sole_repo(&self) -> Result<(&Project, &RepoRef)> {
-        for project in &self.projects {
-            if let Some(repo) = project.repos.first() {
-                return Ok((project, repo));
-            }
-        }
-        bail!("no repo configured")
+    /// The resolved forge settings for `host`, with a supported provider.
+    pub fn forge_host_for(&self, host: &str) -> Result<ForgeHost> {
+        resolve_host(&self.forges, host)
     }
 
-    /// The resolved forge settings for `repo`'s host, with a supported provider.
-    pub fn forge_host_for(&self, repo: &RepoRef) -> Result<ForgeHost> {
-        resolve_host(&self.forges, &repo.host)
-    }
-
-    /// Resolve `repo`'s host, resolve a token for it, and build a connected
+    /// Resolve `host`'s settings, resolve a token for it, and build a connected
     /// [`Forge`] — the sequence every command that talks to the forge repeats.
-    /// Takes `repo` rather than assuming the sole one, so it works the same
-    /// whether a caller has one repo to pick from or many.
+    /// Takes a bare host rather than a [`RepoRef`], since credential
+    /// resolution only ever depends on which host a repo lives on, never its
+    /// owner/name — callers with a `RepoRef` in hand pass `&repo.host`;
+    /// callers that only resolved a repo's identity from the ledger (no
+    /// config `RepoRef` at all) pass that instead.
     ///
     /// `doctor` is the one command that calls the pieces directly instead of
     /// this: it reports on each step (host, token) as it succeeds, so
     /// collapsing them here would cost it that granularity.
-    pub fn forge_for(&self, repo: &RepoRef) -> Result<Box<dyn Forge>> {
-        let host = self.forge_host_for(repo)?;
-        let token = resolve_token(&host)?;
-        build(&host, &repo.host, &token.value)
+    pub fn forge_for(&self, host: &str) -> Result<Box<dyn Forge>> {
+        let resolved = self.forge_host_for(host)?;
+        let token = resolve_token(&resolved)?;
+        build(&resolved, host, &token.value)
     }
 
     /// The relationships that involve me in `project`: its own override if set,
@@ -450,7 +442,7 @@ mod tests {
         config
             .validate(Path::new("default"))
             .expect("default config validates");
-        let (_project, repo) = config.sole_repo().expect("one repo");
+        let repo = config.repos().next().expect("one repo");
         assert_eq!(repo.slug(), "apache/airflow");
     }
 
@@ -464,9 +456,11 @@ mod tests {
         assert!(config.bots.logins.contains(&"codecov[bot]".to_string()));
         assert!(config.output.underline_links);
 
-        let (_project, repo) = config.sole_repo().unwrap();
+        let repo = config.repos().next().unwrap();
         assert_eq!(repo.host, "github.com");
-        let host = config.forge_host_for(repo).expect("built-in github host");
+        let host = config
+            .forge_host_for(&repo.host)
+            .expect("built-in github host");
         assert_eq!(host.provider.as_deref(), Some("github"));
     }
 
@@ -483,7 +477,7 @@ mod tests {
         ))
         .expect("parses");
 
-        let (project, _repo) = config.sole_repo().unwrap();
+        let project = &config.projects[0];
         assert_eq!(project.interest.len(), 3);
         config.interest_for(project).expect("compiles");
     }
@@ -491,7 +485,7 @@ mod tests {
     #[test]
     fn involving_reasons_default_then_project_override() {
         let config: Config = toml::from_str(&minimal("")).expect("parses");
-        let (project, _repo) = config.sole_repo().unwrap();
+        let project = &config.projects[0];
         // Global default: the lean human-pulled-me-in set, no `subscribed`.
         assert_eq!(
             config.involving_reasons(project),
@@ -510,7 +504,7 @@ mod tests {
             "#,
         )
         .expect("parses");
-        let (project, _repo) = overridden.sole_repo().unwrap();
+        let project = &overridden.projects[0];
         assert_eq!(overridden.involving_reasons(project), ["mention"]);
     }
 
@@ -551,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn more_than_one_repo_is_rejected_for_now() {
+    fn more_than_one_repo_validates() {
         let config: Config = toml::from_str(
             r#"
             [identity]
@@ -567,10 +561,10 @@ mod tests {
         )
         .expect("parses");
 
-        let err = config.validate(Path::new("cfg")).unwrap_err();
-        assert!(
-            err.to_string().contains("multi-repo isn't supported yet"),
-            "{err:#}"
+        config.validate(Path::new("cfg")).expect("validates");
+        assert_eq!(
+            config.repos().map(RepoRef::slug).collect::<Vec<_>>(),
+            ["apache/airflow", "astronomer/astro"]
         );
     }
 
@@ -625,8 +619,8 @@ mod tests {
         .expect("config parses");
 
         config.validate(Path::new("cfg.toml")).expect("validates");
-        let (_project, repo) = config.sole_repo().unwrap();
-        let host = config.forge_host_for(repo).expect("configured host");
+        let repo = config.repos().next().unwrap();
+        let host = config.forge_host_for(&repo.host).expect("configured host");
         assert_eq!(
             host.api_base.as_deref(),
             Some("https://github.acme.example/api/v3")

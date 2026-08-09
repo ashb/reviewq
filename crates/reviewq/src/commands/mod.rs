@@ -1,6 +1,7 @@
 mod actions;
 mod doctor;
 mod list;
+mod resolve;
 mod review;
 mod show;
 mod sync;

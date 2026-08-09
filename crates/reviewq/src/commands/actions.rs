@@ -9,17 +9,16 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
-use reviewq_ledger::{Ledger, PrShow};
 
+use super::resolve::{open_for_number, repo_for};
 use crate::cli::{NumberArgs, SnoozeArgs};
-use crate::{config, paths};
+use crate::config;
 
 pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    let show = require(&ledger, args.number)?;
+    let (ledger, repo_id, show) = open_for_number(args.number)?;
 
-    ledger.set_done(args.number, &show.pr.head_sha, Timestamp::now())?;
-    ledger.clear_done_attention(args.number)?;
+    ledger.set_done(repo_id, args.number, &show.pr.head_sha, Timestamp::now())?;
+    ledger.clear_done_attention(repo_id, args.number)?;
 
     if let Err(err) = mark_notifications_read(config_path, args.number).await {
         tracing::warn!(
@@ -36,9 +35,9 @@ pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitC
 /// Best-effort: config or the network being unavailable should not stop
 /// `done` from recording locally, so the caller only warns on error.
 async fn mark_notifications_read(config_path: Option<&Path>, number: u64) -> Result<()> {
+    let repo = repo_for(number)?;
     let loaded = config::load(config_path)?;
-    let (_project, repo) = loaded.config.sole_repo()?;
-    let forge = loaded.config.forge_for(repo)?;
+    let forge = loaded.config.forge_for(&repo.host)?;
     forge
         .mark_pr_notifications_read(&repo.owner, &repo.name, number)
         .await
@@ -48,11 +47,10 @@ pub fn snooze(args: &SnoozeArgs) -> Result<ExitCode> {
     // Validate the duration before touching the ledger, so a typo is reported
     // as itself rather than as an unrelated "PR not found".
     let until = snooze_until(Timestamp::now(), &args.duration)?;
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    require(&ledger, args.number)?;
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
 
-    ledger.set_snoozed_until(args.number, until)?;
-    ledger.clear_attention(args.number)?;
+    ledger.set_snoozed_until(repo_id, args.number, until)?;
+    ledger.clear_attention(repo_id, args.number)?;
 
     println!(
         "#{} snoozed until {}",
@@ -63,21 +61,19 @@ pub fn snooze(args: &SnoozeArgs) -> Result<ExitCode> {
 }
 
 pub fn mute(args: &NumberArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    require(&ledger, args.number)?;
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
 
-    ledger.set_muted(args.number, true)?;
-    ledger.clear_attention(args.number)?;
+    ledger.set_muted(repo_id, args.number, true)?;
+    ledger.clear_attention(repo_id, args.number)?;
 
     println!("#{} muted", args.number);
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn unmute(args: &NumberArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    require(&ledger, args.number)?;
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
 
-    ledger.set_muted(args.number, false)?;
+    ledger.set_muted(repo_id, args.number, false)?;
 
     println!(
         "#{} unmuted — its reasons return on the next sync",
@@ -87,30 +83,27 @@ pub fn unmute(args: &NumberArgs) -> Result<ExitCode> {
 }
 
 pub fn defer(args: &NumberArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    require(&ledger, args.number)?;
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
 
-    ledger.set_deferred_at(args.number, Some(Timestamp::now()))?;
+    ledger.set_deferred_at(repo_id, args.number, Some(Timestamp::now()))?;
 
     println!("#{} deferred to the bottom of the queue", args.number);
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn undefer(args: &NumberArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    require(&ledger, args.number)?;
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
 
-    ledger.set_deferred_at(args.number, None)?;
+    ledger.set_deferred_at(repo_id, args.number, None)?;
 
     println!("#{} undeferred", args.number);
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn track(args: &NumberArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    require(&ledger, args.number)?;
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
 
-    if ledger.track(args.number)? {
+    if ledger.track(repo_id, args.number)? {
         println!(
             "#{} force-tracked — run `reviewq sync` to fetch its detail and queue it",
             args.number
@@ -119,14 +112,6 @@ pub fn track(args: &NumberArgs) -> Result<ExitCode> {
         println!("#{} is already tracked", args.number);
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// The PR to act on, or a clear error rather than a foreign-key violation from
-/// the write these commands are about to make.
-fn require(ledger: &Ledger, number: u64) -> Result<PrShow> {
-    ledger
-        .show(number)?
-        .with_context(|| format!("#{number} is not in the ledger — run `reviewq sync` first"))
 }
 
 /// Parse a friendly duration (`3d`, `12h`, `1w2d`) into the instant it reaches

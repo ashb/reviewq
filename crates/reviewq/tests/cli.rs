@@ -156,3 +156,90 @@ fn a_missing_explicit_config_is_reported_not_created() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("config not found"));
 }
+
+/// The same PR number tracked in two repos is ambiguous by number alone, but
+/// not when named by its full URL — `show` prefers the URL's own repo over
+/// searching, exactly so this case has an answer.
+#[test]
+fn show_disambiguates_a_shared_pr_number_by_url() {
+    let db = std::env::temp_dir().join(format!(
+        "reviewq-cli-show-disambiguates-{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db);
+    {
+        use reviewq_core::model::PrSnapshot;
+        use reviewq_ledger::Ledger;
+
+        let pr = |title: &str| PrSnapshot {
+            number: 42,
+            title: title.to_string(),
+            author: "octocat".into(),
+            author_association: "CONTRIBUTOR".into(),
+            head_sha: "abc123".into(),
+            is_draft: false,
+            state: reviewq_core::model::PrState::Open,
+            updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),
+            labels: vec![],
+            milestone: None,
+            files: None,
+            files_truncated: false,
+        };
+        let ledger = Ledger::open(&db).unwrap();
+        let airflow = ledger
+            .ensure_repo(&reviewq_ledger::RepoKey {
+                host: "github.com".into(),
+                owner: "apache".into(),
+                name: "airflow".into(),
+            })
+            .unwrap();
+        let astro = ledger
+            .ensure_repo(&reviewq_ledger::RepoKey {
+                host: "github.com".into(),
+                owner: "astronomer".into(),
+                name: "astro".into(),
+            })
+            .unwrap();
+        ledger
+            .upsert_pr(
+                airflow,
+                &pr("Airflow #42"),
+                None,
+                "2026-08-05T12:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+        ledger
+            .upsert_pr(
+                astro,
+                &pr("Astro #42"),
+                None,
+                "2026-08-05T12:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+    }
+
+    let bare = Command::new(BIN)
+        .args(["show", "42", "--json"])
+        .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
+        .env("REVIEWQ_DB", &db)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("binary runs");
+    assert!(!bare.status.success(), "a bare shared number is ambiguous");
+    assert!(stderr(&bare).contains("more than one configured repo"));
+
+    let by_url = Command::new(BIN)
+        .args([
+            "show",
+            "https://github.com/astronomer/astro/pull/42",
+            "--json",
+        ])
+        .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
+        .env("REVIEWQ_DB", &db)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("binary runs");
+    let _ = std::fs::remove_file(&db);
+    assert!(by_url.status.success(), "{}", stderr(&by_url));
+    assert!(String::from_utf8_lossy(&by_url.stdout).contains("Astro #42"));
+}

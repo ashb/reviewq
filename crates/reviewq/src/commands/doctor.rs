@@ -25,6 +25,9 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
     row("config", &loaded.path.display().to_string());
 
     let db = paths::database_file()?;
+    // `Ledger::open` would create an empty file, so a ledger that isn't there
+    // yet is reported as a note, never opened.
+    let ledger = db.exists().then(|| Ledger::open(&db)).transpose()?;
     let db_note = if db.exists() {
         db.display().to_string()
     } else {
@@ -32,63 +35,67 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
     };
     row("ledger", &db_note);
 
-    row("last sync", &last_sync_note(&db, &mut problems)?);
+    for repo in loaded.config.repos() {
+        row("repo", &repo.slug());
 
-    let (_project, repo) = loaded.config.sole_repo()?;
-    row("repo", &repo.slug());
-
-    let host = loaded.config.forge_host_for(repo)?;
-    let host_note = match &host.api_base {
-        Some(api_base) => format!("{} ({api_base})", repo.host),
-        None => repo.host.clone(),
-    };
-    row("forge", &host_note);
-
-    let token = resolve_token(&host)?;
-    row("token", &token.source.to_string());
-
-    let forge = build(&host, &repo.host, &token.value)?;
-    let viewer = forge.viewer().await?;
-    viewer.rate_limit.trace("doctor:viewer");
-
-    let configured = loaded.config.identity.login.trim();
-    if viewer.login == configured {
         row(
-            "viewer",
-            &format!("{} {}", viewer.login, ok("matches identity.login")),
+            "  last sync",
+            &last_sync_note(ledger.as_ref(), &repo.key(), &mut problems)?,
         );
-    } else {
-        problems += 1;
-        row(
-            "viewer",
-            &format!(
-                "{} {}",
-                viewer.login,
-                warn(&format!("but identity.login is {configured}"))
-            ),
-        );
-    }
 
-    let rl = &viewer.rate_limit;
-    let graphql = format!(
-        "{}/{} points, resets {}",
-        rl.remaining, rl.limit, rl.reset_at
-    );
-    row(
-        "graphql",
-        &if rl.remaining < rl.limit / 10 {
-            problems += 1;
-            format!("{graphql} {}", warn("budget nearly exhausted"))
+        let host = loaded.config.forge_host_for(&repo.host)?;
+        let host_note = match &host.api_base {
+            Some(api_base) => format!("{} ({api_base})", repo.host),
+            None => repo.host.clone(),
+        };
+        row("  forge", &host_note);
+
+        let token = resolve_token(&host)?;
+        row("  token", &token.source.to_string());
+
+        let forge = build(&host, &repo.host, &token.value)?;
+        let viewer = forge.viewer().await?;
+        viewer.rate_limit.trace("doctor:viewer");
+
+        let configured = loaded.config.identity.login.trim();
+        if viewer.login == configured {
+            row(
+                "  viewer",
+                &format!("{} {}", viewer.login, ok("matches identity.login")),
+            );
         } else {
-            graphql
-        },
-    );
-
-    match forge.rest_core_remaining().await {
-        Ok((remaining, limit)) => row("rest", &format!("{remaining}/{limit} core requests")),
-        Err(err) => {
             problems += 1;
-            row("rest", &warn(&format!("rate limit unavailable: {err}")));
+            row(
+                "  viewer",
+                &format!(
+                    "{} {}",
+                    viewer.login,
+                    warn(&format!("but identity.login is {configured}"))
+                ),
+            );
+        }
+
+        let rl = &viewer.rate_limit;
+        let graphql = format!(
+            "{}/{} points, resets {}",
+            rl.remaining, rl.limit, rl.reset_at
+        );
+        row(
+            "  graphql",
+            &if rl.remaining < rl.limit / 10 {
+                problems += 1;
+                format!("{graphql} {}", warn("budget nearly exhausted"))
+            } else {
+                graphql
+            },
+        );
+
+        match forge.rest_core_remaining().await {
+            Ok((remaining, limit)) => row("  rest", &format!("{remaining}/{limit} core requests")),
+            Err(err) => {
+                problems += 1;
+                row("  rest", &warn(&format!("rate limit unavailable: {err}")));
+            }
         }
     }
 
@@ -101,18 +108,21 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
 
 /// When the last sweep completed and whether it hit the search cap — a capped
 /// sweep means some PRs in that window were silently missed, so it counts as
-/// a problem rather than just a note. `Ledger::open` would create an empty
-/// file, so this reads the existing one directly rather than opening one that
-/// isn't there yet.
-fn last_sync_note(db: &Path, problems: &mut u32) -> Result<String> {
-    if !db.exists() {
-        return Ok("never".to_string());
-    }
-    let ledger = Ledger::open(db)?;
-    let Some(at) = ledger.get_meta(CURSOR_KEY)? else {
+/// a problem rather than just a note. `None` when the ledger doesn't exist
+/// yet — nothing has ever synced.
+fn last_sync_note(
+    ledger: Option<&Ledger>,
+    repo: &reviewq_ledger::RepoKey,
+    problems: &mut u32,
+) -> Result<String> {
+    let Some(ledger) = ledger else {
         return Ok("never".to_string());
     };
-    if ledger.get_meta(TRUNCATED_KEY)?.as_deref() == Some("1") {
+    let repo_id = ledger.ensure_repo(repo)?;
+    let Some(at) = ledger.get_meta(repo_id, CURSOR_KEY)? else {
+        return Ok("never".to_string());
+    };
+    if ledger.get_meta(repo_id, TRUNCATED_KEY)?.as_deref() == Some("1") {
         *problems += 1;
         Ok(format!(
             "{at} {}",

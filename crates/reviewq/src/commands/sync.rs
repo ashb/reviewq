@@ -14,11 +14,11 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ClassifyCtx, PrSnapshot, classify};
-use reviewq_core::rules::Evaluation;
+use reviewq_core::rules::{Evaluation, Interest};
 use reviewq_forge::{Forge, PrDetail};
 use reviewq_ledger::{Ledger, TrackedReason};
 
-use crate::config::{Config, RepoRef};
+use crate::config::{Config, Project, RepoRef};
 use crate::{config, paths};
 
 /// Cursor: the high-water mark of `updatedAt` we have swept up to.
@@ -29,13 +29,42 @@ pub(crate) const TRUNCATED_KEY: &str = "last_sweep_truncated";
 pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> {
     let loaded = config::load(config_path)?;
     let cfg = &loaded.config;
-    let (project, repo) = cfg.sole_repo()?;
-    let forge = cfg.forge_for(repo)?;
+    let now = Timestamp::now();
+    // In-place progress only when stderr is an unshared terminal; with logs
+    // interleaved (`-v`) or piped, print a line per page instead.
+    let in_place = std::io::stderr().is_terminal() && !logging;
+    // One handle for the whole run: every configured repo's sync writes
+    // through it, each scoped by its own `repo_id`.
     let ledger = Ledger::open(&paths::database_file()?)?;
 
-    let now = Timestamp::now();
-    let since = sweep_since(&ledger, cfg, now)?;
-    let rules = cfg.interest_for(project)?;
+    for project in &cfg.projects {
+        let rules = cfg.interest_for(project)?;
+        for repo in &project.repos {
+            let repo_id = ledger.ensure_repo(&repo.key())?;
+            sync_repo(cfg, &ledger, repo_id, project, repo, &rules, now, in_place).await?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One repo's whole sync: sweep, involvement search, detail pass, and the
+/// archived-attention sweep, each scoped to `repo_id` in the shared `ledger`
+/// and using its own forge connection (a different repo may live on a
+/// different host).
+#[allow(clippy::too_many_arguments)]
+async fn sync_repo(
+    cfg: &Config,
+    ledger: &Ledger,
+    repo_id: i64,
+    project: &Project,
+    repo: &RepoRef,
+    rules: &Interest,
+    now: Timestamp,
+    in_place: bool,
+) -> Result<()> {
+    let forge = cfg.forge_for(&repo.host)?;
+
+    let since = sweep_since(ledger, repo_id, cfg, now)?;
 
     // Oldest-updated first, so the cursor watermark advances monotonically and
     // an interrupted sweep resumes from where it stopped. It also makes the
@@ -49,9 +78,6 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
     );
     tracing::info!(%query, "tier-1 sweep");
 
-    // In-place progress only when stderr is an unshared terminal; with logs
-    // interleaved (`-v`) or piped, print a line per page instead.
-    let in_place = std::io::stderr().is_terminal() && !logging;
     let mut progress = progress_reporter(in_place);
     let mut stats = Stats::default();
     let mut after: Option<String> = None;
@@ -90,8 +116,13 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
         // it, atomically. A ^C leaves the cursor at the last committed page, so
         // the next sync resumes rather than re-sweeps.
         if let Some(watermark) = watermark {
-            stats.new +=
-                ledger.commit_sweep_page(&batch, now, CURSOR_KEY, &watermark.to_string())?;
+            stats.new += ledger.commit_sweep_page(
+                repo_id,
+                &batch,
+                now,
+                CURSOR_KEY,
+                &watermark.to_string(),
+            )?;
         }
         progress("updated", stats.swept, stats.total_count);
 
@@ -102,11 +133,12 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
     }
 
     let truncated = stats.total_count > stats.swept as u32;
-    ledger.set_meta(TRUNCATED_KEY, if truncated { "1" } else { "0" })?;
+    ledger.set_meta(repo_id, TRUNCATED_KEY, if truncated { "1" } else { "0" })?;
 
     let review_requested = involvement_search(
         forge.as_ref(),
-        &ledger,
+        ledger,
+        repo_id,
         repo,
         &cfg.identity.login,
         cfg.involving_reasons(project),
@@ -119,7 +151,8 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
 
     detail_pass(
         forge.as_ref(),
-        &ledger,
+        ledger,
+        repo_id,
         repo,
         &cfg.identity.login,
         &cfg.bots.logins,
@@ -133,13 +166,14 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
 
     // Merged/closed PRs are not re-fetched, so drop any attention they still
     // carry (unless this project keeps merged PRs on the queue).
-    ledger.clear_archived_attention(project.include_merged)?;
+    ledger.clear_archived_attention(repo_id, project.include_merged)?;
 
     finish_progress(in_place);
-    let (tracked, total) = ledger.counts()?;
-    print_summary(&stats, tracked, total);
+    let (tracked, total) = ledger.counts(repo_id)?;
+    print_summary(&repo.slug(), &stats, tracked, total);
     if truncated {
         tracing::warn!(
+            repo = repo.slug(),
             total = stats.total_count,
             cap = reviewq_forge::SEARCH_CAP,
             "sweep hit the search cap; some PRs in this window were missed \
@@ -147,13 +181,13 @@ pub async fn run(config_path: Option<&Path>, logging: bool) -> Result<ExitCode> 
         );
     }
 
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 /// The lower bound for this sweep: the stored cursor minus an overlap buffer,
 /// or a bootstrap window on the first-ever run.
-fn sweep_since(ledger: &Ledger, cfg: &Config, now: Timestamp) -> Result<Timestamp> {
-    match ledger.get_meta(CURSOR_KEY)? {
+fn sweep_since(ledger: &Ledger, repo_id: i64, cfg: &Config, now: Timestamp) -> Result<Timestamp> {
+    match ledger.get_meta(repo_id, CURSOR_KEY)? {
         Some(stored) => {
             let cursor: Timestamp = stored
                 .parse()
@@ -191,6 +225,7 @@ fn search_time(ts: Timestamp) -> String {
 async fn involvement_search(
     forge: &dyn Forge,
     ledger: &Ledger,
+    repo_id: i64,
     repo: &RepoRef,
     login: &str,
     reasons: &[String],
@@ -226,7 +261,12 @@ async fn involvement_search(
             stats.cost += page.cost;
             stats.remaining = page.remaining;
             for pr in &page.prs {
-                if ledger.upsert_pr(pr, Some(TrackedReason::Involved(reason.clone())), now)? {
+                if ledger.upsert_pr(
+                    repo_id,
+                    pr,
+                    Some(TrackedReason::Involved(reason.clone())),
+                    now,
+                )? {
                     stats.new += 1;
                 }
                 involved.insert(pr.number);
@@ -262,6 +302,7 @@ const DETAIL_BUDGET_FLOOR: u32 = 100;
 async fn detail_pass(
     forge: &dyn Forge,
     ledger: &Ledger,
+    repo_id: i64,
     repo: &RepoRef,
     login: &str,
     bots: &[String],
@@ -271,7 +312,7 @@ async fn detail_pass(
     stats: &mut Stats,
     progress: &mut impl FnMut(&str, usize, u32),
 ) -> Result<()> {
-    let pending = ledger.prs_needing_detail(include_merged)?;
+    let pending = ledger.prs_needing_detail(repo_id, include_merged)?;
     let total = pending.len() as u32;
     for (index, tracked) in pending.iter().enumerate() {
         // The floor is checked against the budget the last fetch reported, so we
@@ -290,6 +331,7 @@ async fn detail_pass(
         let Some((detail, queued)) = refresh_one(
             forge,
             ledger,
+            repo_id,
             repo,
             login,
             bots,
@@ -322,6 +364,7 @@ async fn detail_pass(
 pub(crate) async fn refresh_one(
     forge: &dyn Forge,
     ledger: &Ledger,
+    repo_id: i64,
     repo: &RepoRef,
     login: &str,
     bots: &[String],
@@ -346,7 +389,7 @@ pub(crate) async fn refresh_one(
 
     // GitHub owns my review history; the ledger owns done/snooze/mute. Read
     // the local state and overlay only the forge-derived fields.
-    let mut mine = ledger.my_state(number)?;
+    let mut mine = ledger.my_state(repo_id, number)?;
     mine.last_reviewed_sha = detail.last_reviewed_sha.clone();
     mine.last_verdict = detail.last_verdict;
     mine.last_action_at = detail.last_action_at;
@@ -370,6 +413,7 @@ pub(crate) async fn refresh_one(
     let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
     let queued = !attention.is_empty();
     ledger.commit_detail(
+        repo_id,
         number,
         &mine,
         &detail.threads,
@@ -441,11 +485,11 @@ fn finish_progress(in_place: bool) {
     }
 }
 
-fn print_summary(stats: &Stats, tracked: u64, total: u64) {
+fn print_summary(repo: &str, stats: &Stats, tracked: u64, total: u64) {
     // `swept`/`total_count` count what matched the search window; `interest`/
     // `involved` count why PRs are tracked.
     let mut line = format!(
-        "sync: swept {} of {} in window, tracked {tracked}/{total} (+{} new), \
+        "sync {repo}: swept {} of {} in window, tracked {tracked}/{total} (+{} new), \
          {} interest, {} involved, {} on the queue",
         stats.swept, stats.total_count, stats.new, stats.interest, stats.involved, stats.queued,
     );

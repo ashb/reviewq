@@ -11,25 +11,52 @@ fn pr_number(s: &str) -> Result<u64, String> {
         .map_err(|_| format!("{s:?} is not a PR number"))
 }
 
+/// A PR number, and — when named by a full URL rather than a bare number —
+/// the repo it's on. `show` prefers that over asking the ledger to search
+/// for which configured repo the number belongs to: the URL already says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrTarget {
+    pub number: u64,
+    pub repo: Option<RepoUrl>,
+}
+
+/// A repo as named by a pull-request URL's own host/owner/name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoUrl {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
 /// Like [`pr_number`], but also accepts a full pull-request URL pasted
 /// straight from a browser — `https://github.com/owner/repo/pull/N` (or the
-/// same on a GitHub Enterprise host). The owner/repo aren't used yet — the
-/// ledger is single-repo for now — so this is purely a paste convenience;
-/// it accepts a URL for any repo without checking it matches the one
-/// configured.
-fn pr_number_or_url(s: &str) -> Result<u64, String> {
+/// same on a GitHub Enterprise host).
+fn pr_number_or_url(s: &str) -> Result<PrTarget, String> {
+    let bad_url = || format!("{s:?} doesn't look like a pull request URL");
     let Some(after_scheme) = s
         .strip_prefix("https://")
         .or_else(|| s.strip_prefix("http://"))
     else {
-        return pr_number(s);
+        return pr_number(s).map(|number| PrTarget { number, repo: None });
     };
-    after_scheme
-        .split("/pull/")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
+    let (host, rest) = after_scheme.split_once('/').ok_or_else(bad_url)?;
+    let (repo_path, tail) = rest.split_once("/pull/").ok_or_else(bad_url)?;
+    let mut repo_parts = repo_path.split('/');
+    let owner = repo_parts.next().ok_or_else(bad_url)?;
+    let name = repo_parts.next().ok_or_else(bad_url)?;
+    let number = tail
+        .split('/')
+        .next()
         .and_then(|n| n.parse().ok())
-        .ok_or_else(|| format!("{s:?} doesn't look like a pull request URL"))
+        .ok_or_else(bad_url)?;
+    Ok(PrTarget {
+        number,
+        repo: Some(RepoUrl {
+            host: host.to_string(),
+            owner: owner.to_string(),
+            name: name.to_string(),
+        }),
+    })
 }
 
 /// A deterministic PR review queue.
@@ -125,7 +152,7 @@ pub struct NextArgs {
 pub struct ShowArgs {
     /// The PR number, or a full pull-request URL.
     #[arg(value_parser = pr_number_or_url)]
-    pub number: u64,
+    pub target: PrTarget,
 
     /// Emit machine-readable JSON.
     #[arg(long)]
@@ -177,7 +204,10 @@ mod tests {
         let cli = Cli::try_parse_from(["reviewq", "show", "#42"]).expect("parses");
         assert!(matches!(
             cli.command,
-            Command::Show(ShowArgs { number: 42, .. })
+            Command::Show(ShowArgs {
+                target: PrTarget { number: 42, .. },
+                ..
+            })
         ));
     }
 
@@ -203,10 +233,18 @@ mod tests {
             "https://github.com/apache/airflow/pull/70135",
         ])
         .expect("parses");
-        assert!(matches!(
-            cli.command,
-            Command::Show(ShowArgs { number: 70135, .. })
-        ));
+        let Command::Show(ShowArgs { target, .. }) = cli.command else {
+            panic!("expected Show");
+        };
+        assert_eq!(target.number, 70135);
+        assert_eq!(
+            target.repo,
+            Some(RepoUrl {
+                host: "github.com".into(),
+                owner: "apache".into(),
+                name: "airflow".into(),
+            })
+        );
     }
 
     #[test]
@@ -217,20 +255,29 @@ mod tests {
             "https://github.acme.example/acme/widgets/pull/7",
         ])
         .expect("parses");
-        assert!(matches!(
-            cli.command,
-            Command::Show(ShowArgs { number: 7, .. })
-        ));
+        let Command::Show(ShowArgs { target, .. }) = cli.command else {
+            panic!("expected Show");
+        };
+        assert_eq!(target.number, 7);
+        assert_eq!(
+            target.repo,
+            Some(RepoUrl {
+                host: "github.acme.example".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            })
+        );
     }
 
     #[test]
     fn show_still_accepts_a_bare_number_and_a_hash_number() {
         for arg in ["42", "#42"] {
             let cli = Cli::try_parse_from(["reviewq", "show", arg]).expect("parses");
-            assert!(matches!(
-                cli.command,
-                Command::Show(ShowArgs { number: 42, .. })
-            ));
+            let Command::Show(ShowArgs { target, .. }) = cli.command else {
+                panic!("expected Show");
+            };
+            assert_eq!(target.number, 42);
+            assert_eq!(target.repo, None);
         }
     }
 

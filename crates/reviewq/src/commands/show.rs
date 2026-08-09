@@ -5,11 +5,11 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use jiff::Timestamp;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};
-use reviewq_ledger::{Ledger, PrShow};
+use reviewq_ledger::{Ledger, PrShow, RepoKey};
 use serde::Serialize;
 
 use crate::cli::ShowArgs;
@@ -17,17 +17,39 @@ use crate::commands::EXIT_EMPTY;
 use crate::{config, paths};
 
 pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    let Some(show) = ledger.show(args.number)? else {
-        if args.json {
-            println!("null");
-        } else {
-            eprintln!("#{} is not in the ledger — run `reviewq sync`", args.number);
+    let target = &args.target;
+    // A full URL already names its repo — no need to search for it, and it
+    // disambiguates a number that's ambiguous across configured repos.
+    let repo = match &target.repo {
+        Some(url) => RepoKey {
+            host: url.host.clone(),
+            owner: url.owner.clone(),
+            name: url.name.clone(),
+        },
+        None => {
+            let mut repos = reviewq_ledger::repos_with_pr(&paths::database_file()?, target.number)?;
+            match repos.len() {
+                0 => return not_in_ledger(args.json, target.number),
+                1 => repos.remove(0),
+                _ => bail!(
+                    "#{} exists in more than one configured repo ({}) — pass its full URL to pick one",
+                    target.number,
+                    repos
+                        .iter()
+                        .map(|r| format!("{}/{}", r.owner, r.name))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            }
         }
-        return Ok(ExitCode::from(EXIT_EMPTY));
+    };
+    let ledger = Ledger::open(&paths::database_file()?)?;
+    let repo_id = ledger.ensure_repo(&repo)?;
+    let Some(show) = ledger.show(repo_id, target.number)? else {
+        return not_in_ledger(args.json, target.number);
     };
 
-    let link = pr_link(config_path, args.number);
+    let link = pr_link(config_path, &repo, target.number);
     let url = link.as_ref().map(|l| l.url.as_str());
 
     if args.json {
@@ -37,6 +59,15 @@ pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
         print_human(&show, url, underline);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn not_in_ledger(json: bool, number: u64) -> Result<ExitCode> {
+    if json {
+        println!("null");
+    } else {
+        eprintln!("#{number} is not in the ledger — run `reviewq sync`");
+    }
+    Ok(ExitCode::from(EXIT_EMPTY))
 }
 
 /// The PR's forge URL, and whether to underline it once hyperlinked, both
@@ -49,7 +80,7 @@ struct PrLink {
     underline_links: bool,
 }
 
-fn pr_link(config_path: Option<&Path>, number: u64) -> Option<PrLink> {
+fn pr_link(config_path: Option<&Path>, repo: &RepoKey, number: u64) -> Option<PrLink> {
     let path = match config_path {
         Some(p) => p.to_path_buf(),
         None => paths::config_file().ok()?,
@@ -58,8 +89,7 @@ fn pr_link(config_path: Option<&Path>, number: u64) -> Option<PrLink> {
         return None;
     }
     let loaded = config::load(config_path).ok()?;
-    let (_project, repo) = loaded.config.sole_repo().ok()?;
-    let forge = loaded.config.forge_for(repo).ok()?;
+    let forge = loaded.config.forge_for(&repo.host).ok()?;
     Some(PrLink {
         url: forge.web_url(&repo.owner, &repo.name, number),
         underline_links: loaded.config.output.underline_links,
