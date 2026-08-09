@@ -47,7 +47,7 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
     let token = resolve_token(&host)?;
     row("token", &token.source.to_string());
 
-    let forge = build(&host, &token.value)?;
+    let forge = build(&host, &repo.host, &token.value)?;
     let viewer = forge.viewer().await?;
     viewer.rate_limit.trace("doctor:viewer");
 

@@ -369,7 +369,7 @@ impl Config {
     pub fn forge_for(&self, repo: &RepoRef) -> Result<Box<dyn Forge>> {
         let host = self.forge_host_for(repo)?;
         let token = resolve_token(&host)?;
-        build(&host, &token.value)
+        build(&host, &repo.host, &token.value)
     }
 
     /// The relationships that involve me in `project`: its own override if set,

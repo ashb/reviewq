@@ -23,12 +23,16 @@ use crate::{Forge, ForgeHost};
 /// A GitHub connection bound to one host.
 pub struct GithubForge {
     inner: Octocrab,
+    /// The host's own hostname (`github.com`, or a GitHub Enterprise host),
+    /// doubling as its web root — kept alongside the API client so
+    /// [`web_url`](Forge::web_url) needs no extra argument from the caller.
+    web_host: String,
 }
 
 impl GithubForge {
     /// Build an adapter for `host`, using its `api_base` when set so a GitHub
     /// Enterprise instance works without code changes.
-    pub fn new(host: &ForgeHost, token: &str) -> Result<Self> {
+    pub fn new(host: &ForgeHost, host_name: &str, token: &str) -> Result<Self> {
         let mut builder = Octocrab::builder().personal_token(token.to_string());
         if let Some(api_base) = &host.api_base {
             builder = builder
@@ -36,7 +40,10 @@ impl GithubForge {
                 .with_context(|| format!("invalid api_base {api_base:?}"))?;
         }
         let inner = builder.build().context("building GitHub client")?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            web_host: host_name.to_string(),
+        })
     }
 
     async fn graphql<T: serde::de::DeserializeOwned>(
@@ -204,6 +211,10 @@ impl Forge for GithubForge {
             }
         }
         Ok(())
+    }
+
+    fn web_url(&self, owner: &str, name: &str, number: u64) -> String {
+        format!("https://{}/{owner}/{name}/pull/{number}", self.web_host)
     }
 }
 
@@ -723,6 +734,33 @@ query($owner: String!, $name: String!, $number: Int!) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn web_url_matches_githubs_pull_layout() {
+        let host = ForgeHost {
+            provider: Some("github".to_string()),
+            ..Default::default()
+        };
+        let forge = GithubForge::new(&host, "github.com", "token").unwrap();
+        assert_eq!(
+            forge.web_url("apache", "airflow", 12345),
+            "https://github.com/apache/airflow/pull/12345"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_url_uses_the_enterprise_hosts_own_hostname() {
+        let host = ForgeHost {
+            provider: Some("github".to_string()),
+            api_base: Some("https://github.acme.example/api/v3".to_string()),
+            ..Default::default()
+        };
+        let forge = GithubForge::new(&host, "github.acme.example", "token").unwrap();
+        assert_eq!(
+            forge.web_url("acme", "widgets", 7),
+            "https://github.acme.example/acme/widgets/pull/7"
+        );
+    }
 
     #[test]
     fn viewer_response_deserializes() {

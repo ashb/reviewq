@@ -70,18 +70,25 @@ pub trait Forge: Send + Sync {
     /// operation reviewq performs; `reviewq done` calls it best-effort — a
     /// failure here should not stop `done` from recording locally.
     async fn mark_pr_notifications_read(&self, owner: &str, name: &str, number: u64) -> Result<()>;
+
+    /// The web URL for pull request `number` in `owner/name` — e.g.
+    /// `https://github.com/apache/airflow/pull/12345`. Each provider's own
+    /// layout (GitHub's `/pull/N`, a future provider's own) lives in its
+    /// adapter; nothing above this trait renders one itself. No I/O, so it
+    /// isn't `async`.
+    fn web_url(&self, owner: &str, name: &str, number: u64) -> String;
 }
 
-/// Build the adapter for `host` authenticated with `token`, choosing it by
-/// provider. No I/O happens here — it just constructs a client; the first
-/// real request is whatever the caller makes with it.
+/// Build the adapter for `host_name` (resolved to `host`) authenticated with
+/// `token`, choosing it by provider. No I/O happens here — it just constructs
+/// a client; the first real request is whatever the caller makes with it.
 ///
 /// `host` is expected to have come from [`resolve_host`], which already rejects
 /// unsupported providers; the match here is the defensive backstop and the
 /// single place a new adapter is registered.
-pub fn build(host: &ForgeHost, token: &str) -> Result<Box<dyn Forge>> {
+pub fn build(host: &ForgeHost, host_name: &str, token: &str) -> Result<Box<dyn Forge>> {
     match host.provider.as_deref() {
-        Some("github") => Ok(Box::new(github::GithubForge::new(host, token)?)),
+        Some("github") => Ok(Box::new(github::GithubForge::new(host, host_name, token)?)),
         Some(other) => bail!("no forge adapter for provider {other:?}"),
         None => bail!("forge host has no provider"),
     }

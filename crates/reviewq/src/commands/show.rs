@@ -1,6 +1,7 @@
 //! `reviewq show <number>`: everything the ledger knows about one PR — why it's
 //! tracked, every attention reason it holds, and its review threads. Read-only.
 
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -13,9 +14,9 @@ use serde::Serialize;
 
 use crate::cli::ShowArgs;
 use crate::commands::EXIT_EMPTY;
-use crate::paths;
+use crate::{config, paths};
 
-pub fn run(_config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
+pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
     let Some(show) = ledger.show(args.number)? else {
         if args.json {
@@ -26,21 +27,60 @@ pub fn run(_config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
         return Ok(ExitCode::from(EXIT_EMPTY));
     };
 
+    let url = pr_web_url(config_path, args.number);
+
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&json(&show))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json(&show, url.as_deref()))?
+        );
     } else {
-        print_human(&show);
+        print_human(&show, url.as_deref());
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn print_human(show: &PrShow) {
+/// The PR's forge URL, best-effort. `show` otherwise never touches config or
+/// the forge — it works purely off the ledger — so this must not turn a
+/// config or token problem into a failed `show`, and must not autocreate a
+/// config file the way `config::load`'s default path does; it only reads one
+/// already there.
+fn pr_web_url(config_path: Option<&Path>, number: u64) -> Option<String> {
+    let path = match config_path {
+        Some(p) => p.to_path_buf(),
+        None => paths::config_file().ok()?,
+    };
+    if !path.exists() {
+        return None;
+    }
+    let loaded = config::load(config_path).ok()?;
+    let (_project, repo) = loaded.config.sole_repo().ok()?;
+    let forge = loaded.config.forge_for(repo).ok()?;
+    Some(forge.web_url(&repo.owner, &repo.name, number))
+}
+
+/// Wrap `text` in an OSC 8 terminal hyperlink to `url`. Terminal-gated: piped
+/// to a file, a pager without OSC 8 support, or `--json` (which never calls
+/// this), the escape sequence would be noise rather than a feature.
+fn hyperlink(text: &str, url: Option<&str>) -> String {
+    render_hyperlink(text, url, std::io::stdout().is_terminal())
+}
+
+fn render_hyperlink(text: &str, url: Option<&str>, is_terminal: bool) -> String {
+    match url {
+        Some(url) if is_terminal => format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"),
+        _ => text.to_string(),
+    }
+}
+
+fn print_human(show: &PrShow, url: Option<&str>) {
     let pr = &show.pr;
-    println!(
+    let header = format!(
         "{} {}",
         format!("#{}", pr.number).if_supports_color(Stdout, |s| s.bold().to_string()),
         pr.title,
     );
+    println!("{}", hyperlink(&header, url));
     println!(
         "  {} · @{} · {}{}",
         state_word(pr.state),
@@ -214,6 +254,7 @@ fn fmt_ts(ts: Timestamp) -> String {
 #[derive(Serialize)]
 struct ShowJson<'a> {
     number: u64,
+    url: Option<&'a str>,
     state: &'a str,
     title: &'a str,
     author: &'a str,
@@ -259,9 +300,10 @@ struct ThreadJson<'a> {
     last_comment_at: Option<String>,
 }
 
-fn json(show: &PrShow) -> ShowJson<'_> {
+fn json<'a>(show: &'a PrShow, url: Option<&'a str>) -> ShowJson<'a> {
     ShowJson {
         number: show.pr.number,
+        url,
         state: show.pr.state.as_str(),
         title: &show.pr.title,
         author: &show.pr.author,
@@ -393,5 +435,26 @@ mod tests {
     fn short_sha_truncates_to_seven_characters() {
         assert_eq!(short_sha("0123456789abcdef"), "0123456");
         assert_eq!(short_sha("abc"), "abc");
+    }
+
+    #[test]
+    fn render_hyperlink_wraps_in_osc8_on_a_terminal_with_a_url() {
+        assert_eq!(
+            render_hyperlink("#1 title", Some("https://example.com/pull/1"), true),
+            "\x1b]8;;https://example.com/pull/1\x1b\\#1 title\x1b]8;;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn render_hyperlink_is_plain_text_off_a_terminal() {
+        assert_eq!(
+            render_hyperlink("#1 title", Some("https://example.com/pull/1"), false),
+            "#1 title"
+        );
+    }
+
+    #[test]
+    fn render_hyperlink_is_plain_text_without_a_url() {
+        assert_eq!(render_hyperlink("#1 title", None, true), "#1 title");
     }
 }
