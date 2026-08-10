@@ -30,8 +30,13 @@ repos = [{ owner = "apache", name = "airflow" }]
 # merge. Turn it on per project if you review post-merge:
 #   include_merged = true
 
-# Interest rules. A PR is interesting if ANY rule matches. Each rule tests one
-# dimension for now; within a dimension, any listed value matches.
+# Interest rules. A PR is interesting if ANY rule matches. Within a rule, any
+# listed value of a dimension matches — and a rule setting several dimensions
+# requires all of them, so it reads as an AND of ORs:
+#   [[project.interest]]
+#   name                = "first-timer in the task sdk"
+#   author_associations = ["FIRST_TIME_CONTRIBUTOR"]
+#   paths               = ["task-sdk/**"]
 
 # Labels. apache/airflow's boring-cyborg.yml maps paths -> area/provider labels
 # upstream, so labels do most of the work and stay maintained for free.
@@ -96,6 +101,10 @@ page_size = 50
 # all unless a modifier is already held, so without this the link is
 # invisible until you know to try it.
 underline_links = true
+# Which background the tui's palette is adapted for: "dark" or "light". Asking
+# the terminal takes an OSC 11 query it may ignore, and guessing wrong makes
+# every colour wrong, so this is configured.
+theme = "dark"
 
 # Per-host forge settings, keyed by host. Public github.com is built in, so this
 # whole section is optional. A user entry overlays the built-in field by field.

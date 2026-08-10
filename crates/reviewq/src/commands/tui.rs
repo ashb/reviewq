@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event;
 use crossterm::execute;
-use reviewq_app::config::{Config, Loaded};
+use reviewq_app::config::{Config, Loaded, ThemeMode};
 use reviewq_ledger::RepoKey;
 use reviewq_tui::{Hooks, Message};
 use tokio::runtime::Handle;
@@ -40,14 +40,16 @@ const URL_OPENER: &str = "explorer";
 const URL_OPENER: &str = "xdg-open";
 
 pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
+    let theme = reviewq_tui::Theme::new(match loaded.config.output.theme {
+        ThemeMode::Dark => reviewq_tui::Mode::Dark,
+        ThemeMode::Light => reviewq_tui::Mode::Light,
+    });
     let config = Arc::new(loaded.config.clone());
     let hooks = live_hooks(Arc::clone(&config));
     // `block_in_place` because the interface owns this thread until the user
     // quits: it tells the runtime to move this worker's other tasks elsewhere
     // first, so the refreshes spawned below still make progress.
-    tokio::task::block_in_place(|| {
-        reviewq_tui::run(reviewq_tui::Theme::default(), config, &hooks)
-    })?;
+    tokio::task::block_in_place(|| reviewq_tui::run(theme, config, &hooks))?;
     Ok(ExitCode::SUCCESS)
 }
 

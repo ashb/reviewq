@@ -131,9 +131,15 @@ fn default_host() -> String {
     DEFAULT_HOST.to_string()
 }
 
-/// One interest rule. Today exactly one dimension may be set; the loader
-/// rejects a rule that sets more than one, so the future "A and B" conjunction
-/// is a config change, not a redesign.
+/// One interest rule.
+///
+/// Set more than one dimension and every one of them must match — `labels` plus
+/// `paths` is "carries one of these labels *and* touches one of these paths".
+/// Within a dimension any listed value is enough, so the shape is an AND of ORs.
+///
+/// An unnamed rule that matched on several dimensions describes itself by joining
+/// what matched (`label area:x + path task-sdk/**`); give it a `name` to have that
+/// read as something shorter in the queue.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct InterestRule {
@@ -166,28 +172,20 @@ impl InterestRule {
         if !self.milestones.is_empty() {
             conditions.push(ConditionInput::Milestones(self.milestones.clone()));
         }
-        match conditions.len() {
-            1 => Ok(RuleInput {
-                name: self.name.clone(),
-                conditions,
-            }),
-            0 => bail!(
+        if conditions.is_empty() {
+            bail!(
                 "interest rule{} sets no condition (needs one of labels/paths/\
                  author_associations/milestones)",
                 self.name
                     .as_deref()
                     .map(|n| format!(" {n:?}"))
                     .unwrap_or_default(),
-            ),
-            n => bail!(
-                "interest rule{} sets {n} conditions; combining conditions in one rule \
-                 isn't supported yet — split them into separate rules",
-                self.name
-                    .as_deref()
-                    .map(|n| format!(" {n:?}"))
-                    .unwrap_or_default(),
-            ),
+            );
         }
+        Ok(RuleInput {
+            name: self.name.clone(),
+            conditions,
+        })
     }
 }
 
@@ -236,6 +234,23 @@ pub struct Output {
     /// terminal hyperlink exists at all unless a modifier is already held,
     /// so without this the link is invisible until you know to try it.
     pub underline_links: bool,
+    /// Which background the interface's palette should be adapted for.
+    ///
+    /// Configured rather than detected: asking the terminal takes an OSC 11 query
+    /// it may ignore, and guessing wrong makes the whole palette wrong. `"dark"`
+    /// or `"light"`.
+    pub theme: ThemeMode,
+}
+
+/// The background the palette is adapted for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Adapt for a dark terminal background.
+    #[default]
+    Dark,
+    /// Adapt for a light terminal background.
+    Light,
 }
 
 impl Default for Bots {
@@ -274,6 +289,7 @@ impl Default for Output {
     fn default() -> Self {
         Self {
             underline_links: true,
+            theme: ThemeMode::default(),
         }
     }
 }
@@ -516,6 +532,25 @@ impl Project {
 mod tests {
     use super::*;
 
+    /// A swept PR to evaluate rules against.
+    fn pr() -> reviewq_core::model::PrSnapshot {
+        reviewq_core::model::PrSnapshot {
+            number: 1,
+            title: "t".into(),
+            author: "octocat".into(),
+            author_association: "CONTRIBUTOR".into(),
+            head_sha: "abc".into(),
+            base_ref: "main".into(),
+            is_draft: false,
+            state: reviewq_core::model::PrState::Open,
+            updated_at: "2026-08-11T09:00:00Z".parse().expect("timestamp"),
+            labels: vec![],
+            milestone: None,
+            files: Some(vec![]),
+            files_truncated: false,
+        }
+    }
+
     /// A minimal valid config: one project, one repo, one rule.
     fn minimal(extra: &str) -> String {
         format!(
@@ -540,6 +575,35 @@ mod tests {
             .expect("default config validates");
         let repo = config.repos().next().expect("one repo");
         assert_eq!(repo.slug(), "apache/airflow");
+    }
+
+    #[test]
+    fn the_theme_is_configurable_and_defaults_to_dark() {
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        assert_eq!(config.output.theme, ThemeMode::Dark);
+
+        let light: Config = toml::from_str(&minimal(
+            r#"
+            [output]
+            theme = "light"
+            "#,
+        ))
+        .expect("parses");
+        assert_eq!(light.output.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn an_unknown_theme_is_rejected_rather_than_defaulted() {
+        // Silently falling back to dark would make a typo look like a palette
+        // that simply doesn't work.
+        let err = toml::from_str::<Config>(&minimal(
+            r#"
+            [output]
+            theme = "sepia"
+            "#,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("sepia"), "{err}");
     }
 
     #[test]
@@ -605,7 +669,9 @@ mod tests {
     }
 
     #[test]
-    fn a_rule_with_two_dimensions_is_rejected_for_now() {
+    fn a_rule_may_require_several_dimensions_at_once() {
+        // An AND of ORs: any of these authors *and* any of these paths. The core
+        // evaluator always supported it; only this loader refused to build one.
         let config: Config = toml::from_str(&minimal(
             r#"
             [[project.interest]]
@@ -615,10 +681,27 @@ mod tests {
         ))
         .expect("parses");
 
-        let err = config.validate(Path::new("cfg")).unwrap_err();
+        config.validate(Path::new("cfg")).expect("validates");
+
+        let project = &config.projects[0];
+        let rules = config.interest_for(project).expect("compiles");
+        let mut first_timer_in_task_sdk = pr();
+        first_timer_in_task_sdk.author_association = "FIRST_TIME_CONTRIBUTOR".into();
+        first_timer_in_task_sdk.files = Some(vec!["task-sdk/src/thing.py".into()]);
         assert!(
-            format!("{err:#}").contains("isn't supported yet"),
-            "{err:#}"
+            matches!(
+                rules.evaluate(&first_timer_in_task_sdk),
+                reviewq_core::rules::Evaluation::Match(_)
+            ),
+            "both dimensions matched"
+        );
+
+        let mut first_timer_elsewhere = first_timer_in_task_sdk.clone();
+        first_timer_elsewhere.files = Some(vec!["docs/index.md".into()]);
+        assert_eq!(
+            rules.evaluate(&first_timer_elsewhere),
+            reviewq_core::rules::Evaluation::NoMatch,
+            "one dimension is not enough"
         );
     }
 
