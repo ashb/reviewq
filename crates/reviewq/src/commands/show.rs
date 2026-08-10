@@ -2,7 +2,6 @@
 //! tracked, every attention reason it holds, and its review threads. Read-only.
 
 use std::io::IsTerminal;
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
@@ -14,9 +13,10 @@ use serde::Serialize;
 
 use crate::cli::ShowArgs;
 use crate::commands::EXIT_EMPTY;
-use reviewq_app::{config, paths};
+use reviewq_app::config::{self, Loaded};
+use reviewq_app::paths;
 
-pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
+pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
     let target = &args.target;
     // A full URL already names its repo — no need to search for it, and it
     // disambiguates a number that's ambiguous across configured repos.
@@ -49,7 +49,7 @@ pub fn run(config_path: Option<&Path>, args: &ShowArgs) -> Result<ExitCode> {
         return not_in_ledger(args.json, target.number);
     };
 
-    let link = pr_link(config_path, &repo, target.number);
+    let link = pr_link(&loaded.config, &repo, target.number);
     let url = link.as_ref().map(|l| l.url.as_str());
 
     if args.json {
@@ -70,29 +70,21 @@ fn not_in_ledger(json: bool, number: u64) -> Result<ExitCode> {
     Ok(ExitCode::from(EXIT_EMPTY))
 }
 
-/// The PR's forge URL, and whether to underline it once hyperlinked, both
-/// best-effort. `show` otherwise never touches config or the forge — it
-/// works purely off the ledger — so this must not turn a config or token
-/// problem into a failed `show`, and must not autocreate a config file the
-/// way `config::load`'s default path does; it only reads one already there.
+/// The PR's forge URL, and whether to underline it once hyperlinked.
+///
+/// `None` only when the repo's host resolves to no adapter — a repo stored under
+/// a config that has since changed, say. No token is resolved to render a URL, so
+/// a locked credential helper still gets you a link.
 struct PrLink {
     url: String,
     underline_links: bool,
 }
 
-fn pr_link(config_path: Option<&Path>, repo: &RepoKey, number: u64) -> Option<PrLink> {
-    let path = match config_path {
-        Some(p) => p.to_path_buf(),
-        None => paths::config_file().ok()?,
-    };
-    if !path.exists() {
-        return None;
-    }
-    let loaded = config::load(config_path).ok()?;
-    let forge = loaded.config.forge_for(&repo.host).ok()?;
+fn pr_link(config: &config::Config, repo: &RepoKey, number: u64) -> Option<PrLink> {
+    let forge = config.forge_for(&repo.host).ok()?;
     Some(PrLink {
         url: forge.web_url(&repo.owner, &repo.name, number),
-        underline_links: loaded.config.output.underline_links,
+        underline_links: config.output.underline_links,
     })
 }
 

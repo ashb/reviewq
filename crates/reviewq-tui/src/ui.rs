@@ -766,6 +766,7 @@ fn stamp(ts: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_config;
     use crate::app::{App, Focus, Hooks, Overlay};
     use jiff::Timestamp;
     use ratatui::Terminal;
@@ -914,7 +915,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_queue_and_the_selected_prs_detail_both_render() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let rows = render(&mut app, 100, 22);
         let screen = rows.join("\n");
 
@@ -952,7 +953,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
         let mut backport = pr(70135, "Fix the thing on 3.1");
         backport.base_ref = "v3-1-test".into();
         queue_only(&ledger, repo_id, &backport);
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         let screen = render(&mut app, 100, 22).join("\n");
 
@@ -966,7 +967,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
         let mut unknown = pr(70135, "Stored before the branch was captured");
         unknown.base_ref = String::new();
         queue_only(&ledger, repo_id, &unknown);
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         let screen = render(&mut app, 100, 22).join("\n");
 
@@ -980,7 +981,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
     fn an_empty_queue_says_so_rather_than_rendering_a_blank_pane() {
         let ledger = Ledger::open_in_memory().expect("ledger");
         ledger.ensure_repo(&repo()).expect("repo");
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         let screen = render(&mut app, 80, 12).join("\n");
         assert!(screen.contains("Nothing on the queue"), "{screen}");
@@ -989,7 +990,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn a_narrow_terminal_still_renders_both_panes_without_panicking() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         for (w, h) in [(40u16, 8u16), (60, 10), (200, 40)] {
             let screen = render(&mut app, w, h);
             assert_eq!(screen.len(), h as usize);
@@ -998,7 +999,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_description_renders_as_markdown_with_template_comments_stripped() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let screen = render(&mut app, 100, 30).join("\n");
 
         assert!(screen.contains("Description"), "{screen}");
@@ -1047,7 +1048,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
                 now,
             )
             .expect("detail");
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         let screen = render(&mut app, 90, 16).join("\n");
         assert!(screen.contains("No body yet"), "{screen}");
@@ -1075,7 +1076,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn tab_moves_focus_and_the_footer_says_what_the_keys_now_do() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         assert_eq!(app.focus, Focus::Queue);
         let queue_focused = render(&mut app, 100, 24).join("\n");
         assert!(queue_focused.contains("move"), "{queue_focused}");
@@ -1089,7 +1090,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_footer_stays_short_and_points_at_the_key_reference() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let screen = render(&mut app, 100, 24);
         let footer = screen.last().expect("footer row").clone();
 
@@ -1110,7 +1111,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn a_status_note_appears_in_the_header_beside_the_counts() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.status = Some("#70135 refreshed — wants attention".to_string());
         let header = render(&mut app, 100, 20).first().expect("header").clone();
 
@@ -1121,7 +1122,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn refreshes_in_flight_are_named_and_outrank_a_finished_note() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.status = Some("an earlier result".to_string());
         app.refreshing.insert(70135);
         app.refreshing.insert(70201);
@@ -1140,7 +1141,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_help_overlay_lists_every_binding_grouped() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.overlay = Overlay::Help { scroll: 0 };
         // Tall enough for the whole reference — which grows as bindings are added,
         // so this has room to spare. What it does when it *doesn't* fit is the
@@ -1180,7 +1181,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_help_overlay_scrolls_when_it_does_not_fit() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.overlay = Overlay::Help { scroll: 0 };
 
         // Too short for the whole reference: the top shows, the tail does not.
@@ -1195,10 +1196,10 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
         // That render reported how far it can go, so End reaches the end.
         // Scrolling the reference touches no hook, so what they are is irrelevant
-        // here — but one has to be passed, and a config nothing reads is enough.
+        // here — but one has to be passed.
         app.on_overlay_key(
             KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
-            &Hooks::live(std::sync::Arc::new(Err("not needed".to_string()))),
+            &Hooks::live(test_config()),
         )
         .expect("scroll to end");
         let bottom = render(&mut app, 100, 18).join("\n");
@@ -1210,7 +1211,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_help_overlay_occludes_what_sits_under_it() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let plain = render(&mut app, 100, 24).join("\n");
         assert!(plain.contains("Adds a deferrable flag"), "{plain}");
 
@@ -1230,7 +1231,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn the_help_overlay_fits_a_terminal_too_small_for_it() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.overlay = Overlay::Help { scroll: 0 };
         for (w, h) in [(30u16, 6u16), (24, 4), (100, 40)] {
             let screen = render(&mut app, w, h);
@@ -1262,7 +1263,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn scrolling_the_description_moves_the_visible_window() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         // A pane short enough that the description can't all fit.
         let top = render(&mut app, 60, 12).join("\n");
         assert!(top.contains("Add deferrable mode"), "{top}");
@@ -1279,7 +1280,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
     #[test]
     fn a_render_tells_the_app_how_tall_the_queue_pane_is() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         // 22 rows: 1 header, 1 footer, a 20-row pane, less its two borders.
         render(&mut app, 100, 22);
         assert_eq!(app.page(), 18);

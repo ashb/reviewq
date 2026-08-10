@@ -41,6 +41,27 @@ use reviewq_ledger::{Ledger, Located, PrShow, QueueItem, RepoKey};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
+#[cfg(test)]
+/// A minimal valid config naming the fixture's repo.
+///
+/// Parsed rather than built field by field, so it goes through the same
+/// deserialisation and validation a real one does.
+pub(crate) fn test_config() -> HeldConfig {
+    Arc::new(
+        toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            labels = ["area:async"]
+            "#,
+        )
+        .expect("test config parses"),
+    )
+}
+
 /// A PR's page on the forge.
 ///
 /// The forge renders it, because the path shape is the provider's business — the
@@ -136,9 +157,8 @@ pub struct App {
     /// Lines the detail pane last needed, so scrolling can stop at the end
     /// rather than running off into blank space. Also written by the renderer.
     detail_lines: usize,
-    /// The session's config, loaded once. Only a pasted URL needs it here — which
-    /// host's layout to read it with — so a failure to load is carried rather than
-    /// raised; see [`HeldConfig`].
+    /// The session's config. Read here only to resolve a pasted URL — which
+    /// host's layout to read it with.
     config: HeldConfig,
     /// Where the queue's rows and the detail's text last landed on screen, so a
     /// click can be turned back into the row under the pointer. Written by the
@@ -174,21 +194,12 @@ impl Channel {
 /// number — because it has to reach the forge the PR lives on.
 type PrHook = Box<dyn Fn(&RepoKey, u64) -> Result<()> + Send + Sync>;
 
-/// The session's config, or why there isn't one.
+/// The session's config: loaded and validated once by the caller, shared with
+/// every hook that needs it.
 ///
-/// Loaded once, and held as a result rather than demanded up front because the
-/// queue is worth browsing with a broken config — it is the last sync's output,
-/// already on disk. Only the hooks that reach the forge need config, and each
-/// reports the load failure if you press one of their keys.
-pub(crate) type HeldConfig = Arc<Result<Config, String>>;
-
-/// The held config, or the load failure as an error.
-fn config_of(held: &HeldConfig) -> Result<&Config> {
-    match held.as_ref() {
-        Ok(config) => Ok(config),
-        Err(err) => bail!("{err}"),
-    }
-}
+/// `Arc` because the closures that reach the forge run on the blocking pool and
+/// so must own what they capture.
+pub(crate) type HeldConfig = Arc<Config>;
 
 /// The side effects the loop performs, as functions it is given.
 ///
@@ -276,9 +287,8 @@ impl Hooks {
                 // what makes the interface responsive: that is this being off the
                 // UI thread at all.
                 tokio::task::spawn_blocking(move || {
-                    let outcome = config_of(&config).and_then(|cfg| {
-                        Handle::current().block_on(reviewq_app::sync::sync_one(cfg, number))
-                    });
+                    let outcome =
+                        Handle::current().block_on(reviewq_app::sync::sync_one(&config, number));
                     // A closed channel means the interface has already exited, so
                     // the result has nowhere to go and nothing awaits it.
                     let _ = tx.send(Message::Refreshed { number, outcome });
@@ -287,16 +297,12 @@ impl Hooks {
             fetch: Box::new(move |number| {
                 tokio::task::block_in_place(|| {
                     Handle::current()
-                        .block_on(reviewq_app::sync::track_one(
-                            config_of(&for_fetch)?,
-                            None,
-                            number,
-                        ))
+                        .block_on(reviewq_app::sync::track_one(&for_fetch, None, number))
                         .map(|_| ())
                 })
             }),
             open_url: Box::new(move |repo, number| {
-                let url = pr_url(config_of(&for_open)?, repo, number)?;
+                let url = pr_url(&for_open, repo, number)?;
                 // Never handed the terminal, unlike the review command: an opener
                 // returns straight away and its output (`xdg-open` has opinions
                 // about mime caches) would land on top of the queue. So its
@@ -320,7 +326,7 @@ impl Hooks {
                 Ok(())
             }),
             copy_url: Box::new(move |repo, number| {
-                let url = pr_url(config_of(&for_copy)?, repo, number)?;
+                let url = pr_url(&for_copy, repo, number)?;
                 // OSC 52, through the terminal that is already ours — so this
                 // works over ssh and inside tmux, where a clipboard library
                 // talking to the local display server would put the URL on the
@@ -330,7 +336,7 @@ impl Hooks {
                     .context("writing the clipboard escape sequence")
             }),
             review: Box::new(move |number| {
-                let handoff = reviewq_app::review::handoff_for(config_of(&for_review)?, number)?;
+                let handoff = reviewq_app::review::handoff_for(&for_review, number)?;
 
                 // Raw mode goes, the alternate screen stays.
                 //
@@ -394,13 +400,12 @@ impl Hooks {
                 tokio::task::spawn_blocking(move || {
                     let marked = Handle::current().block_on(async move {
                         let key = reviewq_app::resolve::repo_for(number)?;
-                        let cfg = config_of(&config)?;
-                        let repo = cfg
+                        let repo = config
                             .repos()
                             .find(|r| r.key() == key)
                             .cloned()
                             .context("the PR's repo is no longer configured")?;
-                        reviewq_app::actions::mark_notifications_read(cfg, &repo, number).await
+                        reviewq_app::actions::mark_notifications_read(&config, &repo, number).await
                     });
                     if let Err(err) = marked {
                         tracing::warn!(number, %err, "could not mark GitHub notifications read");
@@ -525,18 +530,12 @@ impl App {
         let path = reviewq_app::paths::database_file()?;
         let ledger = Ledger::open(&path)
             .with_context(|| format!("opening the ledger at {}", path.display()))?;
-        let mut app = Self::with_ledger(theme, ledger)?;
-        app.config = config;
-        Ok(app)
+        Self::with_ledger(theme, ledger, config)
     }
 
     /// Build over an already-open ledger, so a test can render against a
     /// fixture rather than whatever this machine happens to have synced.
-    ///
-    /// No config: the only thing here that reads one is resolving a pasted URL,
-    /// and a test that cares hands one in afterwards rather than every other test
-    /// having to supply one it never uses.
-    pub(crate) fn with_ledger(theme: Theme, ledger: Ledger) -> Result<Self> {
+    pub(crate) fn with_ledger(theme: Theme, ledger: Ledger, config: HeldConfig) -> Result<Self> {
         let mut app = Self {
             theme,
             queue: Vec::new(),
@@ -557,7 +556,7 @@ impl App {
             detail_lines: 0,
             queue_area: Rect::ZERO,
             detail_area: Rect::ZERO,
-            config: Arc::new(Err("config was not loaded".to_string())),
+            config,
             ledger,
             quit: false,
         };
@@ -1104,15 +1103,13 @@ impl App {
     /// The PR number `text` names — a bare number, `#number`, or a pasted URL.
     ///
     /// A URL is handed to the forge, which knows its own layout; only the plain
-    /// forms are read here. Knowing which provider a host is takes config, and
-    /// not having one just means a URL can't be resolved — not that the interface
-    /// should stop.
+    /// forms are read here. `None` when it is neither — a typo, or a URL on a host
+    /// nothing configured knows.
     fn pr_number_in(&self, text: &str) -> Option<u64> {
         if let Some(number) = bare_pr_number(text) {
             return Some(number);
         }
-        let config = config_of(&self.config).ok()?;
-        reviewq_forge::parse_pull_request_url(&config.forges, text)
+        reviewq_forge::parse_pull_request_url(&self.config.forges, text)
             .ok()?
             .map(|pr| pr.number)
     }
@@ -1528,7 +1525,7 @@ pub(super) mod tests {
     }
 
     pub(super) fn app() -> App {
-        App::with_ledger(Theme::default(), fixture()).expect("app")
+        App::with_ledger(Theme::default(), fixture(), test_config()).expect("app")
     }
 
     #[test]
@@ -1546,7 +1543,7 @@ pub(super) mod tests {
     #[test]
     fn nothing_selected_means_nothing_to_refresh() {
         let ledger = Ledger::open_in_memory().expect("ledger");
-        let mut empty = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut empty = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         assert_eq!(empty.refresh_target(), None);
         assert!(empty.refreshing.is_empty());
     }
@@ -1670,7 +1667,7 @@ mod scroll_tests {
                 )
                 .expect("detail");
         }
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         // A ten-row window, as a render would report.
         app.set_page(10);
         app
@@ -1975,7 +1972,7 @@ mod loop_tests {
 
     #[tokio::test]
     async fn the_help_overlay_toggles_through_the_loop() {
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![press('?'), press(' '), press('q')], None, false);
 
         drive(&mut app, &hooks).await;
@@ -1997,7 +1994,7 @@ mod loop_tests {
         assert!(recorded.marked.lock().expect("lock").is_empty());
 
         // `d` then `y` does it.
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let (hooks, recorded) = fake_hooks(vec![press('d'), press('y'), press('q')], None, false);
         drive(&mut app, &hooks).await;
 
@@ -2136,7 +2133,7 @@ mod loop_tests {
         assert_eq!(app.queue.len(), 1, "deferred is sunk, not hidden");
         assert!(app.queue[0].item.deferred);
 
-        let mut again = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut again = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![press('f'), press('f'), press('q')], None, false);
         drive(&mut again, &hooks).await;
         let status = again.status.clone().expect("a status");
@@ -2147,7 +2144,7 @@ mod loop_tests {
     #[tokio::test]
     async fn an_action_on_an_empty_queue_does_nothing() {
         let ledger = Ledger::open_in_memory().expect("ledger");
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         let (hooks, recorded) = fake_hooks(
             vec![
                 special(KeyCode::Enter),
@@ -2190,7 +2187,7 @@ mod loop_tests {
 
     #[tokio::test]
     async fn colon_then_a_number_selects_that_pr() {
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         assert_eq!(app.selected, 0);
         let (hooks, _) = fake_hooks(
             vec![
@@ -2225,7 +2222,7 @@ mod loop_tests {
         let ledger = two_queued();
         let repo_id = ledger.repos().expect("repos")[0].0;
         reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![], None, false);
 
         feed(
@@ -2330,7 +2327,7 @@ mod loop_tests {
         let path = dir.path().join("reviewq.db");
         let ledger = Ledger::open(&path).expect("ledger");
         let repo_id = seed(&ledger);
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         let added = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&added);
@@ -2468,32 +2465,21 @@ mod loop_tests {
     }
 
     #[test]
-    fn a_config_that_failed_to_load_is_carried_not_raised() {
-        // What `reviewq tui` hands over when config is broken. The queue is still
-        // worth reading, so the failure has to survive as far as the hook that
-        // needs it and surface there, in the user's words.
-        let held: HeldConfig = Arc::new(Err("config not found: /nope.toml".to_string()));
-
-        let err = config_of(&held).expect_err("no config to give");
-
-        assert!(err.to_string().contains("config not found"), "{err:#}");
-    }
-
-    #[test]
-    fn a_pasted_url_needs_the_held_config_and_says_nothing_without_one() {
-        // Reading a URL means knowing which provider its host is, which is config.
-        // Without one it simply isn't a number — not an error out of the prompt.
+    fn a_pasted_url_is_read_against_the_session_config() {
+        // Reading a URL means knowing which provider its host is, which the held
+        // config answers — no load, and so no file read per keystroke.
         let app = app();
 
         assert_eq!(
             app.pr_number_in("https://github.com/apache/airflow/pull/70135"),
-            None
+            Some(70135)
         );
         assert_eq!(
-            app.pr_number_in("70135"),
-            Some(70135),
-            "a bare number needs no config"
+            app.pr_number_in("https://example.invalid/apache/airflow/pull/70135"),
+            None,
+            "a host nothing configured knows resolves to nothing"
         );
+        assert_eq!(app.pr_number_in("70135"), Some(70135));
     }
 
     #[tokio::test]
@@ -2546,7 +2532,7 @@ mod loop_tests {
     #[test]
     fn open_and_copy_do_nothing_on_an_empty_queue() {
         let ledger = Ledger::open_in_memory().expect("ledger");
-        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         let (hooks, recorded) = fake_hooks(vec![], None, false);
 
         app.open_selected(&hooks).expect("open");
@@ -2580,7 +2566,7 @@ mod loop_tests {
 
     #[tokio::test]
     async fn a_click_selects_the_queue_row_under_the_pointer() {
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         assert_eq!(app.selected, 0);
         let (hooks, _) = fake_hooks(
             vec![click(QUEUE_COLUMN, FIRST_ROW + 1), press('q')],
@@ -2603,7 +2589,7 @@ mod loop_tests {
     async fn a_click_past_the_last_row_leaves_the_selection_alone() {
         // Empty space below a two-item queue: a click there means nothing, and
         // must not be read as "the last row".
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![click(QUEUE_COLUMN, FIRST_ROW + 9), press('q')],
             None,
@@ -2617,7 +2603,7 @@ mod loop_tests {
 
     #[tokio::test]
     async fn a_click_in_the_detail_pane_focuses_it_without_moving_the_selection() {
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![click(DETAIL_COLUMN, FIRST_ROW + 1), press('q')],
             None,
@@ -2632,7 +2618,7 @@ mod loop_tests {
 
     #[tokio::test]
     async fn the_wheel_moves_the_queue_a_row_at_a_time() {
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![
                 mouse(MouseEventKind::ScrollDown, QUEUE_COLUMN, FIRST_ROW),
@@ -2653,7 +2639,7 @@ mod loop_tests {
 
     #[tokio::test]
     async fn the_wheel_goes_back_up_the_queue_too() {
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![
                 mouse(MouseEventKind::ScrollDown, QUEUE_COLUMN, FIRST_ROW),
@@ -2673,7 +2659,7 @@ mod loop_tests {
     async fn the_wheel_over_the_detail_takes_focus_from_the_queue() {
         // Whichever pane is under the pointer is the one that scrolls, however the
         // keyboard's focus happens to be set.
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         assert_eq!(app.focus, Focus::Queue);
         let (hooks, _) = fake_hooks(
             vec![
@@ -2694,7 +2680,7 @@ mod loop_tests {
     async fn the_mouse_is_ignored_while_an_overlay_is_up() {
         // The rows are still drawn under a modal, so a click landing on one you
         // cannot see would act on whatever it happens to cover.
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![
                 press('?'),
@@ -2714,7 +2700,7 @@ mod loop_tests {
     #[tokio::test]
     async fn a_click_outside_both_panes_does_nothing() {
         // The header and footer are not clickable, and neither are the borders.
-        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![click(QUEUE_COLUMN, 0), click(QUEUE_COLUMN, 19), press('q')],
             None,

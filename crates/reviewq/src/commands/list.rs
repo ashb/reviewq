@@ -9,7 +9,6 @@
 //! knows about (whatever `sync` has actually populated, not what a possibly
 //! stale config currently lists) is queried and merged into one view.
 
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -22,7 +21,7 @@ use crate::cli::{ListArgs, NextArgs};
 use crate::commands::EXIT_EMPTY;
 use reviewq_app::paths;
 
-pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
+pub fn run(args: &ListArgs) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
     let multi = ledger.repos()?.len() > 1;
 
@@ -63,7 +62,7 @@ pub fn run(_config_path: Option<&Path>, args: &ListArgs) -> Result<ExitCode> {
     Ok(empty_code(queue.is_empty()))
 }
 
-pub fn next(_config_path: Option<&Path>, args: &NextArgs) -> Result<ExitCode> {
+pub fn next(args: &NextArgs) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
     let multi = ledger.repos()?.len() > 1;
     let top = ledger.queue_all()?.into_iter().next();

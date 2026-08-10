@@ -37,7 +37,7 @@ struct Session {
 impl Session {
     /// Start the interface against `db`, which need not exist — an empty ledger
     /// still draws, and pointing at the real one would be rude.
-    fn start(db: &std::path::Path) -> Self {
+    fn start(db: &std::path::Path, config: &std::path::Path) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -50,9 +50,9 @@ impl Session {
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_reviewq"));
         command.arg("tui");
         command.env("REVIEWQ_DB", db);
-        // Nothing here should read the real config, and a missing one must not
-        // stop the interface opening.
-        command.env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml");
+        // The interface loads and validates config before taking the terminal, so
+        // it needs a real one — and it must not be this machine's.
+        command.env("REVIEWQ_CONFIG", config);
         command.env("TERM", "xterm-256color");
         let child = pty.slave.spawn_command(command).expect("spawn");
 
@@ -120,7 +120,20 @@ impl Session {
 #[test]
 fn it_takes_the_terminal_over_and_gives_it_back() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut session = Session::start(&dir.path().join("ledger.db"));
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+        [identity]
+        login = "ashb"
+        [[project]]
+        repos = [{ owner = "apache", name = "airflow" }]
+        [[project.interest]]
+        labels = ["area:task-sdk"]
+        "#,
+    )
+    .expect("write config");
+    let mut session = Session::start(&dir.path().join("ledger.db"), &config);
 
     // Drew its opening frame, which means the layout survived a real terminal
     // rather than only a TestBackend. Single words, for the reason in the module

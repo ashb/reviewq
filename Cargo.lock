@@ -2560,6 +2560,7 @@ dependencies = [
  "reviewq-ledger",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tui-markdown",
 ]

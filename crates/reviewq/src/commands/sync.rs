@@ -5,17 +5,16 @@
 //! on stdout.
 
 use std::io::{IsTerminal, Write};
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
+use reviewq_app::config::{Config, Loaded};
 use reviewq_app::sync::{Refreshed, RepoSummary, SyncProgress, summary_line};
 
 use crate::cli::SyncArgs;
 use crate::commands::EXIT_EMPTY;
 
-pub async fn run(config_path: Option<&Path>, args: &SyncArgs, logging: bool) -> Result<ExitCode> {
-    let loaded = reviewq_app::config::load(config_path)?;
+pub async fn run(loaded: &Loaded, args: &SyncArgs, logging: bool) -> Result<ExitCode> {
     if let Some(number) = args.number {
         return one(&loaded.config, number).await;
     }
@@ -24,7 +23,7 @@ pub async fn run(config_path: Option<&Path>, args: &SyncArgs, logging: bool) -> 
 }
 
 /// `reviewq sync <number>`: refresh one PR's detail and say what changed.
-async fn one(cfg: &reviewq_app::config::Config, number: u64) -> Result<ExitCode> {
+async fn one(cfg: &Config, number: u64) -> Result<ExitCode> {
     match reviewq_app::sync::sync_one(cfg, number).await? {
         Refreshed::Untracked => {
             eprintln!("#{number} is not in the ledger — run `reviewq sync` first");

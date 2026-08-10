@@ -5,23 +5,23 @@
 //! the TUI. What's here is the CLI's half: resolving the number, and saying what
 //! happened.
 
-use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use jiff::Timestamp;
 use reviewq_app::actions;
+use reviewq_app::config::{Config, Loaded};
 use reviewq_app::resolve::{open_for_number, repo_for};
 
 use crate::cli::{NumberArgs, SnoozeArgs, TrackArgs};
 
-pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCode> {
+pub async fn done(loaded: &Loaded, args: &NumberArgs) -> Result<ExitCode> {
     let (ledger, repo_id, show) = open_for_number(args.number)?;
     actions::done(&ledger, repo_id, args.number, &show.pr.head_sha)?;
 
     // After the local record, never in front of it: the PR is marked done
     // whether or not GitHub can be reached.
-    if let Err(err) = mark_read(config_path, args.number).await {
+    if let Err(err) = mark_read(&loaded.config, args.number).await {
         tracing::warn!(
             number = args.number,
             %err,
@@ -37,11 +37,9 @@ pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitC
 /// notification marking.
 ///
 /// One load, used for both halves: finding the repo and reaching its forge.
-async fn mark_read(config_path: Option<&Path>, number: u64) -> Result<()> {
+async fn mark_read(cfg: &Config, number: u64) -> Result<()> {
     let key = repo_for(number)?;
-    let loaded = reviewq_app::config::load(config_path)?;
-    let repo = loaded
-        .config
+    let repo = cfg
         .repos()
         .find(|r| r.key() == key)
         .cloned()
@@ -52,7 +50,7 @@ async fn mark_read(config_path: Option<&Path>, number: u64) -> Result<()> {
                 key.name
             )
         })?;
-    actions::mark_notifications_read(&loaded.config, &repo, number).await
+    actions::mark_notifications_read(cfg, &repo, number).await
 }
 
 pub fn snooze(args: &SnoozeArgs) -> Result<ExitCode> {
@@ -102,12 +100,8 @@ pub fn undefer(args: &NumberArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub async fn track(config_path: Option<&Path>, args: &TrackArgs) -> Result<ExitCode> {
+pub async fn track(loaded: &Loaded, args: &TrackArgs) -> Result<ExitCode> {
     let number = args.target.number;
-    // `track` fetches, so it needs config either way — loaded once here and used
-    // for both naming the repo and reaching it.
-    let loaded = reviewq_app::config::load(config_path)
-        .with_context(|| format!("tracking #{number} needs a usable config to fetch it"))?;
     // A URL names its own repo, which is the only way to reach one that isn't
     // the single configured repo.
     let named = args.target.repo.as_ref().and_then(|url| {

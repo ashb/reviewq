@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -6,20 +5,13 @@ use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_forge::{build, resolve_token};
 use reviewq_ledger::Ledger;
 
+use reviewq_app::config::{self, Loaded};
+use reviewq_app::paths;
 use reviewq_app::sync::{CURSOR_KEY, TRUNCATED_KEY};
-use reviewq_app::{config, paths};
 
 /// Report everything that has to be true before a sync can work, and exit
 /// non-zero if any of it isn't.
-pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
-    let loaded = config::load(config_path)?;
-    if loaded.created {
-        println!(
-            "wrote a default config to {} — edit it before syncing",
-            loaded.path.display()
-        );
-    }
-
+pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
     let mut problems = 0u32;
 
     row("config", &loaded.path.display().to_string());

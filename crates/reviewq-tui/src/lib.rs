@@ -31,12 +31,11 @@ pub use theme::{Mode, Theme};
 /// restores it on the way out, including when the body returns an error. Async
 /// because forge work runs as tasks while the interface stays responsive.
 ///
-/// `config` is the one the caller already loaded — or why it couldn't be, since a
-/// broken config must not stop the queue being read. It is held for the session:
-/// an interface that reloaded it per action could act on two different configs in
-/// one sitting, and paid a file read and a parse per keystroke to do it.
-pub async fn run(theme: Theme, config: Result<Config, String>) -> Result<()> {
-    let config = Arc::new(config);
+/// `config` is the one the caller already loaded and validated, held for the
+/// session: an interface that reloaded it per action could act on two different
+/// versions of the file in one sitting, and paid a file read and a parse per
+/// keystroke to do it.
+pub async fn run(theme: Theme, config: Arc<Config>) -> Result<()> {
     let mut terminal = ratatui::init();
     // Not part of `ratatui::init`, so it is asked for and given back by hand.
     // Failing to enable it is not worth refusing to start over: the keyboard can

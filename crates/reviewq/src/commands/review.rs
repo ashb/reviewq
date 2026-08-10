@@ -3,16 +3,14 @@
 //! handoff shows up right away. reviewq only ever hands off — it never decides
 //! a review is finished, so this does not imply `done`.
 
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use reviewq_app::config::{Config, Loaded};
 
 use crate::cli::NumberArgs;
 
-pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCode> {
-    // One load for both halves: working out the handoff, and the refresh after it.
-    let loaded = reviewq_app::config::load(config_path)?;
+pub async fn run(loaded: &Loaded, args: &NumberArgs) -> Result<ExitCode> {
     let handoff = reviewq_app::review::handoff_for(&loaded.config, args.number)?;
 
     let status = handoff
@@ -41,7 +39,7 @@ pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCo
 /// [`Refreshed::Untracked`] reports. Best-effort overall: token or network
 /// trouble here must not turn a successful review session into a failing
 /// `reviewq review` exit, so the caller only warns.
-async fn refresh_after_review(cfg: &reviewq_app::config::Config, number: u64) -> Result<()> {
+async fn refresh_after_review(cfg: &Config, number: u64) -> Result<()> {
     reviewq_app::sync::sync_one(cfg, number).await?;
     Ok(())
 }
