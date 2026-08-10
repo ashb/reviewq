@@ -682,6 +682,7 @@ impl App {
                 | Action::Help
                 | Action::Jump
                 | Action::SwitchPane
+                | Action::ToggleTheme
                 | Action::Down
                 | Action::Up
                 | Action::PageDown
@@ -1086,6 +1087,12 @@ impl App {
             }
             Action::SwitchPane => {
                 self.toggle_focus();
+                Ok(Update::Handled)
+            }
+            Action::ToggleTheme => {
+                // Nothing but the palette: every colour comes from the theme, so
+                // swapping it is the whole change, and the next draw carries it.
+                self.theme = self.theme.toggled();
                 Ok(Update::Handled)
             }
             Action::Down => handled(self.scroll(1)),
@@ -2469,6 +2476,31 @@ mod loop_tests {
             "a host nothing configured knows resolves to nothing"
         );
         assert_eq!(app.pr_number_in("70135"), Some(70135));
+    }
+
+    #[test]
+    fn t_adapts_the_palette_for_the_other_background_and_back() {
+        // A terminal that flips light and dark on a schedule leaves a running
+        // reviewq adapted for the background it no longer has.
+        let mut app = app();
+        assert_eq!(app.theme.mode, crate::theme::Mode::Dark);
+        let dark_text = app.theme.text;
+        let (hooks, _) = fake_hooks(vec![press('t'), press('q')], None, false);
+
+        drive(&mut app, &hooks);
+
+        assert_eq!(app.theme.mode, crate::theme::Mode::Light);
+        assert_ne!(
+            app.theme.text, dark_text,
+            "the palette has to actually change, not just its label"
+        );
+
+        let (back, _) = fake_hooks(vec![press('t'), press('q')], None, false);
+        app.quit = false;
+        drive(&mut app, &back);
+
+        assert_eq!(app.theme.mode, crate::theme::Mode::Dark);
+        assert_eq!(app.theme.text, dark_text);
     }
 
     #[test]

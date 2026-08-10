@@ -2555,6 +2555,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "insta",
  "jiff",
  "ratatui",
  "reviewq-app",

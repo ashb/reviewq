@@ -124,15 +124,34 @@ pub struct Theme {
     pub warn: Rgb,
     /// The key letter in a footer binding, as distinct from its label.
     pub key: Rgb,
+    /// Which background this palette was adapted for.
+    ///
+    /// Carried so the interface can offer the other one: a terminal that switches
+    /// light and dark on a schedule leaves a running reviewq adapted for the
+    /// wrong background, and asking it which it is now takes the same OSC 11 query
+    /// that is unreliable enough to be why this is configured.
+    pub mode: Mode,
 }
 
 impl Theme {
     /// The palette for `mode`.
     pub fn new(mode: Mode) -> Self {
         match mode {
-            Mode::Dark => Self::against(DARK_BG),
-            Mode::Light => Self::against(LIGHT_BG),
+            Mode::Dark => Self::against(DARK_BG, mode),
+            Mode::Light => Self::against(LIGHT_BG, mode),
         }
+    }
+
+    /// The palette for the other background.
+    ///
+    /// For the session only — nothing is written back to config, because the
+    /// terminal's background is a fact about the terminal rather than a
+    /// preference, and the next session should go on believing what it was told.
+    pub fn toggled(&self) -> Self {
+        Self::new(match self.mode {
+            Mode::Dark => Mode::Light,
+            Mode::Light => Mode::Dark,
+        })
     }
 
     /// Adapt every accent to stay legible against `bg`.
@@ -141,7 +160,7 @@ impl Theme {
     /// own foreground conceptually, so they're built by pushing the background
     /// toward its opposite until each clears its threshold. Everything else
     /// keeps its hue and moves only in lightness.
-    fn against(bg: Rgb) -> Self {
+    fn against(bg: Rgb, mode: Mode) -> Self {
         let opposite = if luminance(bg) < 0.5 {
             rgb(0xff, 0xff, 0xff)
         } else {
@@ -159,6 +178,7 @@ impl Theme {
             quiet: readable(BLUE, bg, DIM_CONTRAST),
             warn: readable(ORANGE, bg, TEXT_CONTRAST),
             key: readable(GOLD, bg, TEXT_CONTRAST),
+            mode,
         }
     }
 }

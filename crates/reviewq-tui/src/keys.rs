@@ -14,6 +14,8 @@ pub enum Action {
     Quit,
     /// Move the keyboard between the queue and the description.
     SwitchPane,
+    /// Adapt the palette for the other terminal background.
+    ToggleTheme,
     /// One row down, in whichever pane has focus.
     Down,
     /// One row up.
@@ -158,6 +160,14 @@ pub const BINDINGS: &[Binding] = &[
         chords: &[key(KeyCode::Tab)],
         keys: "Tab",
         what: "switch pane",
+        group: "View",
+        footer: false,
+    },
+    Binding {
+        action: Action::ToggleTheme,
+        chords: &[key(KeyCode::Char('t'))],
+        keys: "t",
+        what: "adapt for a light or dark terminal",
         group: "View",
         footer: false,
     },

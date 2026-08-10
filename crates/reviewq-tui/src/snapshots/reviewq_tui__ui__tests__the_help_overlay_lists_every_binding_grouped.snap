@@ -4,18 +4,18 @@ expression: screen
 ---
 reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
-│ ▸ #70135  @kaxil mentioned you  Add defer ││ Add deferrable mode to S3KeySensor                  │
-│   #70201  matches╭ Keys ─────────────────────────────────────────────────────╮area:async         │
-│                  │ Navigate                                                  │main               │
-│                  │   ↑↓ / jk     move                                        │                   │
+│ ▸ #70135  @kaxil ╭ Keys ─────────────────────────────────────────────────────╮r                  │
+│   #70201  matches│ Navigate                                                  │area:async         │
+│                  │   ↑↓ / jk     move                                        │main               │
 │                  │   PgDn / ^D   page down                                   │                   │
 │                  │   PgUp / ^U   page up                                     │                   │
 │                  │   g / Home    first                                       │                   │
 │                  │   G / End     last                                        │                   │
 │                  │   :           go to a PR by number                        │                   │
 │                  │                                                           │                   │
-│                  │ View                                                      │nsor.              │
-│                  │   Tab         switch pane                                 │                   │
+│                  │ View                                                      │                   │
+│                  │   Tab         switch pane                                 │nsor.              │
+│                  │   t           adapt for a light or dark terminal          │                   │
 │                  │                                                           │                   │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
