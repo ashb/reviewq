@@ -19,8 +19,8 @@ reviewq  2 on the queue
 │                                           ││ - [x] Tests added                                   │
 │                                           ││ - [ ] Docs updated                                  │
 │                                           ││                                                     │
-│                                           ││                                                     │
-│                                           ││                                                     │
-│                                           ││                                                     │
+│                                           ││ ```python                                           │
+│                                           ││ sensor = S3KeySensor(deferrable=True)               │
+│                                           ││ ```                                                 │
 ╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit

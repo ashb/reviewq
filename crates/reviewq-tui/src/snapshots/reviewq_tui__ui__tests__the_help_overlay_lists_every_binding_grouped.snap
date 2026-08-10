@@ -20,7 +20,7 @@ reviewq  2 on the queue
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
 │                  │   d           done — handled at this head                 │                   │
-│                  │   z           snooze for a while                          │                   │
+│                  │   z           snooze for a while                          │rue)               │
 │                  │   o           open it in your browser                     │                   │
 │                  │   c / y       copy its URL                                │                   │
 │                  │   m           mute, or unmute                             │                   │

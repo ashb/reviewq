@@ -357,13 +357,15 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     (total, inner)
 }
 
-/// Drop any background a markdown span carries.
+/// Drop any background a markdown line or its spans carry.
 ///
-/// `tui-markdown` paints inline code on a background of its own. That was
-/// invisible while reviewq left the background to the terminal; now that it paints
-/// one, an unstripped span is a black hole in the middle of a description. The
-/// foreground styling still tells code apart.
+/// `tui-markdown` paints code on a background of its own — inline code on the
+/// span, and a fenced block on the *line*, which is why clearing only the spans
+/// left ``` blocks black. That was invisible while reviewq left the background to
+/// the terminal; now that it paints one, an unstripped background is a hole in the
+/// middle of a description. The foreground styling still tells code apart.
 fn without_background(mut line: Line<'_>) -> Line<'_> {
+    line.style.bg = None;
     for span in &mut line.spans {
         span.style.bg = None;
     }
@@ -821,6 +823,10 @@ Adds a `deferrable` flag to `S3KeySensor`.
 
 - [x] Tests added
 - [ ] Docs updated
+
+```python
+sensor = S3KeySensor(deferrable=True)
+```
 ";
 
     /// A ledger holding two queued PRs: a mention (priority 1) and a
@@ -1056,10 +1062,14 @@ Adds a `deferrable` flag to `S3KeySensor`.
         // could accept without reading.
         assert!(!shown.contains("Delete this section"), "{shown}");
         assert!(!shown.contains("<!--"), "{shown}");
-        assert!(
-            !shown.contains('`'),
-            "inline code keeps no backticks:\n{shown}"
-        );
+        // Inline code loses its backticks — the styling carries it instead. A
+        // fenced block keeps its own fence, which `tui-markdown` renders as text,
+        // so this checks the prose line rather than the whole screen.
+        let prose = shown
+            .lines()
+            .find(|line| line.contains("Adds a"))
+            .expect("the prose line");
+        assert!(!prose.contains('`'), "{prose}");
 
         insta::assert_snapshot!(shown);
     }
