@@ -123,9 +123,17 @@ pub struct App {
     /// first — it is held only so that acting on an overlay's keys needs no
     /// hooks.
     pending_mark_read: Option<u64>,
-    /// The screen is not to be trusted — something else had the terminal — so
-    /// the next draw must repaint every cell rather than only what changed.
+    /// The screen is not to be trusted — something else had the terminal, or the
+    /// window resized — so the next draw must repaint every cell rather than only
+    /// what changed.
     repaint: bool,
+    /// Something changed, so the screen no longer matches the state.
+    ///
+    /// Held rather than assumed: the input poll wakes on a timer whether or not
+    /// anything happened, and an interface that redrew on each of those wakeups
+    /// re-parsed the selected PR's description as markdown ten times a second
+    /// while sitting idle.
+    dirty: bool,
     /// How far the key reference can scroll before its last row is on screen.
     /// Written by the renderer, which is the only thing that knows how much of it
     /// fits.
@@ -372,6 +380,7 @@ impl App {
             pending_fetch: None,
             pending_mark_read: None,
             repaint: false,
+            dirty: true,
             help_max_scroll: 0,
             status: None,
             refreshing: BTreeSet::new(),
@@ -525,14 +534,25 @@ impl App {
         // to be a sendable error before `?` will take it.
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        // The opening frame: nothing has happened yet, but there is a queue to
+        // show.
+        self.dirty = true;
         while !self.quit {
             // Something else had the terminal, so ratatui's record of what is on
             // screen is stale: clear it, or its diffing renderer will leave
             // whatever the other program drew.
             if std::mem::take(&mut self.repaint) {
                 terminal.clear()?;
+                self.dirty = true;
             }
-            terminal.draw(|frame| ui::draw(frame, self))?;
+            // Only when something changed. The poll below returns every
+            // `POLL_INTERVAL` whether or not anything arrived, and drawing on each
+            // of those meant re-laying out the queue and re-parsing the selected
+            // PR's description as markdown ten times a second, for as long as the
+            // interface was open.
+            if std::mem::take(&mut self.dirty) {
+                terminal.draw(|frame| ui::draw(frame, self))?;
+            }
 
             // A handoff runs here rather than in `dispatch`, because the draw
             // above is what puts "launching" on screen before the terminal is
@@ -556,6 +576,9 @@ impl App {
             while let Ok(message) = channel.rx.try_recv() {
                 let Message::Refreshed { number, outcome } = message;
                 self.on_refreshed(number, outcome);
+                // A refresh landing is a change like any other, and the one that
+                // arrives without anybody pressing a key.
+                self.dirty = true;
             }
             if self.quit {
                 break;
@@ -565,10 +588,21 @@ impl App {
                 // Windows reports press and release; acting on both double-fires.
                 Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     self.dispatch(key, channel, hooks)?;
+                    // Every key is treated as having changed something. A few
+                    // haven't — an unbound one, or `k` on the top row — and
+                    // redrawing an identical frame costs a diff that finds
+                    // nothing, which is far cheaper than working out per key
+                    // whether it mattered and being wrong once.
+                    self.dirty = true;
                 }
-                Some(Event::Mouse(mouse)) => self.on_mouse(mouse)?,
-                // A resize is reason enough to redraw, which the top of the loop
-                // does unconditionally; nothing arriving is reason for neither.
+                Some(Event::Mouse(mouse)) => {
+                    self.on_mouse(mouse)?;
+                    self.dirty = true;
+                }
+                // A resize invalidates the whole layout; ratatui's own record of
+                // the screen is sized, so this needs a clear as well as a draw.
+                Some(Event::Resize(_, _)) => self.repaint = true,
+                // Nothing arrived, so there is nothing new to show.
                 Some(_) | None => {}
             }
         }
@@ -1041,6 +1075,7 @@ impl App {
     fn fetch_unknown(&mut self, number: u64, hooks: &Hooks) {
         let outcome = (hooks.fetch)(number);
         self.overlay = Overlay::None;
+        self.dirty = true;
         match outcome {
             Ok(()) => {
                 if let Err(err) = self.reload() {
@@ -1075,6 +1110,7 @@ impl App {
     fn hand_off(&mut self, number: u64, channel: &Channel, hooks: &Hooks) {
         let outcome = (hooks.review)(number);
         self.overlay = Overlay::None;
+        self.dirty = true;
         // Whatever ran had the terminal, so nothing on screen can be trusted.
         self.repaint = true;
         match outcome {
@@ -1692,6 +1728,117 @@ mod loop_tests {
             }),
         };
         (hooks, recorded)
+    }
+
+    /// A `TestBackend` that counts how many times it was drawn to.
+    ///
+    /// The point of the dirty flag is what *doesn't* happen on an idle wakeup, and
+    /// nothing else here can see that.
+    struct CountingBackend {
+        inner: TestBackend,
+        draws: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Backend for CountingBackend {
+        type Error = std::convert::Infallible;
+
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+        where
+            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+        {
+            self.draws.set(self.draws.get() + 1);
+            self.inner.draw(content)
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+            self.inner.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> Result<(), Self::Error> {
+            self.inner.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+            self.inner.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+            &mut self,
+            position: P,
+        ) -> Result<(), Self::Error> {
+            self.inner.set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> Result<(), Self::Error> {
+            self.inner.clear()
+        }
+
+        fn clear_region(
+            &mut self,
+            clear_type: ratatui::backend::ClearType,
+        ) -> Result<(), Self::Error> {
+            self.inner.clear_region(clear_type)
+        }
+
+        fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+            self.inner.size()
+        }
+
+        fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+            self.inner.window_size()
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush()
+        }
+    }
+
+    /// Run the loop against a counting backend, returning how many draws it did.
+    fn draws_while(app: &mut App, hooks: &Hooks) -> usize {
+        let draws = std::rc::Rc::new(std::cell::Cell::new(0));
+        let backend = CountingBackend {
+            inner: TestBackend::new(100, 20),
+            draws: std::rc::Rc::clone(&draws),
+        };
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut channel = Channel::new();
+        app.run(&mut terminal, &mut channel, hooks).expect("loop");
+        draws.get()
+    }
+
+    #[test]
+    fn an_idle_wakeup_does_not_redraw() {
+        // The input poll returns on a timer whether or not anything arrived. Every
+        // one of those used to cost a full layout and a markdown parse of the
+        // selected PR's description.
+        let mut app = app();
+        let script = vec![None, None, None, None, Some(press('q'))];
+        let queue = Arc::new(Mutex::new(VecDeque::from(script)));
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        let hooks = Hooks {
+            next_event: Box::new(move || Ok(queue.lock().expect("lock").pop_front().flatten())),
+            ..hooks
+        };
+
+        let draws = draws_while(&mut app, &hooks);
+
+        assert_eq!(
+            draws, 1,
+            "the opening frame, and nothing for four idle wakeups"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_redraws() {
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![press('j'), press('q')], None, false);
+
+        let draws = draws_while(&mut app, &hooks);
+
+        assert_eq!(
+            draws, 2,
+            "the opening frame and one for the moved selection"
+        );
     }
 
     /// Run the loop to completion, or fail if it doesn't finish.
