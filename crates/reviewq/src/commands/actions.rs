@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jiff::Timestamp;
 use reviewq_app::actions;
 use reviewq_app::resolve::{open_for_number, repo_for};
@@ -35,6 +35,8 @@ pub async fn done(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitC
 
 /// Resolve the PR's repo from config and hand off to the shared best-effort
 /// notification marking.
+///
+/// One load, used for both halves: finding the repo and reaching its forge.
 async fn mark_read(config_path: Option<&Path>, number: u64) -> Result<()> {
     let key = repo_for(number)?;
     let loaded = reviewq_app::config::load(config_path)?;
@@ -50,7 +52,7 @@ async fn mark_read(config_path: Option<&Path>, number: u64) -> Result<()> {
                 key.name
             )
         })?;
-    actions::mark_notifications_read(config_path, &repo, number).await
+    actions::mark_notifications_read(&loaded.config, &repo, number).await
 }
 
 pub fn snooze(args: &SnoozeArgs) -> Result<ExitCode> {
@@ -102,24 +104,22 @@ pub fn undefer(args: &NumberArgs) -> Result<ExitCode> {
 
 pub async fn track(config_path: Option<&Path>, args: &TrackArgs) -> Result<ExitCode> {
     let number = args.target.number;
+    // `track` fetches, so it needs config either way — loaded once here and used
+    // for both naming the repo and reaching it.
+    let loaded = reviewq_app::config::load(config_path)
+        .with_context(|| format!("tracking #{number} needs a usable config to fetch it"))?;
     // A URL names its own repo, which is the only way to reach one that isn't
     // the single configured repo.
     let named = args.target.repo.as_ref().and_then(|url| {
-        reviewq_app::config::load(config_path)
-            .ok()
-            .and_then(|loaded| {
-                loaded
-                    .config
-                    .repos()
-                    .find(|repo| {
-                        repo.host == url.host && repo.owner == url.owner && repo.name == url.name
-                    })
-                    .cloned()
-            })
+        loaded
+            .config
+            .repos()
+            .find(|repo| repo.host == url.host && repo.owner == url.owner && repo.name == url.name)
+            .cloned()
     });
 
     let (tracked, refreshed) =
-        reviewq_app::sync::track_one(config_path, named.as_ref(), number).await?;
+        reviewq_app::sync::track_one(&loaded.config, named.as_ref(), number).await?;
 
     let what = match tracked {
         actions::Tracked::Already => "was already tracked",

@@ -15,16 +15,17 @@ use crate::cli::SyncArgs;
 use crate::commands::EXIT_EMPTY;
 
 pub async fn run(config_path: Option<&Path>, args: &SyncArgs, logging: bool) -> Result<ExitCode> {
+    let loaded = reviewq_app::config::load(config_path)?;
     if let Some(number) = args.number {
-        return one(config_path, number).await;
+        return one(&loaded.config, number).await;
     }
     let mut progress = StderrProgress::new(logging);
-    reviewq_app::sync::run(config_path, &mut progress).await
+    reviewq_app::sync::run(&loaded.config, &mut progress).await
 }
 
 /// `reviewq sync <number>`: refresh one PR's detail and say what changed.
-async fn one(config_path: Option<&Path>, number: u64) -> Result<ExitCode> {
-    match reviewq_app::sync::sync_one(config_path, number).await? {
+async fn one(cfg: &reviewq_app::config::Config, number: u64) -> Result<ExitCode> {
+    match reviewq_app::sync::sync_one(cfg, number).await? {
         Refreshed::Untracked => {
             eprintln!("#{number} is not in the ledger — run `reviewq sync` first");
             Ok(ExitCode::from(EXIT_EMPTY))

@@ -9,12 +9,12 @@
 //! inherits its terminal as-is, while the TUI has to give the terminal back
 //! first and take it over again afterwards.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, RepoRef};
-use crate::{config, paths};
+use crate::paths;
 
 /// A resolved handoff: the command to run, and what to run it with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,9 +63,7 @@ impl Handoff {
 }
 
 /// Work out how to hand `number` off.
-pub fn handoff_for(config_path: Option<&Path>, number: u64) -> Result<Handoff> {
-    let loaded = config::load(config_path)?;
-    let cfg = &loaded.config;
+pub fn handoff_for(cfg: &Config, number: u64) -> Result<Handoff> {
     let repo = resolve_repo(cfg, number)?;
 
     // The URL comes from the forge connection, so a PR can be handed off by URL
@@ -138,10 +136,16 @@ fn resolve_repo(config: &Config, number: u64) -> Result<RepoRef> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::path::Path;
 
     /// A config naming one repo, optionally with a checkout, and a review command
     /// that substitutes the number — so what comes back is the same whether or not
     /// a forge connection could be made in this environment.
+    fn config_of(dir: &Path, checkout: Option<&Path>) -> Config {
+        let path = config_file(dir, checkout);
+        crate::config::load(Some(&path)).expect("loads").config
+    }
+
     fn config_file(dir: &Path, checkout: Option<&Path>) -> PathBuf {
         let path = dir.join("config.toml");
         let repo = match checkout {
@@ -176,9 +180,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let checkout = dir.path().join("airflow");
         std::fs::create_dir(&checkout).expect("checkout");
-        let config = config_file(dir.path(), Some(&checkout));
+        let config = config_of(dir.path(), Some(&checkout));
 
-        let handoff = handoff_for(Some(&config), 70135).expect("handoff");
+        let handoff = handoff_for(&config, 70135).expect("handoff");
 
         assert_eq!(handoff.cwd.as_deref(), Some(checkout.as_path()));
         assert_eq!(handoff.argv.last().map(String::as_str), Some("70135"));
@@ -187,9 +191,9 @@ mod tests {
     #[test]
     fn a_handoff_for_a_repo_with_no_checkout_inherits_the_working_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = config_file(dir.path(), None);
+        let config = config_of(dir.path(), None);
 
-        let handoff = handoff_for(Some(&config), 70135).expect("handoff");
+        let handoff = handoff_for(&config, 70135).expect("handoff");
 
         assert_eq!(handoff.cwd, None);
     }

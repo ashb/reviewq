@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use crate::cli::NumberArgs;
 
 pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCode> {
-    let handoff = reviewq_app::review::handoff_for(config_path, args.number)?;
+    // One load for both halves: working out the handoff, and the refresh after it.
+    let loaded = reviewq_app::config::load(config_path)?;
+    let handoff = reviewq_app::review::handoff_for(&loaded.config, args.number)?;
 
     let status = handoff
         .command()
@@ -20,7 +22,7 @@ pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCo
 
     match status.code() {
         Some(0) => {
-            if let Err(err) = refresh_after_review(config_path, args.number).await {
+            if let Err(err) = refresh_after_review(&loaded.config, args.number).await {
                 tracing::warn!(number = args.number, %err, "could not refresh PR state after review");
             }
             Ok(ExitCode::SUCCESS)
@@ -39,7 +41,7 @@ pub async fn run(config_path: Option<&Path>, args: &NumberArgs) -> Result<ExitCo
 /// [`Refreshed::Untracked`] reports. Best-effort overall: token or network
 /// trouble here must not turn a successful review session into a failing
 /// `reviewq review` exit, so the caller only warns.
-async fn refresh_after_review(config_path: Option<&Path>, number: u64) -> Result<()> {
-    reviewq_app::sync::sync_one(config_path, number).await?;
+async fn refresh_after_review(cfg: &reviewq_app::config::Config, number: u64) -> Result<()> {
+    reviewq_app::sync::sync_one(cfg, number).await?;
     Ok(())
 }

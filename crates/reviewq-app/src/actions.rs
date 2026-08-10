@@ -15,14 +15,12 @@
 //! separate: it is best-effort and unbounded, so a caller runs it behind the
 //! local record rather than in front of it.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use jiff::{Timestamp, Unit};
 use reviewq_forge::Forge;
 use reviewq_ledger::Ledger;
 
-use crate::config::{self, RepoRef};
+use crate::config::{Config, RepoRef};
 
 /// Mark a PR handled at `head_sha`, and clear the reasons `done` is allowed to.
 ///
@@ -37,16 +35,11 @@ pub fn done(ledger: &Ledger, repo_id: i64, number: u64, head_sha: &str) -> Resul
 
 /// Tell GitHub the PR's notifications have been read.
 ///
-/// Best-effort and separate from [`done`]: config, a token or the network being
+/// Best-effort and separate from [`done`]: a token or the network being
 /// unavailable must not stop the local record, and must not delay it either.
 /// Callers log a failure rather than surfacing it.
-pub async fn mark_notifications_read(
-    config_path: Option<&Path>,
-    repo: &crate::config::RepoRef,
-    number: u64,
-) -> Result<()> {
-    let loaded = config::load(config_path)?;
-    let forge = loaded.config.forge_for(&repo.host)?;
+pub async fn mark_notifications_read(cfg: &Config, repo: &RepoRef, number: u64) -> Result<()> {
+    let forge = cfg.forge_for(&repo.host)?;
     forge
         .mark_pr_notifications_read(&repo.owner, &repo.name, number)
         .await

@@ -1194,9 +1194,11 @@ Adds a `deferrable` flag to `S3KeySensor`.
         );
 
         // That render reported how far it can go, so End reaches the end.
+        // Scrolling the reference touches no hook, so what they are is irrelevant
+        // here — but one has to be passed, and a config nothing reads is enough.
         app.on_overlay_key(
             KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
-            &Hooks::live(),
+            &Hooks::live(std::sync::Arc::new(Err("not needed".to_string()))),
         )
         .expect("scroll to end");
         let bottom = render(&mut app, 100, 18).join("\n");

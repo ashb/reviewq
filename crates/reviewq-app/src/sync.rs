@@ -7,7 +7,6 @@
 //! overlapping window is a near-no-op.
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -18,7 +17,7 @@ use reviewq_forge::{Forge, PrDetail};
 use reviewq_ledger::{Ledger, TrackedReason};
 
 use crate::config::{Config, Project, RepoRef};
-use crate::{actions, config, paths};
+use crate::{actions, paths};
 
 /// Cursor: the high-water mark of `updatedAt` we have swept up to.
 pub const CURSOR_KEY: &str = "last_sync_at";
@@ -31,9 +30,7 @@ pub const TRUNCATED_KEY: &str = "last_sweep_truncated";
 /// writing through one ledger handle. A failure on any repo aborts the run —
 /// but everything committed before it stays committed, and the cursor means the
 /// next sync resumes rather than starts over.
-pub async fn run(config_path: Option<&Path>, progress: &mut dyn SyncProgress) -> Result<ExitCode> {
-    let loaded = config::load(config_path)?;
-    let cfg = &loaded.config;
+pub async fn run(cfg: &Config, progress: &mut dyn SyncProgress) -> Result<ExitCode> {
     let now = Timestamp::now();
     // One handle for the whole run: every configured repo's sync writes
     // through it, each scoped by its own `repo_id`.
@@ -393,7 +390,7 @@ pub enum Refreshed {
 ///
 /// Which repo the number belongs to comes from the ledger, not config, so a
 /// bare number resolves the same way it does for `show`/`done`/`mute`.
-pub async fn sync_one(config_path: Option<&Path>, number: u64) -> Result<Refreshed> {
+pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
     let db = paths::database_file()?;
     let Some(key) = reviewq_ledger::repos_with_pr(&db, number)?
         .into_iter()
@@ -402,8 +399,6 @@ pub async fn sync_one(config_path: Option<&Path>, number: u64) -> Result<Refresh
         return Ok(Refreshed::Untracked);
     };
 
-    let loaded = config::load(config_path)?;
-    let cfg = &loaded.config;
     let repo = cfg
         .repos()
         .find(|r| r.key() == key)
@@ -467,16 +462,12 @@ pub async fn sync_one(config_path: Option<&Path>, number: u64) -> Result<Refresh
 /// is that the ledger may know nothing about it. With more than one repo
 /// configured a bare number is ambiguous, so `repo` names one.
 pub async fn track_one(
-    config_path: Option<&Path>,
+    cfg: &Config,
     repo: Option<&RepoRef>,
     number: u64,
 ) -> Result<(actions::Tracked, Refreshed)> {
     // Always reaches the forge, whether or not the ledger already has the PR:
-    // `track` means "track it and go and get it", so it needs config, unlike the
-    // purely local actions.
-    let loaded = config::load(config_path)
-        .with_context(|| format!("tracking #{number} needs a usable config to fetch it"))?;
-    let cfg = &loaded.config;
+    // `track` means "track it and go and get it", unlike the purely local actions.
     let repo = match repo {
         Some(repo) => repo.clone(),
         None => {
@@ -507,7 +498,7 @@ pub async fn track_one(
 
     // A freshly-stored PR holds no attention until something classifies it, so
     // the detail pass is what actually puts it on the queue.
-    let refreshed = sync_one(config_path, number).await?;
+    let refreshed = sync_one(cfg, number).await?;
     Ok((tracked, refreshed))
 }
 

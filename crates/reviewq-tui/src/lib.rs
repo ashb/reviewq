@@ -16,9 +16,12 @@ pub mod keys;
 
 pub mod theme;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
+use reviewq_app::config::Config;
 
 pub use theme::{Mode, Theme};
 
@@ -27,16 +30,22 @@ pub use theme::{Mode, Theme};
 /// Takes over the terminal — alternate screen, raw mode, mouse reporting — and
 /// restores it on the way out, including when the body returns an error. Async
 /// because forge work runs as tasks while the interface stays responsive.
-pub async fn run(theme: Theme) -> Result<()> {
+///
+/// `config` is the one the caller already loaded — or why it couldn't be, since a
+/// broken config must not stop the queue being read. It is held for the session:
+/// an interface that reloaded it per action could act on two different configs in
+/// one sitting, and paid a file read and a parse per keystroke to do it.
+pub async fn run(theme: Theme, config: Result<Config, String>) -> Result<()> {
+    let config = Arc::new(config);
     let mut terminal = ratatui::init();
     // Not part of `ratatui::init`, so it is asked for and given back by hand.
     // Failing to enable it is not worth refusing to start over: the keyboard can
     // do everything the mouse can.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    let outcome = match app::App::new(theme) {
+    let outcome = match app::App::new(theme, Arc::clone(&config)) {
         Ok(mut app) => {
             let mut channel = app::Channel::new();
-            app.run(&mut terminal, &mut channel, &app::Hooks::live())
+            app.run(&mut terminal, &mut channel, &app::Hooks::live(config))
                 .await
         }
         Err(err) => Err(err),

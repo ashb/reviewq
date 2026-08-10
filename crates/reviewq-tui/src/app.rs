@@ -20,6 +20,7 @@
 //! drive the real loop from a script with no terminal and no forge.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use crossterm::clipboard::CopyToClipboard;
@@ -34,6 +35,7 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
+use reviewq_app::config::Config;
 use reviewq_app::sync::Refreshed;
 use reviewq_ledger::{Ledger, Located, PrShow, QueueItem, RepoKey};
 use tokio::runtime::Handle;
@@ -45,9 +47,8 @@ use tokio::sync::mpsc;
 /// same reason a pasted URL is handed to the forge to *read*. Building an adapter
 /// costs nothing and resolves no token, so showing someone where a PR is never
 /// waits on a credential helper.
-fn pr_url(repo: &RepoKey, number: u64) -> Result<String> {
-    let loaded = reviewq_app::config::load(None)?;
-    let forge = loaded.config.forge_for(&repo.host)?;
+fn pr_url(config: &Config, repo: &RepoKey, number: u64) -> Result<String> {
+    let forge = config.forge_for(&repo.host)?;
     Ok(forge.web_url(&repo.owner, &repo.name, number))
 }
 
@@ -135,6 +136,10 @@ pub struct App {
     /// Lines the detail pane last needed, so scrolling can stop at the end
     /// rather than running off into blank space. Also written by the renderer.
     detail_lines: usize,
+    /// The session's config, loaded once. Only a pasted URL needs it here — which
+    /// host's layout to read it with — so a failure to load is carried rather than
+    /// raised; see [`HeldConfig`].
+    config: HeldConfig,
     /// Where the queue's rows and the detail's text last landed on screen, so a
     /// click can be turned back into the row under the pointer. Written by the
     /// renderer, which is the only thing that knows where the layout put them;
@@ -168,6 +173,22 @@ impl Channel {
 /// A side effect that needs a PR's full identity — its repo as well as its
 /// number — because it has to reach the forge the PR lives on.
 type PrHook = Box<dyn Fn(&RepoKey, u64) -> Result<()> + Send + Sync>;
+
+/// The session's config, or why there isn't one.
+///
+/// Loaded once, and held as a result rather than demanded up front because the
+/// queue is worth browsing with a broken config — it is the last sync's output,
+/// already on disk. Only the hooks that reach the forge need config, and each
+/// reports the load failure if you press one of their keys.
+pub(crate) type HeldConfig = Arc<Result<Config, String>>;
+
+/// The held config, or the load failure as an error.
+fn config_of(held: &HeldConfig) -> Result<&Config> {
+    match held.as_ref() {
+        Ok(config) => Ok(config),
+        Err(err) => bail!("{err}"),
+    }
+}
 
 /// The side effects the loop performs, as functions it is given.
 ///
@@ -216,8 +237,20 @@ pub(crate) struct Hooks {
 }
 
 impl Hooks {
-    /// The real ones, refreshing through `reviewq-app`.
-    pub(crate) fn live() -> Self {
+    /// The real ones, working through `reviewq-app`.
+    ///
+    /// `config` is loaded once, by the caller, and shared with every hook that
+    /// needs it — behind an `Arc` because the closures that reach the forge run on
+    /// the blocking pool and so must own what they capture. Reloading it per
+    /// keystroke, which is what taking a path meant, cost a file read and a parse
+    /// each time and let one session act on two different configs.
+    pub(crate) fn live(config: HeldConfig) -> Self {
+        let for_refresh = Arc::clone(&config);
+        let for_fetch = Arc::clone(&config);
+        let for_review = Arc::clone(&config);
+        let for_mark_read = Arc::clone(&config);
+        let for_open = Arc::clone(&config);
+        let for_copy = Arc::clone(&config);
         Self {
             next_event: Box::new(|| {
                 // `block_in_place` because `poll` parks the thread: it tells the
@@ -229,7 +262,8 @@ impl Hooks {
                 }
                 Ok(Some(event::read().context("reading a terminal event")?))
             }),
-            refresh: Box::new(|number, tx| {
+            refresh: Box::new(move |number, tx| {
+                let config = Arc::clone(&for_refresh);
                 // `spawn_blocking` rather than `spawn`, because `sync_one`'s
                 // future is not `Send`: it holds a ledger handle across the forge
                 // round trip, and `rusqlite::Connection` is `Send` but not
@@ -242,22 +276,27 @@ impl Hooks {
                 // what makes the interface responsive: that is this being off the
                 // UI thread at all.
                 tokio::task::spawn_blocking(move || {
-                    let outcome =
-                        Handle::current().block_on(reviewq_app::sync::sync_one(None, number));
+                    let outcome = config_of(&config).and_then(|cfg| {
+                        Handle::current().block_on(reviewq_app::sync::sync_one(cfg, number))
+                    });
                     // A closed channel means the interface has already exited, so
                     // the result has nowhere to go and nothing awaits it.
                     let _ = tx.send(Message::Refreshed { number, outcome });
                 });
             }),
-            fetch: Box::new(|number| {
+            fetch: Box::new(move |number| {
                 tokio::task::block_in_place(|| {
                     Handle::current()
-                        .block_on(reviewq_app::sync::track_one(None, None, number))
+                        .block_on(reviewq_app::sync::track_one(
+                            config_of(&for_fetch)?,
+                            None,
+                            number,
+                        ))
                         .map(|_| ())
                 })
             }),
-            open_url: Box::new(|repo, number| {
-                let url = pr_url(repo, number)?;
+            open_url: Box::new(move |repo, number| {
+                let url = pr_url(config_of(&for_open)?, repo, number)?;
                 // Never handed the terminal, unlike the review command: an opener
                 // returns straight away and its output (`xdg-open` has opinions
                 // about mime caches) would land on top of the queue. So its
@@ -280,8 +319,8 @@ impl Hooks {
                 });
                 Ok(())
             }),
-            copy_url: Box::new(|repo, number| {
-                let url = pr_url(repo, number)?;
+            copy_url: Box::new(move |repo, number| {
+                let url = pr_url(config_of(&for_copy)?, repo, number)?;
                 // OSC 52, through the terminal that is already ours — so this
                 // works over ssh and inside tmux, where a clipboard library
                 // talking to the local display server would put the URL on the
@@ -290,8 +329,8 @@ impl Hooks {
                 execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(&url))
                     .context("writing the clipboard escape sequence")
             }),
-            review: Box::new(|number| {
-                let handoff = reviewq_app::review::handoff_for(None, number)?;
+            review: Box::new(move |number| {
+                let handoff = reviewq_app::review::handoff_for(config_of(&for_review)?, number)?;
 
                 // Raw mode goes, the alternate screen stays.
                 //
@@ -350,18 +389,18 @@ impl Hooks {
                 }
                 Ok(())
             }),
-            mark_read: Box::new(|number| {
+            mark_read: Box::new(move |number| {
+                let config = Arc::clone(&for_mark_read);
                 tokio::task::spawn_blocking(move || {
                     let marked = Handle::current().block_on(async move {
                         let key = reviewq_app::resolve::repo_for(number)?;
-                        let loaded = reviewq_app::config::load(None)?;
-                        let repo = loaded
-                            .config
+                        let cfg = config_of(&config)?;
+                        let repo = cfg
                             .repos()
                             .find(|r| r.key() == key)
                             .cloned()
                             .context("the PR's repo is no longer configured")?;
-                        reviewq_app::actions::mark_notifications_read(None, &repo, number).await
+                        reviewq_app::actions::mark_notifications_read(cfg, &repo, number).await
                     });
                     if let Err(err) = marked {
                         tracing::warn!(number, %err, "could not mark GitHub notifications read");
@@ -482,15 +521,21 @@ pub enum Focus {
 
 impl App {
     /// Open the ledger and load the queue.
-    pub fn new(theme: Theme) -> Result<Self> {
+    pub fn new(theme: Theme, config: HeldConfig) -> Result<Self> {
         let path = reviewq_app::paths::database_file()?;
         let ledger = Ledger::open(&path)
             .with_context(|| format!("opening the ledger at {}", path.display()))?;
-        Self::with_ledger(theme, ledger)
+        let mut app = Self::with_ledger(theme, ledger)?;
+        app.config = config;
+        Ok(app)
     }
 
     /// Build over an already-open ledger, so a test can render against a
     /// fixture rather than whatever this machine happens to have synced.
+    ///
+    /// No config: the only thing here that reads one is resolving a pasted URL,
+    /// and a test that cares hands one in afterwards rather than every other test
+    /// having to supply one it never uses.
     pub(crate) fn with_ledger(theme: Theme, ledger: Ledger) -> Result<Self> {
         let mut app = Self {
             theme,
@@ -512,6 +557,7 @@ impl App {
             detail_lines: 0,
             queue_area: Rect::ZERO,
             detail_area: Rect::ZERO,
+            config: Arc::new(Err("config was not loaded".to_string())),
             ledger,
             quit: false,
         };
@@ -1058,15 +1104,15 @@ impl App {
     /// The PR number `text` names — a bare number, `#number`, or a pasted URL.
     ///
     /// A URL is handed to the forge, which knows its own layout; only the plain
-    /// forms are read here. Config has to be loaded to know which provider a
-    /// host is, and a failure there just means the URL can't be resolved — not
-    /// that the interface should stop.
+    /// forms are read here. Knowing which provider a host is takes config, and
+    /// not having one just means a URL can't be resolved — not that the interface
+    /// should stop.
     fn pr_number_in(&self, text: &str) -> Option<u64> {
         if let Some(number) = bare_pr_number(text) {
             return Some(number);
         }
-        let loaded = reviewq_app::config::load(None).ok()?;
-        reviewq_forge::parse_pull_request_url(&loaded.config.forges, text)
+        let config = config_of(&self.config).ok()?;
+        reviewq_forge::parse_pull_request_url(&config.forges, text)
             .ok()?
             .map(|pr| pr.number)
     }
@@ -2419,6 +2465,35 @@ mod loop_tests {
         assert!(status.contains("wiff not found"), "{status}");
         assert_eq!(app.queue.len(), 1, "the queue survives a failed handoff");
         assert!(app.repaint || app.quit, "a handoff forces a full repaint");
+    }
+
+    #[test]
+    fn a_config_that_failed_to_load_is_carried_not_raised() {
+        // What `reviewq tui` hands over when config is broken. The queue is still
+        // worth reading, so the failure has to survive as far as the hook that
+        // needs it and surface there, in the user's words.
+        let held: HeldConfig = Arc::new(Err("config not found: /nope.toml".to_string()));
+
+        let err = config_of(&held).expect_err("no config to give");
+
+        assert!(err.to_string().contains("config not found"), "{err:#}");
+    }
+
+    #[test]
+    fn a_pasted_url_needs_the_held_config_and_says_nothing_without_one() {
+        // Reading a URL means knowing which provider its host is, which is config.
+        // Without one it simply isn't a number — not an error out of the prompt.
+        let app = app();
+
+        assert_eq!(
+            app.pr_number_in("https://github.com/apache/airflow/pull/70135"),
+            None
+        );
+        assert_eq!(
+            app.pr_number_in("70135"),
+            Some(70135),
+            "a bare number needs no config"
+        );
     }
 
     #[tokio::test]
