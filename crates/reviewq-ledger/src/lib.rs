@@ -6,7 +6,6 @@
 
 mod schema;
 
-use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use reviewq_core::model::{
     Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
@@ -15,6 +14,180 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, Error::FromSqlConversionFailure, OptionalExtension, params};
 
 pub use schema::SCHEMA_VERSION;
+
+/// What can go wrong in the ledger.
+///
+/// Typed rather than an opaque string because two of these change what a caller
+/// should *do*: a ledger from a newer reviewq needs the binary upgraded, and a
+/// busy one needs trying again. An interface handed one prose blob can only print
+/// it and hope the reader knows which.
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerError {
+    /// The file was written by a build that knows more migrations than this one.
+    ///
+    /// Never run: migrating *down* is not defined, so the alternative to refusing
+    /// is corrupting a database the other build still expects to read.
+    #[error(
+        "the ledger was written by a newer reviewq (this build knows {SCHEMA_VERSION} \
+         migrations) — upgrade reviewq, or point $REVIEWQ_DB at another file"
+    )]
+    FromTheFuture,
+
+    /// Somebody else held the write lock for longer than the busy timeout.
+    #[error(
+        "another reviewq held the ledger's write lock for more than {}s — it is \
+         probably mid-sync; try again",
+        BUSY_TIMEOUT.as_secs()
+    )]
+    Busy {
+        /// What SQLite reported.
+        #[source]
+        source: rusqlite::Error,
+    },
+
+    /// A PR the caller expected to be there isn't.
+    #[error("#{number} is not stored in the ledger")]
+    NotStored {
+        /// The PR number asked for.
+        number: u64,
+    },
+
+    /// A stored value could not be read back as what it should be. The ledger
+    /// wrote it, so this means the file has been altered or a format changed
+    /// without a migration.
+    #[error("the ledger holds a {what} it cannot read back")]
+    Corrupt {
+        /// What was being decoded.
+        what: String,
+        /// Why it failed.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Something that was about to be stored could not be encoded. Our own data,
+    /// so this is a bug rather than a bad database.
+    #[error("could not encode {what} for storage")]
+    Encode {
+        /// What was being encoded.
+        what: String,
+        /// Why it failed.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The ledger file itself could not be reached.
+    #[error("{doing}")]
+    Io {
+        /// What was being attempted on disk.
+        doing: String,
+        /// Why it failed.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Anything else SQLite refused, with what was being attempted.
+    #[error("{doing}")]
+    Sql {
+        /// What the ledger was doing.
+        doing: String,
+        /// What SQLite reported.
+        #[source]
+        source: rusqlite::Error,
+    },
+}
+
+impl From<rusqlite::Error> for LedgerError {
+    /// Classify as it converts, so a `?` anywhere in the crate yields [`Busy`]
+    /// rather than burying it in a message only a human can read.
+    ///
+    /// [`Busy`]: LedgerError::Busy
+    fn from(source: rusqlite::Error) -> Self {
+        if is_busy(&source) {
+            Self::Busy { source }
+        } else {
+            Self::Sql {
+                doing: "talking to the ledger".to_string(),
+                source,
+            }
+        }
+    }
+}
+
+/// Whether SQLite gave up waiting for the write lock.
+fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+                ..
+            },
+            _
+        )
+    )
+}
+
+/// Every fallible operation here fails with a [`LedgerError`].
+pub type Result<T> = std::result::Result<T, LedgerError>;
+
+/// Say what a SQLite failure was for, keeping the busy case distinguishable.
+trait Doing<T> {
+    /// Wrap a failure with what was being attempted.
+    fn doing(self, what: impl Into<String>) -> Result<T>;
+}
+
+impl<T> Doing<T> for rusqlite::Result<T> {
+    fn doing(self, what: impl Into<String>) -> Result<T> {
+        self.map_err(|source| {
+            if is_busy(&source) {
+                LedgerError::Busy { source }
+            } else {
+                LedgerError::Sql {
+                    doing: what.into(),
+                    source,
+                }
+            }
+        })
+    }
+}
+
+/// Say what was being encoded, when it cannot be turned into storage.
+///
+/// There is no matching `decoding`: a value read back is decoded inside a
+/// `query_map` closure, which must fail with `rusqlite::Error` — so those go
+/// through [`decode_err`] and arrive here as [`LedgerError::Corrupt`] via the
+/// conversion instead.
+trait Encoding<T> {
+    /// Wrap a failure to encode something for storage.
+    fn encoding(self, what: impl Into<String>) -> Result<T>;
+}
+
+impl<T, E> Encoding<T> for std::result::Result<T, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn encoding(self, what: impl Into<String>) -> Result<T> {
+        self.map_err(|source| LedgerError::Encode {
+            what: what.into(),
+            source: Box::new(source),
+        })
+    }
+}
+
+/// Say what was being attempted on the file itself.
+trait OnDisk<T> {
+    /// Wrap an IO failure with what it was for.
+    fn on_disk(self, doing: impl Into<String>) -> Result<T>;
+}
+
+impl<T> OnDisk<T> for std::io::Result<T> {
+    fn on_disk(self, doing: impl Into<String>) -> Result<T> {
+        self.map_err(|source| LedgerError::Io {
+            doing: doing.into(),
+            source,
+        })
+    }
+}
 
 /// How long a connection waits for whoever holds the write lock before giving
 /// up with `SQLITE_BUSY`. A single write is short; a whole detail pass runs
@@ -34,13 +207,13 @@ const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// `memory`, which is harmless — nothing else ever opens it.
 fn prepare_conn(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")
-        .context("enabling foreign keys")?;
+        .doing("enabling foreign keys")?;
     // `PRAGMA journal_mode` reports the mode it settled on as a result row,
     // which plain `pragma_update` rejects; this variant tolerates one.
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
-        .context("enabling WAL")?;
+        .doing("enabling WAL")?;
     conn.busy_timeout(BUSY_TIMEOUT)
-        .context("setting the busy timeout")?;
+        .doing("setting the busy timeout")?;
     Ok(())
 }
 
@@ -224,10 +397,9 @@ impl Ledger {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
-                .with_context(|| format!("creating ledger dir {}", dir.display()))?;
+                .on_disk(format!("creating ledger dir {}", dir.display()))?;
         }
-        let conn =
-            Connection::open(path).with_context(|| format!("opening ledger {}", path.display()))?;
+        let conn = Connection::open(path).doing(format!("opening ledger {}", path.display()))?;
         Self::from_conn(conn)
     }
 
@@ -252,7 +424,7 @@ impl Ledger {
                 |row| row.get(0),
             )
             .optional()
-            .with_context(|| format!("looking up repo {}", repo.slug()))
+            .doing(format!("looking up repo {}", repo.slug()))
     }
 
     /// Get-or-create `repo`'s row in `repos`, returning its id — every method
@@ -275,14 +447,14 @@ impl Ledger {
                 |row| row.get(0),
             )
             .optional()
-            .context("checking for a pre-v4 placeholder repo")?;
+            .doing("checking for a pre-v4 placeholder repo")?;
         if let Some(id) = placeholder {
             self.conn
                 .execute(
                     "UPDATE repos SET host = ?2, owner = ?3, name = ?4 WHERE id = ?1",
                     params![id, repo.host, repo.owner, repo.name],
                 )
-                .context("adopting the pre-v4 placeholder repo")?;
+                .doing("adopting the pre-v4 placeholder repo")?;
             return Ok(id);
         }
         self.conn
@@ -290,14 +462,14 @@ impl Ledger {
                 "INSERT OR IGNORE INTO repos (host, owner, name) VALUES (?1, ?2, ?3)",
                 params![repo.host, repo.owner, repo.name],
             )
-            .context("registering repo")?;
+            .doing("registering repo")?;
         self.conn
             .query_row(
                 "SELECT id FROM repos WHERE host = ?1 AND owner = ?2 AND name = ?3",
                 params![repo.host, repo.owner, repo.name],
                 |row| row.get(0),
             )
-            .context("resolving repo id")
+            .doing("resolving repo id")
     }
 
     /// Every repo this ledger knows about, in no particular order — what
@@ -355,7 +527,7 @@ impl Ledger {
             }
         }
         set_meta_row(&tx, repo_id, cursor_key, cursor_value)?;
-        tx.commit().context("committing sweep page")?;
+        tx.commit().doing("committing sweep page")?;
         Ok(new)
     }
 
@@ -368,7 +540,7 @@ impl Ledger {
                 |row| row.get(0),
             )
             .optional()
-            .with_context(|| format!("reading sync_meta {key}"))
+            .doing(format!("reading sync_meta {key}"))
     }
 
     /// Set a metadata value.
@@ -461,7 +633,7 @@ impl Ledger {
                 row_to_my_state,
             )
             .optional()
-            .with_context(|| format!("reading my_state for #{number}"))
+            .doing(format!("reading my_state for #{number}"))
             .map(Option::unwrap_or_default)
     }
 
@@ -490,7 +662,7 @@ impl Ledger {
                 ",
                 params![repo_id, number as i64, done_sha, done_at.to_string()],
             )
-            .with_context(|| format!("recording done for #{number}"))?;
+            .doing(format!("recording done for #{number}"))?;
         Ok(())
     }
 
@@ -505,7 +677,7 @@ impl Ledger {
                 ",
                 params![repo_id, number as i64, until.to_string()],
             )
-            .with_context(|| format!("snoozing #{number}"))?;
+            .doing(format!("snoozing #{number}"))?;
         Ok(())
     }
 
@@ -519,7 +691,7 @@ impl Ledger {
                 ",
                 params![repo_id, number as i64, muted as i64],
             )
-            .with_context(|| format!("setting muted for #{number}"))?;
+            .doing(format!("setting muted for #{number}"))?;
         Ok(())
     }
 
@@ -538,7 +710,7 @@ impl Ledger {
                 ",
                 params![repo_id, number as i64, deferred_at.map(|t| t.to_string())],
             )
-            .with_context(|| format!("setting deferred_at for #{number}"))?;
+            .doing(format!("setting deferred_at for #{number}"))?;
         Ok(())
     }
 
@@ -554,7 +726,7 @@ impl Ledger {
                 "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
                 params![repo_id, number as i64],
             )
-            .with_context(|| format!("clearing attention for #{number}"))?;
+            .doing(format!("clearing attention for #{number}"))?;
         Ok(())
     }
 
@@ -574,12 +746,14 @@ impl Ledger {
             "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
             params![repo_id, number as i64],
         )
-        .with_context(|| format!("clearing attention for unreachable #{number}"))?;
+        .doing(format!("clearing attention for unreachable #{number}"))?;
         tx.execute(
             "UPDATE prs SET detail_synced_at = ?3 WHERE repo_id = ?1 AND number = ?2",
             params![repo_id, number as i64, now.to_string()],
         )
-        .with_context(|| format!("stamping detail_synced_at for unreachable #{number}"))?;
+        .doing(format!(
+            "stamping detail_synced_at for unreachable #{number}"
+        ))?;
         tx.commit()?;
         Ok(())
     }
@@ -593,7 +767,7 @@ impl Ledger {
                 "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2 AND reason != 'review_requested'",
                 params![repo_id, number as i64],
             )
-            .with_context(|| format!("clearing done attention for #{number}"))?;
+            .doing(format!("clearing done attention for #{number}"))?;
         Ok(())
     }
 
@@ -618,7 +792,7 @@ impl Ledger {
                     TrackedReason::Involved("manual".into()).render()
                 ],
             )
-            .with_context(|| format!("force-tracking #{number}"))?;
+            .doing(format!("force-tracking #{number}"))?;
         Ok(true)
     }
 
@@ -682,7 +856,7 @@ impl Ledger {
                    AND (detail_synced_at IS NULL OR detail_synced_at <= ?3)",
                 params![repo_id, number as i64, stamp, body],
             )
-            .with_context(|| format!("stamping detail_synced_at for #{number}"))?;
+            .doing(format!("stamping detail_synced_at for #{number}"))?;
         if applied == 0 {
             // Either the row is gone — a caller bug — or somebody stored a newer
             // detail while this one was being fetched.
@@ -693,10 +867,10 @@ impl Ledger {
                     |row| row.get(0),
                 )
                 .optional()
-                .with_context(|| format!("reading #{number}'s detail watermark"))?
+                .doing(format!("reading #{number}'s detail watermark"))?
                 .flatten();
             let Some(stored) = stored else {
-                bail!("#{number} is not stored, so its detail cannot be committed");
+                return Err(LedgerError::NotStored { number });
             };
             return Ok(Committed::Superseded { stored });
         }
@@ -705,7 +879,7 @@ impl Ledger {
         replace_threads(&tx, repo_id, number, threads)?;
         replace_reviewers(&tx, repo_id, number, reviewers)?;
         replace_attention(&tx, repo_id, number, attention)?;
-        tx.commit().context("committing PR detail")?;
+        tx.commit().doing("committing PR detail")?;
         Ok(Committed::Applied)
     }
 
@@ -728,7 +902,7 @@ impl Ledger {
                 ),
                 params![repo_id],
             )
-            .context("clearing archived attention")?;
+            .doing("clearing archived attention")?;
         Ok(())
     }
 
@@ -898,7 +1072,7 @@ impl Ledger {
                 },
             )
             .optional()
-            .with_context(|| format!("reading PR #{number}"))?;
+            .doing(format!("reading PR #{number}"))?;
         let Some((pr, tracked_reason, body)) = base else {
             return Ok(None);
         };
@@ -1000,13 +1174,13 @@ fn upsert_row(
     let merged = merge_reason(tracked_reason(conn, repo_id, pr.number)?.as_deref(), reason);
     let is_new = existing_row(conn, repo_id, pr.number)?.is_none();
 
-    let labels = serde_json::to_string(&pr.labels).context("encoding labels")?;
+    let labels = serde_json::to_string(&pr.labels).encoding("a label list")?;
     let files = pr
         .files
         .as_ref()
         .map(serde_json::to_string)
         .transpose()
-        .context("encoding files")?;
+        .encoding("a file list")?;
 
     conn.execute(
         r"
@@ -1049,7 +1223,7 @@ fn upsert_row(
             pr.base_ref,
         ],
     )
-    .with_context(|| format!("upserting PR #{}", pr.number))?;
+    .doing(format!("upserting PR #{}", pr.number))?;
     Ok(is_new)
 }
 
@@ -1059,7 +1233,7 @@ fn set_meta_row(conn: &Connection, repo_id: i64, key: &str, value: &str) -> Resu
          ON CONFLICT(repo_id, key) DO UPDATE SET value = excluded.value",
         params![repo_id, key, value],
     )
-    .with_context(|| format!("writing sync_meta {key}"))?;
+    .doing(format!("writing sync_meta {key}"))?;
     Ok(())
 }
 
@@ -1070,7 +1244,7 @@ fn tracked_reason(conn: &Connection, repo_id: i64, number: u64) -> Result<Option
         |row| row.get::<_, Option<String>>(0),
     )
     .optional()
-    .with_context(|| format!("reading tracked_reason for #{number}"))
+    .doing(format!("reading tracked_reason for #{number}"))
     .map(Option::flatten)
 }
 
@@ -1081,7 +1255,7 @@ fn existing_row(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<u
         |row| row.get::<_, i64>(0),
     )
     .optional()
-    .with_context(|| format!("checking for PR #{number}"))
+    .doing(format!("checking for PR #{number}"))
     .map(|opt| opt.map(|n| n as u64))
 }
 
@@ -1265,7 +1439,7 @@ fn write_forge_state(conn: &Connection, repo_id: i64, number: u64, s: &MyState) 
             s.last_action_at.map(|t| t.to_string()),
         ],
     )
-    .with_context(|| format!("writing forge-derived my_state for #{number}"))?;
+    .doing(format!("writing forge-derived my_state for #{number}"))?;
     Ok(())
 }
 
@@ -1299,7 +1473,7 @@ fn replace_threads(
                 t.my_last_comment_at.map(|x| x.to_string()),
             ],
         )
-        .with_context(|| format!("writing thread {} for #{number}", t.thread_id))?;
+        .doing(format!("writing thread {} for #{number}", t.thread_id))?;
     }
     Ok(())
 }
@@ -1326,7 +1500,7 @@ fn replace_reviewers(
                 r.at.to_string()
             ],
         )
-        .with_context(|| format!("writing reviewer {} for #{number}", r.login))?;
+        .doing(format!("writing reviewer {} for #{number}", r.login))?;
     }
     Ok(())
 }
@@ -1350,10 +1524,10 @@ fn replace_attention(
                 number as i64,
                 a.reason.discriminant(),
                 a.since.to_string(),
-                serde_json::to_string(&a.reason).context("serialising an attention reason")?,
+                serde_json::to_string(&a.reason).encoding("an attention reason")?,
             ],
         )
-        .with_context(|| {
+        .doing({
             format!(
                 "writing attention {} for #{number}",
                 a.reason.discriminant()

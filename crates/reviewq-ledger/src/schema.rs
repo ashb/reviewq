@@ -8,9 +8,10 @@
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
 use rusqlite::Connection;
-use rusqlite_migration::{M, Migrations};
+use rusqlite_migration::{M, MigrationDefinitionError, Migrations};
+
+use crate::{LedgerError, Result};
 
 /// The schema version this build expects — the number of migrations defined.
 pub const SCHEMA_VERSION: usize = 7;
@@ -300,9 +301,18 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 /// version past the last migration this build knows) is refused by
 /// `rusqlite_migration` rather than run against blindly.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
-    MIGRATIONS
-        .to_latest(conn)
-        .context("running ledger migrations")
+    MIGRATIONS.to_latest(conn).map_err(|err| match err {
+        // The one failure a user can act on, and the one that must never be
+        // retried: migrating down is not defined, so a database ahead of this
+        // build is left exactly as it is.
+        rusqlite_migration::Error::MigrationDefinition(
+            MigrationDefinitionError::DatabaseTooFarAhead,
+        ) => LedgerError::FromTheFuture,
+        other => LedgerError::Corrupt {
+            what: "schema this build can migrate".to_string(),
+            source: Box::new(other),
+        },
+    })
 }
 
 #[cfg(test)]

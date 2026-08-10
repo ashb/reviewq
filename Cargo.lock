@@ -2547,6 +2547,7 @@ dependencies = [
  "rusqlite_migration",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -2562,6 +2563,7 @@ dependencies = [
  "reviewq-core",
  "reviewq-forge",
  "reviewq-ledger",
+ "rusqlite",
  "tempfile",
  "toml",
  "tracing",

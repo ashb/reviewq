@@ -68,5 +68,5 @@ pub fn open_for_number(number: u64) -> Result<(Ledger, i64, PrShow)> {
 /// and the writes that follow belong to the same connection, and opening a second
 /// one to answer a question the first could have is pure cost.
 pub fn open() -> Result<Ledger> {
-    Ledger::open(&paths::database_file()?)
+    Ok(Ledger::open(&paths::database_file()?)?)
 }

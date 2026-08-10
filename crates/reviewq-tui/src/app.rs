@@ -32,7 +32,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
 use reviewq_app::sync::Refreshed;
-use reviewq_ledger::{Ledger, Located, PrShow, QueueItem, RepoKey};
+use reviewq_ledger::{Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey};
 use std::sync::mpsc;
 
 #[cfg(test)]
@@ -54,6 +54,24 @@ pub(crate) fn test_config() -> HeldConfig {
         )
         .expect("test config parses"),
     )
+}
+
+/// What to put in the header when refreshing a PR failed.
+///
+/// The two cases a reader can act on are named as themselves rather than left in
+/// the message: a ledger from a newer build needs reviewq upgraded, and a busy one
+/// needs nothing but patience. Everything else is reported as it arrives, since
+/// guessing at its shape would be worse than quoting it.
+fn failure_note(number: u64, err: &anyhow::Error) -> String {
+    match err.downcast_ref::<LedgerError>() {
+        Some(LedgerError::FromTheFuture) => {
+            "this ledger was written by a newer reviewq — upgrade to read it".to_string()
+        }
+        Some(LedgerError::Busy { .. }) => {
+            format!("#{number} is waiting on another reviewq's write — try again")
+        }
+        _ => format!("#{number} refresh failed: {err:#}"),
+    }
 }
 
 /// Refuse, in a test build, the paths that reach what the developer actually uses.
@@ -1195,7 +1213,7 @@ impl App {
             ),
             Ok(Refreshed::Gone) => format!("#{number} no longer exists on the forge"),
             Ok(Refreshed::Untracked) => format!("#{number} is not in the ledger"),
-            Err(err) => format!("#{number} refresh failed: {err:#}"),
+            Err(err) => failure_note(number, &err),
         });
         // It may have changed what is on the queue, and changes the selected
         // PR's detail either way.
@@ -1490,6 +1508,44 @@ pub(super) mod tests {
         assert!(!app.quit);
         assert_eq!(app.queue.len(), 1);
         assert!(app.detail.is_some());
+    }
+
+    #[test]
+    fn a_ledger_from_a_newer_reviewq_says_what_to_do_about_it() {
+        // The point of the ledger's errors being typed: this one needs the binary
+        // upgraded, and "refresh failed: running ledger migrations: …" does not
+        // say so.
+        let mut app = app();
+        app.deliver(70135, Err(LedgerError::FromTheFuture.into()));
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("newer reviewq"), "{status}");
+        assert!(status.contains("upgrade"), "{status}");
+    }
+
+    #[test]
+    fn a_busy_ledger_says_to_try_again_rather_than_quoting_sqlite() {
+        let mut app = app();
+        let busy = LedgerError::Busy {
+            source: rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5),
+                Some("database is locked".to_string()),
+            ),
+        };
+        app.deliver(70135, Err(busy.into()));
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("try again"), "{status}");
+        assert!(!status.contains("SQLITE"), "{status}");
+    }
+
+    #[test]
+    fn any_other_failure_is_quoted_as_it_arrived() {
+        let mut app = app();
+        app.deliver(70135, Err(anyhow::anyhow!("bad credentials")));
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("bad credentials"), "{status}");
     }
 
     #[test]
