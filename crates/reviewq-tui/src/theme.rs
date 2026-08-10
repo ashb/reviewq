@@ -250,20 +250,109 @@ fn readable(fg: Rgb, bg: Rgb, min: f64) -> Rgb {
     if contrast(fg, bg) >= min {
         return fg;
     }
-    let target = if luminance(bg) < 0.5 {
-        rgb(0xff, 0xff, 0xff)
-    } else {
-        rgb(0x00, 0x00, 0x00)
-    };
-    // 32 steps resolves finer than an 8-bit channel can express across the
-    // range, so the first passing step is effectively the least adjustment.
-    for step in 1..=32 {
-        let candidate = mix(fg, target, f64::from(step) / 32.0);
+    // Lightness only, in HSL — not a mix toward black or white.
+    //
+    // Mixing scales every channel by the same factor, which preserves the ratios
+    // between them and so the hue. It does not preserve *saturation*: HSL measures
+    // that against the distance to the nearest extreme, so dragging a colour
+    // toward black flattens it. Lifting for a dark background happened to be
+    // lossless — the accents are already light — but darkening for a light one
+    // took gold from 0.71 saturation to 0.26, which is the whole reason light mode
+    // looked like mud.
+    let hsl = to_hsl(fg);
+    let darken = luminance(bg) >= 0.5;
+    // 64 steps resolves finer than an 8-bit channel can express, so the first
+    // passing step is effectively the least adjustment that works.
+    for step in 1..=64 {
+        let t = f64::from(step) / 64.0;
+        let l = if darken {
+            hsl.l * (1.0 - t)
+        } else {
+            hsl.l + (1.0 - hsl.l) * t
+        };
+        let candidate = from_hsl(Hsl { l, ..hsl });
         if contrast(candidate, bg) >= min {
             return candidate;
         }
     }
-    target
+    // Nothing at this hue reaches the threshold, so fall back to the extreme.
+    if darken {
+        rgb(0x00, 0x00, 0x00)
+    } else {
+        rgb(0xff, 0xff, 0xff)
+    }
+}
+
+/// A colour as hue, saturation and lightness, which is the space an accent has to
+/// be adapted in: legibility is a lightness problem, and everything that makes the
+/// colour recognisable is in the other two.
+#[derive(Debug, Clone, Copy)]
+struct Hsl {
+    /// Degrees around the wheel, 0.0..360.0.
+    h: f64,
+    /// 0.0 grey, 1.0 fully saturated.
+    s: f64,
+    /// 0.0 black, 1.0 white.
+    l: f64,
+}
+
+fn to_hsl(c: Rgb) -> Hsl {
+    let (r, g, b) = (
+        f64::from(c.r) / 255.0,
+        f64::from(c.g) / 255.0,
+        f64::from(c.b) / 255.0,
+    );
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let span = max - min;
+    if span.abs() < f64::EPSILON {
+        // A grey has no hue to preserve, and stays a grey however it is moved.
+        return Hsl { h: 0.0, s: 0.0, l };
+    }
+    let s = if l < 0.5 {
+        span / (max + min)
+    } else {
+        span / (2.0 - max - min)
+    };
+    let h = if max == r {
+        60.0 * (((g - b) / span) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / span + 2.0)
+    } else {
+        60.0 * ((r - g) / span + 4.0)
+    };
+    Hsl {
+        h: if h < 0.0 { h + 360.0 } else { h },
+        s,
+        l,
+    }
+}
+
+fn from_hsl(hsl: Hsl) -> Rgb {
+    let Hsl { h, s, l } = hsl;
+    if s.abs() < f64::EPSILON {
+        let v = channel(l);
+        return rgb(v, v, v);
+    }
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let (r, g, b) = match h_prime as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    rgb(channel(r + m), channel(g + m), channel(b + m))
+}
+
+/// A 0.0..1.0 channel as the nearest byte, clamped.
+fn channel(v: f64) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 #[cfg(test)]
@@ -344,9 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn darkening_an_accent_for_white_keeps_its_hue() {
-        // Mixing toward black scales the channels, so the ratios between them —
-        // and so the hue — survive: a dull red is still a red.
+    fn adapting_an_accent_keeps_its_hue() {
         let t = Theme::new(Mode::Light);
         assert!(
             t.urgent.r > t.urgent.g && t.urgent.r > t.urgent.b,
@@ -403,5 +490,63 @@ mod tests {
     #[test]
     fn color_renders_for_ratatui() {
         assert_eq!(color(GREEN), Color::Rgb(0xa3, 0xbe, 0x8c));
+    }
+    /// HSL saturation, as the eye reads "how much colour is in this".
+    fn saturation(c: Rgb) -> f64 {
+        to_hsl(c).s
+    }
+
+    #[test]
+    fn adapting_an_accent_keeps_its_saturation() {
+        // The light palette's real defect. Darkening by mixing toward black
+        // preserved each hue and quietly drained it — gold arrived at 0.26
+        // saturation from 0.71, which is what "everything is unreadable mud" was.
+        // Moving lightness in HSL leaves the other two axes alone.
+        for (mode, bg) in [(Mode::Dark, DARK_BG), (Mode::Light, LIGHT_BG)] {
+            let t = Theme::new(mode);
+            for (name, adapted, base) in [
+                ("urgent", t.urgent, RED),
+                ("good", t.good, GREEN),
+                ("merged", t.merged, MAGENTA),
+                ("warn", t.warn, ORANGE),
+                ("key", t.key, GOLD),
+                ("focus", t.focus, TEAL),
+            ] {
+                let (was, now) = (saturation(base), saturation(adapted));
+                assert!(
+                    now >= was - 0.02,
+                    "{mode:?} {name} lost saturation: {was:.2} → {now:.2} ({})",
+                    hex(adapted)
+                );
+                assert!(contrast(adapted, bg) >= DIM_CONTRAST);
+            }
+        }
+    }
+
+    #[test]
+    fn hsl_round_trips_every_accent() {
+        for c in [RED, GREEN, BLUE, TEAL, GOLD, ORANGE, MAGENTA] {
+            let back = from_hsl(to_hsl(c));
+            // Within one rounding step per channel: the conversion is lossy only
+            // in the last bit, which no eye and no terminal can tell apart.
+            assert!(
+                back.r.abs_diff(c.r) <= 1 && back.g.abs_diff(c.g) <= 1 && back.b.abs_diff(c.b) <= 1,
+                "{} became {}",
+                hex(c),
+                hex(back)
+            );
+        }
+    }
+
+    #[test]
+    fn a_grey_has_no_hue_to_lose() {
+        let grey = rgb(0x80, 0x80, 0x80);
+        let hsl = to_hsl(grey);
+        assert_eq!(hsl.s, 0.0);
+        assert_eq!(from_hsl(hsl), grey);
+        // Darkened for white it stays a grey rather than acquiring a tint.
+        let darkened = readable(grey, LIGHT_BG, LIGHT_DIM_CONTRAST);
+        assert_eq!(darkened.r, darkened.g, "{}", hex(darkened));
+        assert_eq!(darkened.g, darkened.b, "{}", hex(darkened));
     }
 }
