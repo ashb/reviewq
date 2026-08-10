@@ -24,13 +24,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use crossterm::clipboard::CopyToClipboard;
-use crossterm::cursor::Hide;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode};
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -338,31 +335,8 @@ impl Hooks {
             review: Box::new(move |number| {
                 let handoff = reviewq_app::review::handoff_for(&for_review, number)?;
 
-                // Raw mode goes, the alternate screen stays.
-                //
-                // Leaving the alternate screen would drop the terminal back to
-                // the shell's scrollback for however long the review command
-                // takes to draw — seconds, for one that resolves a token first —
-                // and reviewq's own frame, notice and all, would vanish the
-                // instant you pressed the key. Staying put leaves the notice on
-                // screen until the command paints over it.
-                //
-                // The cost: a handoff command that only *prints* would write over
-                // that frame and have its output wiped when reviewq repaints. The
-                // configured default is a full-screen reviewer, so this trades in
-                // favour of the common case.
-                //
-                // The cursor stays hidden. Showing it would leave it blinking in
-                // the middle of reviewq's own frame — next to the notice — for as
-                // long as the command takes to draw. A full-screen command shows
-                // its own where it wants one.
-                //
-                // Mouse reporting goes with raw mode: the child asks for whatever
-                // it wants, and turns that off again when it exits, which would
-                // otherwise leave reviewq with no mouse for the rest of the
-                // session.
-                let _ = disable_raw_mode();
-                let _ = execute!(std::io::stdout(), DisableMouseCapture);
+                // Keeps the alternate screen — see `lend_terminal`.
+                crate::lend_terminal();
 
                 let ran = handoff
                     .command()
@@ -370,19 +344,8 @@ impl Hooks {
                     .with_context(|| format!("running {:?}", handoff.argv[0]));
 
                 // Taken back whatever happened, so a review command that dies
-                // doesn't leave the queue drawing onto a cooked terminal. The
-                // alternate screen is re-entered because a full-screen child
-                // leaves its own on the way out, which drops us to the primary
-                // one; for a child that never took it over this is a no-op.
-                // `Hide` again on the way back: the command may well have shown
-                // the cursor and not put it away.
-                let _ = enable_raw_mode();
-                let _ = execute!(
-                    std::io::stdout(),
-                    EnterAlternateScreen,
-                    EnableMouseCapture,
-                    Hide
-                );
+                // doesn't leave the queue drawing onto a cooked terminal.
+                crate::reclaim_terminal();
                 let status = ran?;
                 if !status.success() {
                     bail!(

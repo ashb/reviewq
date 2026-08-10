@@ -166,4 +166,11 @@ fn it_takes_the_terminal_over_and_gives_it_back() {
         seen.contains("\u{1b}[?1049h"),
         "never entered the alternate screen. Output:\n{seen:?}"
     );
+    // Mouse reporting is turned off too. `ratatui`'s own restore knows nothing
+    // about it, so this is the part that only reviewq's guard can get right — and
+    // a shell left reporting every movement is the worst of the three to escape.
+    assert!(
+        seen.contains("\u{1b}[?1003l") || seen.contains("\u{1b}[?1000l"),
+        "never turned mouse reporting off. Output:\n{seen:?}"
+    );
 }
