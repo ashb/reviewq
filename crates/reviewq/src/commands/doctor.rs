@@ -165,15 +165,18 @@ fn handoff_note(config: &config::Config, problems: &mut u32) -> String {
 
 /// Where a review of this repo runs.
 ///
-/// Nothing in a sync reads a working tree, so this is not required to load — but
-/// the handoff runs in it, and a review tool that publishes back needs it: wiff
-/// will not publish a review it mirrored by URL from outside the repository, and
-/// says so only *after* you have written the review. That's a bad moment to find
-/// out, so a repo without one counts as a problem here rather than being noted in
-/// passing.
+/// Nothing but a handoff reads a working tree, so neither a missing `path` nor one
+/// pointing somewhere that isn't there stops a command running — but both are
+/// reported here, because the alternative is finding out from the review tool
+/// after you have written the review. wiff, for one, will not publish a review it
+/// mirrored by URL from outside the repository it belongs to.
 fn checkout_note(repo: &config::RepoRef, problems: &mut u32) -> String {
     match &repo.path {
-        Some(path) => path.display().to_string(),
+        Some(path) if path.is_dir() => path.display().to_string(),
+        Some(path) => {
+            *problems += 1;
+            warn(&format!("{} is not a directory", path.display()))
+        }
         None => {
             *problems += 1;
             warn(
@@ -286,20 +289,37 @@ mod tests {
     }
 
     #[test]
-    fn a_repo_with_a_checkout_reports_the_path_and_is_no_problem() {
+    fn a_repo_with_a_checkout_that_is_there_reports_the_path_and_is_no_problem() {
+        let dir = tempfile::tempdir().expect("tempdir");
         let repo = config::RepoRef {
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),
-            path: Some(std::path::PathBuf::from("/home/ash/code/airflow")),
+            path: Some(dir.path().to_path_buf()),
         };
         let mut problems = 0;
 
         assert_eq!(
             checkout_note(&repo, &mut problems),
-            "/home/ash/code/airflow"
+            dir.path().display().to_string()
         );
         assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn a_checkout_that_has_moved_is_a_problem_here_rather_than_at_load() {
+        let repo = config::RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: Some(std::path::PathBuf::from("/nonexistent/airflow")),
+        };
+        let mut problems = 0;
+
+        let note = checkout_note(&repo, &mut problems);
+
+        assert!(note.contains("not a directory"), "{note}");
+        assert_eq!(problems, 1);
     }
 
     #[test]

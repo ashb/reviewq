@@ -63,27 +63,31 @@ impl Handoff {
 }
 
 /// Work out how to hand `number` off.
+///
+/// This is where a handoff's requirements are actually enforced, rather than at
+/// config load: a repo with no checkout, or one whose checkout has moved, is only
+/// a problem for a review — `sync`, `list` and `show` never look at a working
+/// tree, so they must not be refused over one.
 pub fn handoff_for(cfg: &Config, number: u64) -> Result<Handoff> {
     let repo = resolve_repo(cfg, number)?;
 
-    // The URL comes from the forge connection, so a PR can be handed off by URL
-    // from anywhere — a bare number only means something inside a checkout of
-    // the right repo.
-    let connected = cfg.forge_for(&repo.host).ok();
-    let url = connected
-        .as_ref()
-        .map(|forge| forge.web_url(&repo.owner, &repo.name, number))
-        .unwrap_or_default();
-    // Only here is the token wanted, and only best-effort: the handoff command
-    // does its own credential resolution if this comes back empty, so a locked
-    // credential helper must not stop a review.
-    let token = connected.as_ref().and_then(|forge| {
-        forge
-            .handoff_credentials()
-            .inspect_err(|err| tracing::warn!(%err, "no token to forward to the review command"))
-            .ok()
-            .map(|(var, value)| (var.to_string(), value.to_string()))
-    });
+    // Not `.ok()`: a host that resolves to no adapter used to leave `{url}` as an
+    // empty string, so the configured default became `wiff forge pull ""` and the
+    // review command reported reviewq's own config problem as a bad argument.
+    let forge = cfg
+        .forge_for(&repo.host)
+        .with_context(|| format!("no forge for {}, so #{number} has no URL", repo.host))?;
+    let url = forge.web_url(&repo.owner, &repo.name, number);
+    // The token is the one part that is best-effort: the handoff command does its
+    // own credential resolution when this comes back empty, so a locked credential
+    // helper must not stop a review.
+    let token = forge
+        .handoff_credentials()
+        .inspect_err(|err| tracing::warn!(%err, "no token to forward to the review command"))
+        .ok()
+        .map(|(var, value)| (var.to_string(), value.to_string()));
+
+    let cwd = checkout_for(&repo)?;
 
     let number = number.to_string();
     let argv: Vec<String> = cfg
@@ -93,11 +97,28 @@ pub fn handoff_for(cfg: &Config, number: u64) -> Result<Handoff> {
         .map(|arg| arg.replace("{number}", &number).replace("{url}", &url))
         .collect();
 
-    Ok(Handoff {
-        argv,
-        token,
-        cwd: repo.path.clone(),
-    })
+    Ok(Handoff { argv, token, cwd })
+}
+
+/// The directory to run the handoff in, checked here because here is where it
+/// matters.
+///
+/// A repo naming no checkout is not an error — a review tool that works purely
+/// from a URL needs none, and `doctor` is where that shortcoming is reported. A
+/// repo naming one that isn't there is: the alternative is handing the command a
+/// working directory that doesn't exist and letting it fail in its own words.
+fn checkout_for(repo: &RepoRef) -> Result<Option<PathBuf>> {
+    let Some(path) = repo.path.clone() else {
+        return Ok(None);
+    };
+    if !path.is_dir() {
+        bail!(
+            "{}'s configured checkout {} is not a directory",
+            repo.slug(),
+            path.display()
+        );
+    }
+    Ok(Some(path))
 }
 
 /// Which configured repo `number` belongs to.
@@ -186,6 +207,22 @@ mod tests {
 
         assert_eq!(handoff.cwd.as_deref(), Some(checkout.as_path()));
         assert_eq!(handoff.argv.last().map(String::as_str), Some("70135"));
+    }
+
+    #[test]
+    fn a_handoff_refuses_a_checkout_that_is_not_there() {
+        // Config load lets this through on purpose — `sync` and `list` don't care
+        // — so the handoff is where an unmounted volume or a moved checkout has to
+        // be caught, rather than handing the review command a directory that
+        // isn't.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gone = dir.path().join("moved-away");
+        let config = config_of(dir.path(), Some(&gone));
+
+        let err = handoff_for(&config, 70135).expect_err("no such checkout");
+
+        assert!(err.to_string().contains("not a directory"), "{err:#}");
+        assert!(err.to_string().contains("apache/airflow"), "{err:#}");
     }
 
     #[test]

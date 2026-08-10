@@ -353,14 +353,6 @@ fn load_from(path: &Path, create_if_missing: bool) -> Result<Loaded> {
     // means rather than as the literal path nobody has.
     config.expand_paths()?;
     config.validate(path)?;
-    for repo in config.repos_without_a_checkout() {
-        tracing::warn!(
-            repo = %repo,
-            "no `path` configured — a review of it runs wherever reviewq was \
-             started, so a review tool cannot publish back or resolve a bare PR \
-             number; see `reviewq doctor`"
-        );
-    }
 
     Ok(Loaded {
         config,
@@ -383,17 +375,27 @@ impl Config {
         Ok(())
     }
 
-    /// The configured repos with no local checkout named, as `owner/name`.
+    /// The configured repos whose local checkout is missing or not where it says,
+    /// as `owner/name` paired with what is wrong.
     ///
-    /// A warning rather than a validation error, and deliberately so: refusing to
-    /// load would take `sync`, `list` and `show` down with it, none of which ever
-    /// look at a working tree — and it would take `doctor` down too, which is the
-    /// one command whose job is to explain the problem. So every command says it
-    /// once, and `doctor` counts it against a clean bill of health.
-    pub fn repos_without_a_checkout(&self) -> Vec<String> {
+    /// Neither case fails a load. Nothing but a handoff reads a working tree, so
+    /// refusing to load would stop `sync`, `list` and `show` over something they
+    /// never touch — and stop `doctor`, whose job is to report it. `doctor`
+    /// counts these against a clean bill of health, and
+    /// [`handoff_for`](crate::review::handoff_for) is where a checkout that has
+    /// moved actually becomes an error.
+    pub fn checkout_problems(&self) -> Vec<(String, String)> {
         self.repos()
-            .filter(|repo| repo.path.is_none())
-            .map(RepoRef::slug)
+            .filter_map(|repo| {
+                let problem = match &repo.path {
+                    None => "no `path` configured".to_string(),
+                    Some(path) if !path.is_dir() => {
+                        format!("{} is not a directory", path.display())
+                    }
+                    Some(_) => return None,
+                };
+                Some((repo.slug(), problem))
+            })
             .collect()
     }
 
@@ -435,19 +437,6 @@ impl Config {
             resolve_host(&self.forges, &repo.host).with_context(|| {
                 format!("resolving the forge host for {} in {}", repo.slug(), at())
             })?;
-            // Checked here rather than when a review is handed off: a typo in a
-            // path is worth hearing about at load, not at the one moment you
-            // wanted to start reading a diff.
-            if let Some(checkout) = &repo.path
-                && !checkout.is_dir()
-            {
-                bail!(
-                    "repo {}'s path {} is not a directory (from {})",
-                    repo.slug(),
-                    checkout.display(),
-                    at()
-                );
-            }
         }
 
         // Compile every project's rules so glob errors and the
@@ -803,32 +792,6 @@ mod tests {
     }
 
     #[test]
-    fn a_checkout_path_that_is_not_a_directory_is_rejected_at_load() {
-        // A typo here would otherwise surface as a failed handoff, at the one
-        // moment you wanted to start reading a diff.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-                [identity]
-                login = "ashb"
-                [[project]]
-                repos = [{{ owner = "apache", name = "airflow", path = "{}" }}]
-                [[project.interest]]
-                labels = ["x"]
-                "#,
-                dir.path().join("nope").display()
-            ),
-        )
-        .expect("write config");
-
-        let err = load_from(&path, false).unwrap_err();
-        assert!(err.to_string().contains("is not a directory"), "{err:#}");
-    }
-
-    #[test]
     fn a_checkout_path_expands_a_leading_tilde() {
         // Nothing else would: config is read straight off disk, so a `~` typed by
         // a person has to be expanded here or looked for literally.
@@ -859,21 +822,41 @@ mod tests {
     }
 
     #[test]
-    fn a_repo_with_no_checkout_is_named_so_every_command_can_say_so() {
+    fn a_repo_with_no_checkout_is_reported_as_a_problem_to_be_named() {
         let config: Config = toml::from_str(&minimal("")).expect("parses");
-        assert_eq!(
-            config.repos_without_a_checkout(),
-            vec!["apache/airflow".to_string()]
+        let problems = config.checkout_problems();
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].0, "apache/airflow");
+        assert!(problems[0].1.contains("no `path`"), "{:?}", problems[0]);
+    }
+
+    #[test]
+    fn a_checkout_that_has_moved_is_a_problem_but_not_a_load_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("gone");
+        let mut config: Config = toml::from_str(&minimal("")).expect("parses");
+        config.projects[0].repos[0].path = Some(path.clone());
+
+        config
+            .validate(Path::new("cfg.toml"))
+            .expect("a missing checkout must not stop the config loading");
+
+        let problems = config.checkout_problems();
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].1.contains("not a directory"),
+            "{:?}",
+            problems[0]
         );
     }
 
     #[test]
-    fn a_repo_with_a_checkout_is_not_named() {
+    fn a_repo_with_a_checkout_that_is_there_has_no_problem() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config: Config = toml::from_str(&minimal("")).expect("parses");
         config.projects[0].repos[0].path = Some(dir.path().to_path_buf());
 
-        assert!(config.repos_without_a_checkout().is_empty());
+        assert!(config.checkout_problems().is_empty());
     }
 
     #[test]
