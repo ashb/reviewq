@@ -396,14 +396,13 @@ pub enum Refreshed {
 /// `sync <number>` command, the TUI's sync key, and `review`'s refresh after a
 /// handoff all come through here rather than repeating the resolution dance.
 ///
-/// Which repo the number belongs to comes from the ledger, not config, so a
-/// bare number resolves the same way it does for `show`/`done`/`mute`.
+/// Which repo the number belongs to comes from the ledger, not config, and
+/// through the same resolver `show`/`done`/`mute` use — so a number that is
+/// ambiguous across repos is refused here too rather than resolving to whichever
+/// repo happened to come back first.
 pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
     let db = paths::database_file()?;
-    let Some(key) = reviewq_ledger::repos_with_pr(&db, number)?
-        .into_iter()
-        .next()
-    else {
+    let Some(key) = crate::resolve::repo_with_pr(number)? else {
         return Ok(Refreshed::Untracked);
     };
 
