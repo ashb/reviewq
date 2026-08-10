@@ -5,9 +5,11 @@
 //! `--all` groups everything tracked by state; `--waiting` shows the tracked
 //! PRs that want nothing right now.
 //!
-//! Ledger-only, like every other read/write command: every repo the ledger
-//! knows about (whatever `sync` has actually populated, not what a possibly
-//! stale config currently lists) is queried and merged into one view.
+//! Every repo the ledger knows about is queried and merged into one view —
+//! whatever `sync` actually populated, rather than what config lists today. A
+//! valid config is still required to get this far, like every command: one that
+//! doesn't parse means the rules and identity behind the queue on screen are
+//! unknown.
 
 use std::process::ExitCode;
 

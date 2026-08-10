@@ -1,10 +1,14 @@
-//! Resolving a bare PR number to the repo it belongs to, without config.
+//! Resolving a bare PR number to the repo it belongs to, and opening the ledger
+//! it was resolved against.
 //!
-//! `done`/`snooze`/`mute`/`unmute`/`defer`/`undefer`/`track` are ledger-only —
-//! no config needed, so a broken or missing config never blocks them. With
-//! more than one repo now possible, a bare number alone no longer says which
-//! repo it's on; the ledger itself is asked instead, since every PR it knows
-//! about already carries its own repo identity.
+//! The *ledger* answers, not config: with more than one repo possible, a bare
+//! number alone doesn't say which repo it's on, and every PR the ledger knows
+//! already carries its own repo identity — which is also the identity a sync
+//! actually populated, rather than whatever config lists today.
+//!
+//! That is not the same as working without config. Every command loads and
+//! validates one before it runs (see `commands::dispatch`); these functions
+//! simply don't consult it.
 
 use anyhow::{Context, Result, bail};
 use reviewq_ledger::{Ledger, PrShow, RepoKey};
