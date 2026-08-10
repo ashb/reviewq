@@ -5,15 +5,15 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use jiff::Timestamp;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
-use reviewq_core::model::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};
+use reviewq_core::model::{PrState, ThreadState, Verdict};
 use reviewq_ledger::{PrShow, RepoKey};
 use serde::Serialize;
 
 use crate::cli::ShowArgs;
 use crate::commands::EXIT_EMPTY;
 use reviewq_app::config::{self, Loaded};
+use reviewq_app::present;
 
 pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
     let target = &args.target;
@@ -144,7 +144,7 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
     if !pr.base_ref.is_empty() {
         println!("  → {}", pr.base_ref);
     }
-    println!("  updated {}", fmt_ts(pr.updated_at));
+    println!("  updated {}", present::stamp(pr.updated_at));
 
     if !pr.labels.is_empty() || pr.milestone.is_some() {
         let mut bits = pr.labels.clone();
@@ -154,7 +154,7 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
         println!("  {}", bits.join(", "));
     }
 
-    let silenced = silenced_bits(&show.my_state);
+    let silenced = present::silenced(&show.my_state);
     if !silenced.is_empty() {
         println!(
             "  {}",
@@ -164,14 +164,40 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
         );
     }
 
-    for line in my_history_lines(pr, &show.my_state) {
-        println!("  {line}");
+    if let Some(sha) = &show.my_state.last_reviewed_sha {
+        let verdict = show
+            .my_state
+            .last_verdict
+            .map(verdict_word)
+            .unwrap_or_else(|| "no verdict".to_string());
+        let at = show.my_state.last_action_at.map_or_else(
+            || "an unknown time".to_string(),
+            |at| format!("at {}", present::stamp(at)),
+        );
+        println!("  reviewed {} → {verdict}, {at}", present::short_sha(sha));
+    }
+    if let Some(note) = present::done_note(pr, &show.my_state) {
+        println!(
+            "  {}",
+            if note.superseded {
+                note.text
+                    .if_supports_color(Stdout, |s| s.yellow())
+                    .to_string()
+            } else {
+                note.text
+            }
+        );
     }
 
     if !show.reviewers.is_empty() {
         println!("  reviewers:");
         for r in &show.reviewers {
-            println!("    {}", reviewer_line(r));
+            println!(
+                "    {} @{} {}",
+                verdict_word(r.verdict),
+                r.login,
+                present::stamp(r.at)
+            );
         }
     }
 
@@ -192,13 +218,10 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
     }
 
     if !show.threads.is_empty() {
-        let owned = show.threads.iter().filter(|t| t.i_own).count();
-        let resolved = show.threads.iter().filter(|t| t.is_resolved).count();
+        let counts = present::thread_counts(&show.threads);
         println!(
             "  threads: {} ({} you own, {} resolved)",
-            show.threads.len(),
-            owned,
-            resolved,
+            counts.total, counts.owned, counts.resolved,
         );
         for t in show.threads.iter().filter(|t| !t.is_resolved) {
             println!("    unresolved: {}", thread_line(t));
@@ -206,64 +229,12 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
     }
 }
 
-/// Local state a sync never surfaces, so nothing else would tell you a PR
-/// looks quiet only because it's muted, snoozed or deferred.
-fn silenced_bits(my: &MyState) -> Vec<String> {
-    let mut bits = Vec::new();
-    if my.muted {
-        bits.push("muted".to_string());
-    }
-    if let Some(until) = my.snoozed_until {
-        bits.push(format!("snoozed until {}", fmt_ts(until)));
-    }
-    if let Some(at) = my.deferred_at {
-        bits.push(format!("deferred since {}", fmt_ts(at)));
-    }
-    bits
-}
-
-/// My own review/done history — absent entirely for a PR I've never acted on.
-fn my_history_lines(pr: &PrSnapshot, my: &MyState) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(sha) = &my.last_reviewed_sha {
-        let verdict = my
-            .last_verdict
-            .map(verdict_word)
-            .unwrap_or_else(|| "no verdict".to_string());
-        let at = my
-            .last_action_at
-            .map(fmt_ts)
-            .unwrap_or_else(|| "unknown time".to_string());
-        lines.push(format!("reviewed {} → {verdict}, {at}", short_sha(sha)));
-    }
-    if let Some(sha) = &my.done_sha {
-        let at = my
-            .done_at
-            .map(fmt_ts)
-            .unwrap_or_else(|| "unknown time".to_string());
-        let stale = if sha != &pr.head_sha {
-            format!(
-                " — {}",
-                "superseded by new commits since".if_supports_color(Stdout, |s| s.yellow())
-            )
-        } else {
-            String::new()
-        };
-        lines.push(format!("done at {} on {at}{stale}", short_sha(sha)));
-    }
-    lines
-}
-
-fn reviewer_line(r: &ReviewerVerdict) -> String {
-    format!("{} @{} {}", verdict_word(r.verdict), r.login, fmt_ts(r.at))
-}
-
+/// One thread's most recent activity, with mine marked.
 fn thread_line(t: &ThreadState) -> String {
     let who = t.last_comment_author.as_deref().unwrap_or("someone");
     let at = t
         .last_comment_at
-        .map(fmt_ts)
-        .unwrap_or_else(|| "unknown time".to_string());
+        .map_or_else(|| "an unknown time".to_string(), present::stamp);
     let owned = if t.i_own {
         format!(" {}", "(you own)".if_supports_color(Stdout, |s| s.dimmed()))
     } else {
@@ -300,14 +271,6 @@ fn verdict_word(v: Verdict) -> String {
         Verdict::ChangesRequested => format!("{}", s.if_supports_color(Stdout, |s| s.red())),
         Verdict::Commented => format!("{}", s.if_supports_color(Stdout, |s| s.dimmed())),
     }
-}
-
-fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(7)]
-}
-
-fn fmt_ts(ts: Timestamp) -> String {
-    ts.round(jiff::Unit::Second).unwrap_or(ts).to_string()
 }
 
 #[derive(Serialize)]
@@ -421,6 +384,8 @@ fn json<'a>(show: &'a PrShow, url: Option<&'a str>) -> ShowJson<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::Timestamp;
+    use reviewq_core::model::{MyState, PrSnapshot};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -442,65 +407,6 @@ mod tests {
             files: None,
             files_truncated: false,
         }
-    }
-
-    #[test]
-    fn silenced_bits_is_empty_when_nothing_is_silenced() {
-        assert!(silenced_bits(&MyState::default()).is_empty());
-    }
-
-    #[test]
-    fn silenced_bits_reports_every_active_silencer() {
-        let mine = MyState {
-            muted: true,
-            snoozed_until: Some(ts("2026-08-10T00:00:00Z")),
-            deferred_at: Some(ts("2026-08-05T09:00:00Z")),
-            ..Default::default()
-        };
-        let bits = silenced_bits(&mine);
-        assert_eq!(
-            bits,
-            vec![
-                "muted".to_string(),
-                "snoozed until 2026-08-10T00:00:00Z".to_string(),
-                "deferred since 2026-08-05T09:00:00Z".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn my_history_lines_is_empty_with_no_prior_action() {
-        assert!(my_history_lines(&pr(), &MyState::default()).is_empty());
-    }
-
-    #[test]
-    fn my_history_lines_flags_a_done_superseded_by_new_commits() {
-        let mine = MyState {
-            done_sha: Some("head0000".into()),
-            done_at: Some(ts("2026-08-05T10:00:00Z")),
-            ..Default::default()
-        };
-        let mut newer = pr();
-        newer.head_sha = "head1111".into();
-
-        assert!(my_history_lines(&newer, &mine)[0].contains("superseded by new commits"));
-        assert!(!my_history_lines(&pr(), &mine)[0].contains("superseded"));
-    }
-
-    #[test]
-    fn reviewer_line_names_the_verdict_reviewer_and_time() {
-        let r = ReviewerVerdict {
-            login: "kaxil".into(),
-            verdict: reviewq_core::model::Verdict::Approved,
-            at: ts("2026-08-03T09:00:00Z"),
-        };
-        assert_eq!(reviewer_line(&r), "APPROVED @kaxil 2026-08-03T09:00:00Z");
-    }
-
-    #[test]
-    fn short_sha_truncates_to_seven_characters() {
-        assert_eq!(short_sha("0123456789abcdef"), "0123456");
-        assert_eq!(short_sha("abc"), "abc");
     }
 
     #[test]

@@ -4,12 +4,12 @@
 //! changed in one place. Nor does anything set a background — see the module
 //! docs on [`crate::theme`] for why reviewq sits on the terminal's own.
 
-use jiff::{Timestamp, Unit};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
+use reviewq_app::present;
 use reviewq_core::model::{PrState, Verdict};
 use reviewq_ledger::{Located, QueueItem, RepoKey};
 
@@ -243,7 +243,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         ]),
         Line::from(vec![
             Span::styled(
-                format!("updated {}", stamp(pr.updated_at)),
+                format!("updated {}", present::stamp(pr.updated_at)),
                 Style::default().fg(color(t.dim)),
             ),
             // Which branch the change is aimed at, where it is known — a row
@@ -267,16 +267,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         )));
     }
 
-    let mut silenced = Vec::new();
-    if show.my_state.muted {
-        silenced.push("muted".to_string());
-    }
-    if let Some(until) = show.my_state.snoozed_until {
-        silenced.push(format!("snoozed until {}", stamp(until)));
-    }
-    if let Some(at) = show.my_state.deferred_at {
-        silenced.push(format!("deferred since {}", stamp(at)));
-    }
+    let silenced = present::silenced(&show.my_state);
     if !silenced.is_empty() {
         lines.push(Line::from(Span::styled(
             silenced.join(", "),
@@ -284,16 +275,11 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         )));
     }
 
-    if let Some(sha) = &show.my_state.done_sha {
-        let superseded = sha != &pr.head_sha;
-        let note = if superseded {
-            " — superseded by new commits"
-        } else {
-            ""
-        };
+    // Wording shared with `show`; only the colour is this frontend's.
+    if let Some(note) = present::done_note(pr, &show.my_state) {
         lines.push(Line::from(Span::styled(
-            format!("done at {}{note}", short_sha(sha)),
-            Style::default().fg(color(if superseded { t.warn } else { t.dim })),
+            note.text,
+            Style::default().fg(color(if note.superseded { t.warn } else { t.dim })),
         )));
     }
 
@@ -333,14 +319,13 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     }
 
     if !show.threads.is_empty() {
-        let owned = show.threads.iter().filter(|x| x.i_own).count();
-        let unresolved = show.threads.iter().filter(|x| !x.is_resolved).count();
+        let counts = present::thread_counts(&show.threads);
         lines.push(Line::from(""));
         lines.push(section("Threads", t));
         lines.push(Line::from(Span::styled(
             format!(
-                "  {} total, {unresolved} unresolved, {owned} you own",
-                show.threads.len()
+                "  {} total, {} you own, {} resolved",
+                counts.total, counts.owned, counts.resolved
             ),
             Style::default().fg(color(t.dim)),
         )));
@@ -781,14 +766,6 @@ fn verdict_colour(v: Verdict, t: &Theme) -> crate::theme::Rgb {
         Verdict::ChangesRequested => t.bad,
         Verdict::Commented => t.dim,
     }
-}
-
-fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(7)]
-}
-
-fn stamp(ts: Timestamp) -> String {
-    ts.round(Unit::Second).unwrap_or(ts).to_string()
 }
 
 #[cfg(test)]
@@ -1354,12 +1331,6 @@ Adds a `deferrable` flag to `S3KeySensor`.
     fn a_number_label_names_its_repo_only_when_there_is_more_than_one() {
         assert_eq!(number_label(false, &repo(), 42), "#42");
         assert_eq!(number_label(true, &repo(), 42), "apache/airflow#42");
-    }
-
-    #[test]
-    fn short_sha_truncates_and_tolerates_a_short_input() {
-        assert_eq!(short_sha("0123456789abcdef"), "0123456");
-        assert_eq!(short_sha("abc"), "abc");
     }
 
     #[test]
