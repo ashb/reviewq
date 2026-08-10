@@ -75,6 +75,18 @@ const TEXT_CONTRAST: f64 = 4.5;
 /// text: secondary text is allowed to recede, but not to become unreadable.
 const DIM_CONTRAST: f64 = 3.0;
 
+/// What the same two thresholds become on a light background.
+///
+/// The accents are a *dark* palette's — base16-ocean — so on white they start
+/// nowhere near legible and `readable` only lifts them as far as it is told. At
+/// the dark thresholds the result technically passed and looked washed out: the
+/// focus accent, which is the selected pane's border and the selection marker,
+/// came out at 3.04:1, and every other accent sat just over 4.5. The same ratio is
+/// not the same legibility in both directions, so the light palette asks for more.
+const LIGHT_TEXT_CONTRAST: f64 = 7.0;
+/// See [`LIGHT_TEXT_CONTRAST`].
+const LIGHT_DIM_CONTRAST: f64 = 4.5;
+
 /// The dark palette's background: painted, and the reference every accent in that
 /// palette is made legible against.
 const DARK_BG: Rgb = rgb(0x1e, 0x1e, 0x1e);
@@ -168,18 +180,22 @@ impl Theme {
         } else {
             rgb(0x00, 0x00, 0x00)
         };
+        let (text_min, dim_min) = match mode {
+            Mode::Dark => (TEXT_CONTRAST, DIM_CONTRAST),
+            Mode::Light => (LIGHT_TEXT_CONTRAST, LIGHT_DIM_CONTRAST),
+        };
         Self {
-            text: readable(opposite, bg, TEXT_CONTRAST),
-            dim: readable(mix(bg, opposite, 0.55), bg, DIM_CONTRAST),
-            border: readable(mix(bg, BLUE, 0.5), bg, DIM_CONTRAST),
-            focus: readable(TEAL, bg, DIM_CONTRAST),
-            urgent: readable(RED, bg, TEXT_CONTRAST),
-            good: readable(GREEN, bg, TEXT_CONTRAST),
-            bad: readable(RED, bg, TEXT_CONTRAST),
-            merged: readable(MAGENTA, bg, TEXT_CONTRAST),
-            quiet: readable(BLUE, bg, DIM_CONTRAST),
-            warn: readable(ORANGE, bg, TEXT_CONTRAST),
-            key: readable(GOLD, bg, TEXT_CONTRAST),
+            text: readable(opposite, bg, text_min),
+            dim: readable(mix(bg, opposite, 0.55), bg, dim_min),
+            border: readable(mix(bg, BLUE, 0.5), bg, dim_min),
+            focus: readable(TEAL, bg, dim_min),
+            urgent: readable(RED, bg, text_min),
+            good: readable(GREEN, bg, text_min),
+            bad: readable(RED, bg, text_min),
+            merged: readable(MAGENTA, bg, text_min),
+            quiet: readable(BLUE, bg, dim_min),
+            warn: readable(ORANGE, bg, text_min),
+            key: readable(GOLD, bg, text_min),
             bg,
             mode,
         }
@@ -289,20 +305,59 @@ mod tests {
 
     #[test]
     fn every_light_accent_clears_its_threshold() {
+        // The light thresholds, which are higher — see `LIGHT_TEXT_CONTRAST`. Every
+        // field is listed, `focus` and `border` included: they were the ones that
+        // technically passed at the dark thresholds and were unreadable in
+        // practice.
         let t = Theme::new(Mode::Light);
         for (name, c, min) in [
-            ("text", t.text, TEXT_CONTRAST),
-            ("urgent", t.urgent, TEXT_CONTRAST),
-            ("good", t.good, TEXT_CONTRAST),
-            ("merged", t.merged, TEXT_CONTRAST),
-            ("warn", t.warn, TEXT_CONTRAST),
-            ("key", t.key, TEXT_CONTRAST),
-            ("dim", t.dim, DIM_CONTRAST),
-            ("quiet", t.quiet, DIM_CONTRAST),
+            ("text", t.text, LIGHT_TEXT_CONTRAST),
+            ("urgent", t.urgent, LIGHT_TEXT_CONTRAST),
+            ("good", t.good, LIGHT_TEXT_CONTRAST),
+            ("bad", t.bad, LIGHT_TEXT_CONTRAST),
+            ("merged", t.merged, LIGHT_TEXT_CONTRAST),
+            ("warn", t.warn, LIGHT_TEXT_CONTRAST),
+            ("key", t.key, LIGHT_TEXT_CONTRAST),
+            ("dim", t.dim, LIGHT_DIM_CONTRAST),
+            ("border", t.border, LIGHT_DIM_CONTRAST),
+            ("focus", t.focus, LIGHT_DIM_CONTRAST),
+            ("quiet", t.quiet, LIGHT_DIM_CONTRAST),
         ] {
             let got = contrast(c, LIGHT_BG);
             assert!(got >= min, "{name} at {} is only {got:.2}:1", hex(c));
         }
+    }
+
+    #[test]
+    fn no_light_accent_is_left_at_the_dark_thresholds() {
+        // What the complaint was: at 3:1 the focus accent — the selected pane's
+        // border and the selection marker — was 3.04:1 on white, which passes a
+        // guideline and cannot be seen.
+        let t = Theme::new(Mode::Light);
+        for (name, c) in [("border", t.border), ("focus", t.focus), ("quiet", t.quiet)] {
+            let got = contrast(c, LIGHT_BG);
+            assert!(
+                got > DIM_CONTRAST + 1.0,
+                "{name} is {got:.2}:1, barely over the dark floor"
+            );
+        }
+    }
+
+    #[test]
+    fn darkening_an_accent_for_white_keeps_its_hue() {
+        // Mixing toward black scales the channels, so the ratios between them —
+        // and so the hue — survive: a dull red is still a red.
+        let t = Theme::new(Mode::Light);
+        assert!(
+            t.urgent.r > t.urgent.g && t.urgent.r > t.urgent.b,
+            "{}",
+            hex(t.urgent)
+        );
+        assert!(
+            t.good.g > t.good.r && t.good.g > t.good.b,
+            "{}",
+            hex(t.good)
+        );
     }
 
     #[test]
