@@ -10,6 +10,9 @@
 //! the frontend decides whether that becomes a progress line, a status bar, or
 //! nothing at all.
 
+#[cfg(test)]
+mod fake_forge;
+
 pub mod actions;
 pub mod config;
 pub mod paths;

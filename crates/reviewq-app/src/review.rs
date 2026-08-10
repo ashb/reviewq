@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use reviewq_forge::Forge;
 
 use crate::config::{Config, RepoRef};
 
@@ -69,13 +70,27 @@ impl Handoff {
 /// tree, so they must not be refused over one.
 pub fn handoff_for(cfg: &Config, number: u64) -> Result<Handoff> {
     let repo = resolve_repo(cfg, number)?;
-
     // Not `.ok()`: a host that resolves to no adapter used to leave `{url}` as an
     // empty string, so the configured default became `wiff forge pull ""` and the
     // review command reported reviewq's own config problem as a bad argument.
     let forge = cfg
         .forge_for(&repo.host)
         .with_context(|| format!("no forge for {}, so #{number} has no URL", repo.host))?;
+    handoff_with(cfg, forge.as_ref(), &repo, number)
+}
+
+/// [`handoff_for`], given the repo and a forge already connected to its host.
+///
+/// Split out so a test can supply the forge. Building a real one is harmless, but
+/// asking it for credentials is not: resolution runs whatever the host configures,
+/// which may be a helper that blocks on an interactive unlock — `cargo test` must
+/// not be able to make something prompt.
+pub fn handoff_with(
+    cfg: &Config,
+    forge: &dyn Forge,
+    repo: &RepoRef,
+    number: u64,
+) -> Result<Handoff> {
     let url = forge.web_url(&repo.owner, &repo.name, number);
     // The token is the one part that is best-effort: the handoff command does its
     // own credential resolution when this comes back empty, so a locked credential
@@ -86,7 +101,7 @@ pub fn handoff_for(cfg: &Config, number: u64) -> Result<Handoff> {
         .ok()
         .map(|(var, value)| (var.to_string(), value.to_string()));
 
-    let cwd = checkout_for(&repo)?;
+    let cwd = checkout_for(repo)?;
 
     let number = number.to_string();
     let argv: Vec<String> = cfg
@@ -155,12 +170,27 @@ fn resolve_repo(config: &Config, number: u64) -> Result<RepoRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fake_forge::FakeForge;
     use std::ffi::OsStr;
     use std::path::Path;
 
+    /// The repo the test configs below name.
+    fn repo(checkout: Option<&Path>) -> RepoRef {
+        RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: checkout.map(Path::to_path_buf),
+        }
+    }
+
+    /// A forge that answers without resolving anything, so no test can prompt.
+    fn forge() -> FakeForge {
+        FakeForge::new(vec![])
+    }
+
     /// A config naming one repo, optionally with a checkout, and a review command
-    /// that substitutes the number — so what comes back is the same whether or not
-    /// a forge connection could be made in this environment.
+    /// that substitutes the number.
     fn config_of(dir: &Path, checkout: Option<&Path>) -> Config {
         let path = config_file(dir, checkout);
         crate::config::load(Some(&path)).expect("loads").config
@@ -202,7 +232,8 @@ mod tests {
         std::fs::create_dir(&checkout).expect("checkout");
         let config = config_of(dir.path(), Some(&checkout));
 
-        let handoff = handoff_for(&config, 70135).expect("handoff");
+        let handoff =
+            handoff_with(&config, &forge(), &repo(Some(&checkout)), 70135).expect("handoff");
 
         assert_eq!(handoff.cwd.as_deref(), Some(checkout.as_path()));
         assert_eq!(handoff.argv.last().map(String::as_str), Some("70135"));
@@ -218,7 +249,8 @@ mod tests {
         let gone = dir.path().join("moved-away");
         let config = config_of(dir.path(), Some(&gone));
 
-        let err = handoff_for(&config, 70135).expect_err("no such checkout");
+        let err = handoff_with(&config, &forge(), &repo(Some(&gone)), 70135)
+            .expect_err("no such checkout");
 
         assert!(err.to_string().contains("not a directory"), "{err:#}");
         assert!(err.to_string().contains("apache/airflow"), "{err:#}");
@@ -229,9 +261,48 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = config_of(dir.path(), None);
 
-        let handoff = handoff_for(&config, 70135).expect("handoff");
+        let handoff = handoff_with(&config, &forge(), &repo(None), 70135).expect("handoff");
 
         assert_eq!(handoff.cwd, None);
+    }
+
+    #[test]
+    fn working_out_a_handoff_asks_the_forge_it_was_given_and_resolves_nothing() {
+        // The forge is injected precisely so this test cannot reach a credential
+        // helper: the token here is the fake's, and the config's `token_env` names
+        // a variable nothing sets — if resolution were happening, it would fail.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            labels = ["x"]
+            [handoff]
+            review_command = ["wiff", "forge", "pull", "{url}"]
+            [forge."github.com"]
+            token_env = "REVIEWQ_TEST_ABSENT_TOKEN"
+            "#,
+        )
+        .expect("write config");
+        let config = crate::config::load(Some(&path)).expect("loads").config;
+
+        let handoff = handoff_with(&config, &forge(), &repo(None), 70135).expect("handoff");
+
+        assert_eq!(
+            handoff.argv.last().map(String::as_str),
+            Some("https://github.com/apache/airflow/pull/70135"),
+            "the URL comes from the forge that was handed in"
+        );
+        assert_eq!(
+            handoff.token,
+            Some(("GITHUB_TOKEN".to_string(), "fake".to_string())),
+            "and so does the token"
+        );
     }
 
     #[test]
