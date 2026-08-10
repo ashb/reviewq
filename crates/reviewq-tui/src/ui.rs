@@ -915,37 +915,31 @@ Adds a `deferrable` flag to `S3KeySensor`.
             .collect()
     }
 
+    /// Render at `width`x`height` as one string, for a snapshot.
+    ///
+    /// A whole screen rather than substrings: a layout change then arrives as a
+    /// reviewed diff, instead of as an assertion nobody updated because it still
+    /// happened to match somewhere else on the grid.
+    fn screen(app: &mut App, width: u16, height: u16) -> String {
+        render(app, width, height).join("\n")
+    }
+
     #[test]
     fn the_queue_and_the_selected_prs_detail_both_render() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let rows = render(&mut app, 100, 22);
-        let screen = rows.join("\n");
 
-        // Header, both queue rows, and the selection marker on the first.
-        assert!(screen.contains("2 on the queue"), "{screen}");
-        assert!(screen.contains("▸ #70135"), "{screen}");
-        assert!(screen.contains("#70201"), "{screen}");
-        // The urgent PR sorted above the less urgent one.
+        // The urgent PR above the less urgent one. Ordering is the one thing a
+        // snapshot states but does not *assert*, since accepting a reordered diff
+        // is easy to do without noticing.
         let row_of = |needle: &str| {
             rows.iter()
                 .position(|r| r.contains(needle))
                 .unwrap_or_else(|| panic!("{needle} not on screen"))
         };
         assert!(row_of("#70135") < row_of("#70201"));
-        // Detail pane followed the selection.
-        assert!(
-            screen.contains("Add deferrable mode to S3KeySensor"),
-            "{screen}"
-        );
-        assert!(screen.contains("Attention"), "{screen}");
-        // The reason string is whatever reviewq-core renders — asserted as it
-        // actually reads, so a change to that wording surfaces here. No
-        // `mention:` prefix: the discriminant isn't repeated into the evidence.
-        assert!(screen.contains("@kaxil mentioned you"), "{screen}");
-        assert!(!screen.contains("mention:"), "{screen}");
-        assert!(screen.contains("p1"), "{screen}");
-        // Footer bindings.
-        assert!(screen.contains("quit"), "{screen}");
+
+        insta::assert_snapshot!(rows.join("\n"));
     }
 
     #[test]
@@ -957,9 +951,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
         queue_only(&ledger, repo_id, &backport);
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
-        let screen = render(&mut app, 100, 22).join("\n");
-
-        assert!(screen.contains("→ v3-1-test"), "{screen}");
+        insta::assert_snapshot!(screen(&mut app, 100, 22));
     }
 
     #[test]
@@ -971,12 +963,15 @@ Adds a `deferrable` flag to `S3KeySensor`.
         queue_only(&ledger, repo_id, &unknown);
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
-        let screen = render(&mut app, 100, 22).join("\n");
+        let shown = screen(&mut app, 100, 22);
 
+        // Asserted as well as snapshotted: an arrow appearing here would be a
+        // diff easy to accept, and it would be pointing at nothing.
         assert!(
-            !screen.contains('→'),
-            "an arrow pointing at nothing:\n{screen}"
+            !shown.contains('→'),
+            "an arrow pointing at nothing:\n{shown}"
         );
+        insta::assert_snapshot!(shown);
     }
 
     #[test]
@@ -985,9 +980,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
         ledger.ensure_repo(&repo()).expect("repo");
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
-        let screen = render(&mut app, 80, 12).join("\n");
-        assert!(screen.contains("Nothing on the queue"), "{screen}");
-        assert!(screen.contains("Select a PR"), "{screen}");
+        insta::assert_snapshot!(screen(&mut app, 80, 12));
     }
 
     #[test]
@@ -1002,22 +995,19 @@ Adds a `deferrable` flag to `S3KeySensor`.
     #[test]
     fn the_description_renders_as_markdown_with_template_comments_stripped() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
-        let screen = render(&mut app, 100, 30).join("\n");
+        let shown = screen(&mut app, 100, 30);
 
-        assert!(screen.contains("Description"), "{screen}");
-        assert!(screen.contains("What this does"), "{screen}");
-        assert!(screen.contains("Tests added"), "{screen}");
-        // The commented template instructions never reach the screen, nor does
-        // the comment syntax itself.
-        assert!(!screen.contains("Delete this section"), "{screen}");
-        assert!(!screen.contains("<!--"), "{screen}");
-        // Inline code loses its backticks — the styling carries it instead.
-        assert!(screen.contains("deferrable flag"), "{screen}");
-        assert!(!screen.contains('`'), "{screen}");
-        // tui-markdown keeps a heading's `##` and styles the line rather than
-        // dropping the marker. Pinned because it's a visible choice, not
-        // because it's the only defensible one.
-        assert!(screen.contains("## What this does"), "{screen}");
+        // Kept as assertions rather than left to the snapshot: each is a thing
+        // that must *not* appear, and a snapshot gaining one is a diff somebody
+        // could accept without reading.
+        assert!(!shown.contains("Delete this section"), "{shown}");
+        assert!(!shown.contains("<!--"), "{shown}");
+        assert!(
+            !shown.contains('`'),
+            "inline code keeps no backticks:\n{shown}"
+        );
+
+        insta::assert_snapshot!(shown);
     }
 
     #[test]
@@ -1053,9 +1043,11 @@ Adds a `deferrable` flag to `S3KeySensor`.
             .expect_applied();
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
-        let screen = render(&mut app, 90, 16).join("\n");
-        assert!(screen.contains("No body yet"), "{screen}");
-        assert!(!screen.contains("Description"), "{screen}");
+        let shown = screen(&mut app, 90, 16);
+
+        // The section heading must be absent, not merely absent from the snapshot.
+        assert!(!shown.contains("Description"), "{shown}");
+        insta::assert_snapshot!(shown);
     }
 
     #[test]
@@ -1151,35 +1143,27 @@ Adds a `deferrable` flag to `S3KeySensor`.
         // next test's business.
         let screen = render(&mut app, 100, 40).join("\n");
 
-        assert!(screen.contains("Keys"), "{screen}");
-        for group in [
-            "Navigate",
-            "View",
-            "Act on the PR",
-            "Forge",
-            "Session",
-            "Mouse",
-        ] {
-            assert!(screen.contains(group), "missing group {group}:\n{screen}");
+        // Every binding the table describes reaches the reference — derived from
+        // the table rather than listed here, so a new key with no entry fails
+        // instead of quietly missing from a snapshot somebody accepted.
+        for binding in keys::described() {
+            if binding.what.is_empty() {
+                continue; // folded into the row above, by design
+            }
+            assert!(
+                screen.contains(binding.what),
+                "binding {:?} is missing from the reference:\n{screen}",
+                binding.what
+            );
         }
-        // Including the ones the footer no longer has room for.
-        for what in [
-            "page down",
-            "page up",
-            "first",
-            "last",
-            "switch pane",
-            "mute, or unmute",
-            "defer to the bottom",
-            "refresh from the forge",
-            "open it in your browser",
-            "copy its URL",
-            "quit",
-            "select the row, or focus the pane",
-        ] {
-            assert!(screen.contains(what), "missing binding {what}:\n{screen}");
+        // The mouse gestures are not bindings, so the loop above cannot cover
+        // them, and neither is the hint at the bottom.
+        for what in MOUSE_GESTURES.iter().map(|(_, what)| *what) {
+            assert!(screen.contains(what), "missing gesture {what}:\n{screen}");
         }
         assert!(screen.contains("close"), "{screen}");
+
+        insta::assert_snapshot!(screen);
     }
 
     #[test]

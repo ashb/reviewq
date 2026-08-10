@@ -1,0 +1,26 @@
+---
+source: crates/reviewq-tui/src/ui.rs
+expression: "screen(&mut app, 100, 22)"
+---
+reviewq  1 on the queue
+╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
+│ ▸ #70135  @kaxil mentioned you  Fix the t ││ Fix the thing on 3.1                                │
+│                                           ││ OPEN · @potiuk · interest: label x                  │
+│                                           ││ updated 2026-08-10T09:00:00Z · → v3-1-test          │
+│                                           ││                                                     │
+│                                           ││ Attention                                           │
+│                                           ││   p1  @kaxil mentioned you                          │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+│                                           ││                                                     │
+╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit

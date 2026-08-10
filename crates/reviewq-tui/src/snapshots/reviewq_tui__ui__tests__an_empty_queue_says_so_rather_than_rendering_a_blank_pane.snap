@@ -1,0 +1,16 @@
+---
+source: crates/reviewq-tui/src/ui.rs
+expression: "screen(&mut app, 80, 12)"
+---
+reviewq  0 on the queue
+╭ Queue ───────────────────────────╮╭ Detail ──────────────────────────────────╮
+│ Nothing on the queue.            ││ Select a PR to see its detail.           │
+│                                  ││                                          │
+│                                  ││                                          │
+│                                  ││                                          │
+│                                  ││                                          │
+│                                  ││                                          │
+│                                  ││                                          │
+│                                  ││                                          │
+╰──────────────────────────────────╯╰──────────────────────────────────────────╯
+jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit

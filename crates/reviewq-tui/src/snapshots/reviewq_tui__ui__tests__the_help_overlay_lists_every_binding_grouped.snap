@@ -1,0 +1,44 @@
+---
+source: crates/reviewq-tui/src/ui.rs
+expression: screen
+---
+reviewq  2 on the queue
+╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
+│ ▸ #70135  @kaxil mentioned you  Add defer ││ Add deferrable mode to S3KeySensor                  │
+│   #70201  matches╭ Keys ─────────────────────────────────────────────────────╮area:async         │
+│                  │ Navigate                                                  │main               │
+│                  │   ↑↓ / jk     move                                        │                   │
+│                  │   PgDn / ^D   page down                                   │                   │
+│                  │   PgUp / ^U   page up                                     │                   │
+│                  │   g / Home    first                                       │                   │
+│                  │   G / End     last                                        │                   │
+│                  │   :           go to a PR by number                        │                   │
+│                  │                                                           │                   │
+│                  │ View                                                      │nsor.              │
+│                  │   Tab         switch pane                                 │                   │
+│                  │                                                           │                   │
+│                  │ Act on the PR                                             │                   │
+│                  │   ⏎           review it — hand off to your review command │                   │
+│                  │   d           done — handled at this head                 │                   │
+│                  │   z           snooze for a while                          │                   │
+│                  │   o           open it in your browser                     │                   │
+│                  │   c / y       copy its URL                                │                   │
+│                  │   m           mute, or unmute                             │                   │
+│                  │   f           defer to the bottom, or restore             │                   │
+│                  │                                                           │                   │
+│                  │ Forge                                                     │                   │
+│                  │   r           refresh from the forge                      │                   │
+│                  │                                                           │                   │
+│                  │ Session                                                   │                   │
+│                  │   ? / h       keys                                        │                   │
+│                  │   q / Esc     quit                                        │                   │
+│                  │                                                           │                   │
+│                  │ Mouse                                                     │                   │
+│                  │   click       select the row, or focus the pane           │                   │
+│                  │   wheel       scroll what is under the pointer            │                   │
+│                  │                                                           │                   │
+│                  │   ↑↓ scroll   any other key close                         │                   │
+│                  ╰───────────────────────────────────────────────────────────╯                   │
+│                                           ││                                                     │
+╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit
