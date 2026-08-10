@@ -245,6 +245,22 @@ pub struct Hooks {
     pub review: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
 }
 
+/// Whether [`App::update`] dealt with an action, or handed it back.
+///
+/// The state machine owns everything it can do with nothing but itself. The rest
+/// — a forge round trip, a handoff, a clipboard — needs what only the loop has,
+/// so it comes back out. Before this they were separated by a comment and an arm
+/// returning `Ok(())`, which made forgetting the second half a silent no-op: the
+/// key would appear in the reference and do nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum Update {
+    /// Done; the state has moved on.
+    Handled,
+    /// Not mine — perform it where the hooks are.
+    Passed(Action),
+}
+
 /// What is covering the panes.
 ///
 /// Several actions need a follow-up keystroke — a confirmation, a duration — so
@@ -620,14 +636,22 @@ impl App {
         if self.overlay != Overlay::None {
             return self.on_overlay_key(key);
         }
-        match keys::action_for(key) {
-            Some(Action::RefreshSelected) => {
+        let Some(action) = keys::action_for(key) else {
+            return Ok(());
+        };
+        // Whatever `update` doesn't own comes back here to be performed. Matched
+        // exhaustively and with no catch-all: an action added to the table and
+        // forgotten in both places fails to compile, where before it would have
+        // been advertised in the key reference and quietly done nothing.
+        match self.update(action)? {
+            Update::Handled => Ok(()),
+            Update::Passed(Action::RefreshSelected) => {
                 if let Some(number) = self.refresh_target() {
                     (hooks.refresh)(number, channel.tx.clone());
                 }
                 Ok(())
             }
-            Some(Action::Review) => {
+            Update::Passed(Action::Review) => {
                 if let Some(number) = self.selected_number() {
                     // Held for the loop to perform after one more draw, so the
                     // notice is up before the terminal is handed over.
@@ -636,23 +660,35 @@ impl App {
                 }
                 Ok(())
             }
-            Some(Action::Done) => {
+            Update::Passed(Action::Done) => {
                 if let Some(number) = self.selected_number() {
                     self.overlay = Overlay::ConfirmDone { number };
                 }
                 Ok(())
             }
-            Some(Action::Snooze) => {
+            Update::Passed(Action::Snooze) => {
                 if let Some(number) = self.selected_number() {
                     self.overlay = Overlay::SnoozePresets { number };
                 }
                 Ok(())
             }
-            Some(Action::OpenInBrowser) => self.open_selected(hooks),
-            Some(Action::CopyUrl) => self.copy_selected_url(hooks),
-            Some(Action::ToggleMute) => self.toggle_mute(),
-            Some(Action::ToggleDefer) => self.toggle_defer(),
-            other => self.update(other),
+            Update::Passed(Action::OpenInBrowser) => self.open_selected(hooks),
+            Update::Passed(Action::CopyUrl) => self.copy_selected_url(hooks),
+            Update::Passed(Action::ToggleMute) => self.toggle_mute(),
+            Update::Passed(Action::ToggleDefer) => self.toggle_defer(),
+            // Everything else `update` handles itself, and says so.
+            Update::Passed(
+                Action::Quit
+                | Action::Help
+                | Action::Jump
+                | Action::SwitchPane
+                | Action::Down
+                | Action::Up
+                | Action::PageDown
+                | Action::PageUp
+                | Action::First
+                | Action::Last,
+            ) => unreachable!("update handles these and returns Handled"),
         }
     }
 
@@ -1029,44 +1065,45 @@ impl App {
 
     /// Apply a state change. No I/O beyond the ledger reads a moved selection
     /// needs, so a test can call it with any action and inspect the result.
-    pub(crate) fn update(&mut self, action: Option<Action>) -> Result<()> {
+    pub(crate) fn update(&mut self, action: Action) -> Result<Update> {
         let page = self.page() as isize;
+        let handled = |result: Result<()>| result.map(|()| Update::Handled);
         match action {
-            None => Ok(()),
-            Some(Action::Quit) => {
+            Action::Quit => {
                 self.quit = true;
-                Ok(())
+                Ok(Update::Handled)
             }
-            Some(Action::Help) => {
+            Action::Help => {
                 self.overlay = Overlay::Help { scroll: 0 };
-                Ok(())
+                Ok(Update::Handled)
             }
-            Some(Action::Jump) => {
+            Action::Jump => {
                 self.overlay = Overlay::JumpPrompt {
                     input: String::new(),
                     error: None,
                 };
-                Ok(())
+                Ok(Update::Handled)
             }
-            Some(Action::SwitchPane) => {
+            Action::SwitchPane => {
                 self.toggle_focus();
-                Ok(())
+                Ok(Update::Handled)
             }
-            Some(Action::Down) => self.scroll(1),
-            Some(Action::Up) => self.scroll(-1),
-            Some(Action::PageDown) => self.scroll(page),
-            Some(Action::PageUp) => self.scroll(-page),
-            Some(Action::First) => self.scroll_to_start(),
-            Some(Action::Last) => self.scroll_to_end(),
-            // Handled by `dispatch`, which has the hooks and the ledger.
-            Some(Action::RefreshSelected)
-            | Some(Action::Review)
-            | Some(Action::Done)
-            | Some(Action::Snooze)
-            | Some(Action::OpenInBrowser)
-            | Some(Action::CopyUrl)
-            | Some(Action::ToggleMute)
-            | Some(Action::ToggleDefer) => Ok(()),
+            Action::Down => handled(self.scroll(1)),
+            Action::Up => handled(self.scroll(-1)),
+            Action::PageDown => handled(self.scroll(page)),
+            Action::PageUp => handled(self.scroll(-page)),
+            Action::First => handled(self.scroll_to_start()),
+            Action::Last => handled(self.scroll_to_end()),
+            // Not this layer's: performing these needs the hooks, the channel or
+            // the ledger. Handed back rather than silently ignored.
+            Action::RefreshSelected
+            | Action::Review
+            | Action::Done
+            | Action::Snooze
+            | Action::OpenInBrowser
+            | Action::CopyUrl
+            | Action::ToggleMute
+            | Action::ToggleDefer => Ok(Update::Passed(action)),
         }
     }
 
@@ -1512,9 +1549,15 @@ mod scroll_tests {
         app
     }
 
+    /// Apply a movement action, asserting `update` owned it — none of these needs
+    /// a hook, which is the point of the split.
+    fn moved(app: &mut App, action: Action) {
+        assert_eq!(app.update(action).expect("update"), Update::Handled);
+    }
+
     fn go_to(app: &mut App, index: usize) {
         while app.selected < index {
-            app.update(Some(Action::Down)).expect("down");
+            moved(app, Action::Down);
         }
     }
 
@@ -1549,7 +1592,7 @@ mod scroll_tests {
         let bottom = app.queue_scroll;
         assert_eq!(bottom, 20, "the last row sits at the window's bottom");
 
-        app.update(Some(Action::Up)).expect("up");
+        moved(&mut app, Action::Up);
         assert_eq!(app.selected, 28);
         assert_eq!(
             app.queue_scroll, bottom,
@@ -1559,12 +1602,12 @@ mod scroll_tests {
         // It keeps still until the selection reaches the margin, which with the
         // window at rows 20..=29 is row 23.
         for _ in 0..5 {
-            app.update(Some(Action::Up)).expect("up");
+            moved(&mut app, Action::Up);
         }
         assert_eq!(app.selected, 23);
         assert_eq!(app.queue_scroll, bottom, "still 3 rows clear of the top");
 
-        app.update(Some(Action::Up)).expect("up");
+        moved(&mut app, Action::Up);
         assert_eq!(app.selected, 22);
         assert_eq!(
             app.queue_scroll, 19,
@@ -1577,12 +1620,12 @@ mod scroll_tests {
         let mut app = queue_of(30);
         // There is nothing above row zero to keep in view.
         go_to(&mut app, 2);
-        app.update(Some(Action::First)).expect("first");
+        moved(&mut app, Action::First);
         assert_eq!((app.selected, app.queue_scroll), (0, 0));
 
         // Nor below the last row: the window stops with it at the bottom rather
         // than scrolling into empty space.
-        app.update(Some(Action::Last)).expect("last");
+        moved(&mut app, Action::Last);
         assert_eq!(app.selected, 29);
         assert_eq!(app.queue_scroll, 20);
     }
@@ -1590,7 +1633,7 @@ mod scroll_tests {
     #[test]
     fn a_queue_shorter_than_the_window_never_scrolls() {
         let mut app = queue_of(4);
-        app.update(Some(Action::Last)).expect("last");
+        moved(&mut app, Action::Last);
         assert_eq!(app.selected, 3);
         assert_eq!(
             app.queue_scroll, 0,
