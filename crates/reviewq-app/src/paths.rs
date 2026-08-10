@@ -11,6 +11,7 @@ pub fn config_file() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("REVIEWQ_CONFIG") {
         return Ok(PathBuf::from(explicit));
     }
+    forbid_the_real_thing("config", "REVIEWQ_CONFIG");
     Ok(config_dir()?.join("config.toml"))
 }
 
@@ -26,7 +27,27 @@ pub fn database_file() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("REVIEWQ_DB") {
         return Ok(PathBuf::from(explicit));
     }
+    forbid_the_real_thing("ledger", "REVIEWQ_DB");
     Ok(data_dir()?.join("reviewq.db"))
+}
+
+/// Refuse the XDG fallback in a test build.
+///
+/// A test that reaches it would read the developer's own config, and
+/// `Ledger::open` would *create* their ledger — or worse, write to the one they
+/// use. No test has any business there, so falling through is a bug in the test
+/// rather than something to tolerate: it fails loudly, naming the variable that
+/// should have been set.
+///
+/// Nothing in a release build, which is why the production path above is
+/// untouched by it.
+#[cfg_attr(not(test), expect(unused_variables))]
+fn forbid_the_real_thing(what: &str, var: &str) {
+    #[cfg(test)]
+    panic!(
+        "a test asked for the real {what} path — set ${var} to something \
+         temporary; tests must never read the developer's own {what}"
+    );
 }
 
 /// Expand a leading `~` to the home directory, leaving every other path alone.

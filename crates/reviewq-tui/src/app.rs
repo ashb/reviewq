@@ -59,6 +59,19 @@ pub(crate) fn test_config() -> HeldConfig {
     )
 }
 
+/// Refuse, in a test build, the paths that reach what the developer actually uses.
+///
+/// The real ledger is opened — and created — by `App::new`, and the live hooks
+/// reach it, the forge, and the configured review command. A test has no business
+/// in any of that, so arriving here is a bug in the test: it fails loudly instead
+/// of quietly working against real data. Compiled away entirely in a release
+/// build.
+#[cfg_attr(not(test), expect(unused_variables))]
+fn forbid_in_tests(what: &str) {
+    #[cfg(test)]
+    panic!("a test reached {what}");
+}
+
 /// A PR's page on the forge.
 ///
 /// The forge renders it, because the path shape is the provider's business — the
@@ -136,6 +149,11 @@ pub struct App {
     /// Likewise for a PR to fetch, which is also a network call worth announcing
     /// before it blocks.
     pending_fetch: Option<u64>,
+    /// A PR whose forge notifications should be marked read, recorded once the
+    /// local `done` is committed. Fire-and-forget, so the loop needs no draw
+    /// first — it is held only so that acting on an overlay's keys needs no
+    /// hooks.
+    pending_mark_read: Option<u64>,
     /// The screen is not to be trusted — something else had the terminal — so
     /// the next draw must repaint every cell rather than only what changed.
     repaint: bool,
@@ -253,6 +271,7 @@ impl Hooks {
     /// keystroke, which is what taking a path meant, cost a file read and a parse
     /// each time and let one session act on two different configs.
     pub(crate) fn live(config: HeldConfig) -> Self {
+        forbid_in_tests("the live hooks, which reach the real ledger and forge — script `Hooks`");
         let for_refresh = Arc::clone(&config);
         let for_fetch = Arc::clone(&config);
         let for_review = Arc::clone(&config);
@@ -491,6 +510,7 @@ pub enum Focus {
 impl App {
     /// Open the ledger and load the queue.
     pub fn new(theme: Theme, config: HeldConfig) -> Result<Self> {
+        forbid_in_tests("App::new, which opens the real ledger — use with_ledger");
         let path = reviewq_app::paths::database_file()?;
         let ledger = Ledger::open(&path)
             .with_context(|| format!("opening the ledger at {}", path.display()))?;
@@ -512,6 +532,7 @@ impl App {
             queue_scroll: 0,
             pending_review: None,
             pending_fetch: None,
+            pending_mark_read: None,
             repaint: false,
             help_max_scroll: 0,
             status: None,
@@ -687,6 +708,10 @@ impl App {
                 self.fetch_unknown(number, hooks);
                 continue;
             }
+            // Nothing waits on this one, so it needs no draw of its own.
+            if let Some(number) = self.pending_mark_read.take() {
+                (hooks.mark_read)(number);
+            }
 
             // Results from tasks first, and without waiting: they may be already
             // queued, and a keystroke should not have to arrive to reveal them.
@@ -721,7 +746,7 @@ impl App {
     /// and the ledger are, and the rest go to [`update`](Self::update).
     fn dispatch(&mut self, key: KeyEvent, channel: &Channel, hooks: &Hooks) -> Result<()> {
         if self.overlay != Overlay::None {
-            return self.on_overlay_key(key, hooks);
+            return self.on_overlay_key(key);
         }
         match keys::action_for(key) {
             Some(Action::RefreshSelected) => {
@@ -866,7 +891,7 @@ impl App {
     }
 
     /// Handle a key while an overlay owns the keyboard.
-    pub(crate) fn on_overlay_key(&mut self, key: KeyEvent, hooks: &Hooks) -> Result<()> {
+    pub(crate) fn on_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
         let escape = matches!(key.code, KeyCode::Esc);
         match self.overlay.clone() {
             // Nothing to accept: the loop replaces it the moment the handoff
@@ -911,7 +936,7 @@ impl App {
                 let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
                 self.overlay = Overlay::None;
                 if confirmed {
-                    self.mark_done(number, hooks)?;
+                    self.mark_done(number)?;
                 }
                 Ok(())
             }
@@ -1015,7 +1040,7 @@ impl App {
     }
 
     /// Record the PR done, then let the forge know in the background.
-    fn mark_done(&mut self, number: u64, hooks: &Hooks) -> Result<()> {
+    fn mark_done(&mut self, number: u64) -> Result<()> {
         let Some(repo_id) = self.selected_repo_id() else {
             return Ok(());
         };
@@ -1024,9 +1049,10 @@ impl App {
             None => return Ok(()),
         };
         reviewq_app::actions::done(&self.ledger, repo_id, number, &head)?;
-        // After the local record, never in front of it: the PR is done whether or
-        // not the forge can be reached.
-        (hooks.mark_read)(number);
+        // Held for the loop, which performs it after the local record — the PR is
+        // done whether or not the forge can be reached. Deferring it is also what
+        // keeps the overlay's keys free of hooks entirely.
+        self.pending_mark_read = Some(number);
         self.status = Some(format!("#{number} done at {}", short(&head)));
         self.reload()
     }

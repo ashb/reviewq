@@ -11,15 +11,16 @@ use std::process::{Command, Output};
 /// path, so no dependency on `assert_cmd` is needed.
 const BIN: &str = env!("CARGO_BIN_EXE_reviewq");
 
+/// Run the binary against a config and ledger made for this call and thrown away
+/// after it.
+///
+/// Every spawn in this file goes through here or [`run_in`], and both set
+/// `REVIEWQ_CONFIG` and `REVIEWQ_DB`. Neither may be omitted: without them the
+/// binary reads the developer's own config and `Ledger::open` *creates* their
+/// ledger — a test suite has no business anywhere near either.
 fn run(args: &[&str]) -> Output {
-    Command::new(BIN)
-        .args(args)
-        // Point at a path that cannot exist, so a stray config load fails loudly
-        // rather than reading (or creating) the real user config.
-        .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("binary runs")
+    let (_dir, config, db) = workspace();
+    run_in(&config, &db, args)
 }
 
 fn stderr(output: &Output) -> String {
@@ -50,7 +51,8 @@ fn workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (dir, config, db)
 }
 
-/// Run the binary against a workspace's config and ledger.
+/// Run the binary against a specific config and ledger — both required, for the
+/// reason in [`run`].
 fn run_in(config: &Path, db: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
         .args(args)
@@ -59,6 +61,33 @@ fn run_in(config: &Path, db: &Path, args: &[&str]) -> Output {
         .env("NO_COLOR", "1")
         .output()
         .expect("binary runs")
+}
+
+/// Nothing here may reach the developer's own config or ledger.
+///
+/// Enforced rather than remembered: the only `Command::new(BIN)` in this file is
+/// the one inside `run_in`, which sets both environment variables. A test that
+/// spawned the binary itself could silently read — and write — real data, and
+/// would look exactly like every other test while doing it.
+#[test]
+fn every_spawn_goes_through_the_helper_that_isolates_config_and_ledger() {
+    let source = include_str!("cli.rs");
+    // Call sites, which stand alone on their line — not the mentions of the
+    // pattern in this test and its own doc comment.
+    let spawns = source
+        .lines()
+        .filter(|line| line.trim() == "Command::new(BIN)")
+        .count();
+    assert_eq!(
+        spawns, 1,
+        "found {spawns} spawns; only `run_in` may construct one"
+    );
+
+    let helper = source.split_once("fn run_in(").expect("run_in exists").1;
+    assert!(
+        helper.contains("REVIEWQ_CONFIG") && helper.contains("REVIEWQ_DB"),
+        "run_in must set both isolation variables"
+    );
 }
 
 #[test]

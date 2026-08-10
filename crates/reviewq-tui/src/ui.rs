@@ -767,7 +767,7 @@ fn stamp(ts: Timestamp) -> String {
 mod tests {
     use super::*;
     use crate::app::test_config;
-    use crate::app::{App, Focus, Hooks, Overlay};
+    use crate::app::{App, Focus, Overlay};
     use jiff::Timestamp;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1195,13 +1195,8 @@ Adds a `deferrable` flag to `S3KeySensor`.
         );
 
         // That render reported how far it can go, so End reaches the end.
-        // Scrolling the reference touches no hook, so what they are is irrelevant
-        // here — but one has to be passed.
-        app.on_overlay_key(
-            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
-            &Hooks::live(test_config()),
-        )
-        .expect("scroll to end");
+        app.on_overlay_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .expect("scroll to end");
         let bottom = render(&mut app, 100, 18).join("\n");
         assert!(
             bottom.contains("Session"),
