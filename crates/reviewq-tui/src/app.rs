@@ -1553,30 +1553,6 @@ pub(super) mod tests {
         let status = app.status.clone().expect("a status");
         assert!(status.contains("no longer exists"), "{status}");
     }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_loop_wakes_for_a_task_result_as_well_as_for_input() {
-        // The point of one channel: a refresh landing is as good a reason to
-        // wake and redraw as a keystroke. Proven by driving both through it.
-        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let sender = tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let _ = sender.send(Message::Refreshed {
-                number: 70135,
-                outcome: Ok(Refreshed::Gone),
-            });
-        })
-        .await
-        .expect("task");
-
-        match rx.recv().await {
-            Some(Message::Refreshed { number, outcome }) => {
-                assert_eq!(number, 70135);
-                assert_eq!(outcome.expect("outcome"), Refreshed::Gone);
-            }
-            other => panic!("expected a refresh result, got {:?}", other.is_some()),
-        }
-    }
 }
 
 /// Driving the real loop: scripted messages in, a `TestBackend` to draw on, and

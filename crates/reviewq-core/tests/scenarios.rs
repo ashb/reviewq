@@ -1,10 +1,14 @@
 //! Fixture plumbing for the classification suite.
 //!
-//! Each file in `tests/fixtures/` is one case classification has to get right.
-//! Until classification exists these tests assert that the fixtures parse, that
-//! they describe states GitHub could actually produce, and that the set covers
-//! every case; snapshotting classified output per scenario then hangs off the
-//! same loader.
+//! Each file in `tests/fixtures/` is one case classification has to get right,
+//! and the suite is one snapshot of classified output per fixture — so a
+//! behaviour change shows up as a diff against the scenario it broke.
+//!
+//! The loader enforces the corpus's own consistency as it reads: a hand-written
+//! fixture can encode a state GitHub would never produce and then "prove"
+//! behaviour that cannot happen. Those checks live in [`load_all`] rather than in
+//! tests of their own, because they say nothing about `classify` — they are the
+//! price of admission for a fixture.
 
 use std::path::{Path, PathBuf};
 
@@ -50,6 +54,25 @@ struct ScenarioCtx {
 impl Scenario {
     /// Classify this fixture and render each fired reason as one line, so the
     /// snapshot is a diffable statement of what the queue would show.
+    /// The discriminants classification produces for this scenario.
+    fn reasons(&self) -> Vec<&'static str> {
+        classify(&self.pr, &self.mine, &self.threads, self.now, &self.ctx())
+            .iter()
+            .map(|a| a.reason.discriminant())
+            .collect()
+    }
+
+    fn ctx(&self) -> ClassifyCtx<'_> {
+        ClassifyCtx {
+            bots: &self.ctx.bots,
+            interest: self.ctx.interest.as_deref(),
+            mentions: &self.ctx.mentions,
+            review_request: self.ctx.review_request.clone(),
+            new_commits: self.ctx.new_commits,
+            include_merged: self.ctx.include_merged,
+        }
+    }
+
     fn classified(&self) -> String {
         let ctx = ClassifyCtx {
             bots: &self.ctx.bots,
@@ -102,88 +125,108 @@ fn load_all() -> Vec<(String, Scenario)> {
     }
     loaded.sort_by(|a, b| a.0.cmp(&b.0));
     assert!(!loaded.is_empty(), "no fixtures found");
+    for (name, scenario) in &loaded {
+        check_is_a_state_github_could_produce(name, scenario);
+    }
     loaded
 }
 
-#[test]
-fn every_fixture_parses() {
-    for (name, scenario) in load_all() {
+/// Refuse a fixture that describes something the forge could not report, since a
+/// snapshot of it would pin behaviour for a state that never arrives.
+fn check_is_a_state_github_could_produce(name: &str, scenario: &Scenario) {
+    assert!(
+        !scenario.description.is_empty(),
+        "{name} has no description"
+    );
+    assert!(scenario.pr.number > 0, "{name} has no PR number");
+    assert!(
+        scenario.now >= scenario.pr.updated_at,
+        "{name}: `now` predates the PR's updatedAt"
+    );
+    if scenario.mine.last_verdict.is_some() {
         assert!(
-            !scenario.description.is_empty(),
-            "{name} has no description"
+            scenario.mine.last_reviewed_sha.is_some(),
+            "{name}: has a verdict but no reviewed SHA"
         );
-        assert!(scenario.pr.number > 0, "{name} has no PR number");
         assert!(
-            scenario.now >= scenario.pr.updated_at,
-            "{name}: `now` predates the PR's updatedAt"
+            scenario.mine.last_action_at.is_some(),
+            "{name}: has a verdict but no action timestamp"
         );
     }
-}
-
-/// Fixtures are hand-written, so they can encode states GitHub would never
-/// produce and then "prove" behaviour that cannot happen. These are the
-/// consistency rules worth enforcing on the corpus.
-#[test]
-fn no_fixture_describes_an_impossible_state() {
-    for (name, scenario) in load_all() {
-        if scenario.mine.last_verdict.is_some() {
+    for thread in &scenario.threads {
+        assert!(!thread.thread_id.is_empty(), "{name}: thread with no id");
+        assert_eq!(
+            thread.is_resolved,
+            thread.resolved_by.is_some(),
+            "{name}: thread {} resolution and resolver disagree",
+            thread.thread_id
+        );
+        if let (Some(mine), Some(last)) = (thread.my_last_comment_at, thread.last_comment_at) {
             assert!(
-                scenario.mine.last_reviewed_sha.is_some(),
-                "{name}: has a verdict but no reviewed SHA"
-            );
-            assert!(
-                scenario.mine.last_action_at.is_some(),
-                "{name}: has a verdict but no action timestamp"
-            );
-        }
-
-        for thread in &scenario.threads {
-            assert!(!thread.thread_id.is_empty(), "{name}: thread with no id");
-            assert_eq!(
-                thread.is_resolved,
-                thread.resolved_by.is_some(),
-                "{name}: thread {} resolution and resolver disagree",
+                mine <= last,
+                "{name}: thread {} has my comment after the last comment",
                 thread.thread_id
             );
-            if let (Some(mine), Some(last)) = (thread.my_last_comment_at, thread.last_comment_at) {
-                assert!(
-                    mine <= last,
-                    "{name}: thread {} has my comment after the last comment",
-                    thread.thread_id
-                );
-            }
         }
     }
 }
 
-/// The cases classification must handle, each a rule from the reason table or
-/// one of its suppressions. A name here without a fixture is a case nobody is
-/// testing, which is why the list is asserted rather than merely documented.
+/// Every reason classification can produce is produced by some fixture.
+///
+/// Asserted against what `classify` actually returns, rather than against a list
+/// of file names: a new variant in [`AttentionReason`] with no scenario exercising
+/// it fails here, where a directory listing could only notice a deleted file.
 #[test]
-fn every_required_scenario_has_a_fixture() {
-    let required = [
-        "bot_comment_suppressed",
-        "direct_mention",
-        "draft_suppressed",
-        "fresh_interesting_pr",
-        "merged_post_merge_reply",
-        "mute_beats_mention",
-        "my_thread_resolved_silently",
-        "reply_in_my_thread",
-        "review_requested",
-        "reviewed_then_new_commits",
-        "snooze_expired",
-        "snoozed",
-    ];
-
-    let present: Vec<String> = load_all().into_iter().map(|(name, _)| name).collect();
-    let missing: Vec<&str> = required
+fn every_attention_reason_is_covered_by_a_fixture() {
+    let produced: std::collections::BTreeSet<&'static str> = load_all()
         .iter()
-        .copied()
-        .filter(|name| !present.iter().any(|p| p == name))
+        .flat_map(|(_, scenario)| scenario.reasons())
         .collect();
 
-    assert!(missing.is_empty(), "missing fixtures: {missing:?}");
+    let expected = [
+        "mention",
+        "needs_first_look",
+        "re_review",
+        "resolved_unanswered",
+        "review_requested",
+        "thread_reply",
+    ];
+    let missing: Vec<&str> = expected
+        .iter()
+        .copied()
+        .filter(|reason| !produced.contains(reason))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "no fixture produces these reasons: {missing:?}"
+    );
+}
+
+/// Every suppression is exercised too: a fixture that classifies to nothing.
+///
+/// Muted, snoozed and draft PRs all have to come back empty, and a suppression
+/// that silently stopped working would otherwise only show as a snapshot diff
+/// nobody reads as a suppression.
+#[test]
+fn suppressions_are_exercised_by_fixtures_that_classify_to_nothing() {
+    let silent: Vec<String> = load_all()
+        .into_iter()
+        .filter(|(_, scenario)| scenario.reasons().is_empty())
+        .map(|(name, _)| name)
+        .collect();
+
+    for expected in [
+        "bot_comment_suppressed",
+        "draft_suppressed",
+        "mute_beats_mention",
+        "snoozed",
+    ] {
+        assert!(
+            silent.iter().any(|name| name == expected),
+            "{expected} should classify to nothing, silent were {silent:?}"
+        );
+    }
 }
 
 /// The heart of the suite: what does classification actually produce for each
