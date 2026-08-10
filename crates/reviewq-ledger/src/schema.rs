@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 6;
+pub const SCHEMA_VERSION: usize = 7;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -277,6 +277,13 @@ const MIGRATION_6: &str = r"
 ALTER TABLE prs ADD COLUMN body TEXT;
 ";
 
+/// The branch the PR targets. Empty rather than null on an existing row: the
+/// sweep overwrites it on the next sync, and until then "unknown" and "no target
+/// branch" would be the same thing anyway.
+const MIGRATION_7: &str = r"
+ALTER TABLE prs ADD COLUMN base_ref TEXT NOT NULL DEFAULT '';
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -285,6 +292,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(MIGRATION_4),
         M::up(MIGRATION_5),
         M::up(MIGRATION_6),
+        M::up(MIGRATION_7),
     ])
 });
 

@@ -531,6 +531,7 @@ mod tests {
             author: "potiuk".into(),
             author_association: "MEMBER".into(),
             head_sha: "abc1234".into(),
+            base_ref: "main".into(),
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-10T09:00:00Z"),

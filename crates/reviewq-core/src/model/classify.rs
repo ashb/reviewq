@@ -328,6 +328,7 @@ mod tests {
             author: "octocat".into(),
             author_association: "MEMBER".into(),
             head_sha: "head0000".into(),
+            base_ref: "main".into(),
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-05T09:00:00Z"),

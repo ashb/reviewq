@@ -245,6 +245,7 @@ mod tests {
             author: "octocat".into(),
             author_association: "CONTRIBUTOR".into(),
             head_sha: "abc".into(),
+            base_ref: "main".into(),
             is_draft: false,
             state: crate::model::PrState::Open,
             updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),

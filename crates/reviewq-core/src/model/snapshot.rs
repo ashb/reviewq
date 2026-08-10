@@ -16,6 +16,17 @@ pub struct PrSnapshot {
     pub author_association: String,
     /// Current head commit.
     pub head_sha: String,
+    /// The branch the PR would merge into — GitHub's `baseRefName`.
+    ///
+    /// Nothing classifies on it: it is worth knowing which branch a change is
+    /// aimed at, because a fix landing on a maintenance branch and the same fix
+    /// aimed at `main` are different reviews.
+    ///
+    /// Defaulted rather than required so the fixture format and any ledger row
+    /// written before this was captured still read — an unknown target branch is
+    /// an empty string, which display treats as "don't say".
+    #[serde(default)]
+    pub base_ref: String,
     /// Draft PRs are suppressed except for mentions.
     pub is_draft: bool,
     /// Open, merged or closed.

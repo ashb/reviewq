@@ -177,6 +177,7 @@ fn show_disambiguates_a_shared_pr_number_by_url() {
             author: "octocat".into(),
             author_association: "CONTRIBUTOR".into(),
             head_sha: "abc123".into(),
+            base_ref: "main".into(),
             is_draft: false,
             state: reviewq_core::model::PrState::Open,
             updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),

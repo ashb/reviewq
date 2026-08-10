@@ -141,6 +141,12 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
         show.tracked_reason.as_deref().unwrap_or("untracked"),
         draft_tag(pr.is_draft),
     );
+    // Only once it's known: a row written before the target branch was captured
+    // has it empty until the next sync, and "→ " with nothing after it would
+    // read as a bug rather than as missing data.
+    if !pr.base_ref.is_empty() {
+        println!("  → {}", pr.base_ref);
+    }
     println!("  updated {}", fmt_ts(pr.updated_at));
 
     if !pr.labels.is_empty() || pr.milestone.is_some() {
@@ -314,6 +320,10 @@ struct ShowJson<'a> {
     state: &'a str,
     title: &'a str,
     author: &'a str,
+    /// The branch the PR targets. Omitted when a row predates its capture and no
+    /// sync has refreshed it yet, rather than reported as an empty branch name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_ref: Option<&'a str>,
     is_draft: bool,
     updated_at: String,
     labels: &'a [String],
@@ -364,6 +374,7 @@ fn json<'a>(show: &'a PrShow, url: Option<&'a str>) -> ShowJson<'a> {
         state: show.pr.state.as_str(),
         title: &show.pr.title,
         author: &show.pr.author,
+        base_ref: Some(show.pr.base_ref.as_str()).filter(|b| !b.is_empty()),
         is_draft: show.pr.is_draft,
         updated_at: show.pr.updated_at.to_string(),
         labels: &show.pr.labels,
@@ -425,6 +436,7 @@ mod tests {
             author: "octocat".into(),
             author_association: "MEMBER".into(),
             head_sha: "head0000".into(),
+            base_ref: "main".into(),
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-05T09:00:00Z"),
@@ -513,6 +525,37 @@ mod tests {
     #[test]
     fn render_hyperlink_is_plain_text_without_a_url() {
         assert_eq!(render_hyperlink("#1 title", None, true), "#1 title");
+    }
+
+    /// A `PrShow` around `pr`, with nothing else going on.
+    fn show_of(pr: PrSnapshot) -> PrShow {
+        PrShow {
+            pr,
+            body: None,
+            tracked_reason: Some("interest: label x".into()),
+            my_state: MyState::default(),
+            threads: vec![],
+            reviewers: vec![],
+            attention: vec![],
+        }
+    }
+
+    #[test]
+    fn json_reports_the_target_branch() {
+        let mut backport = pr();
+        backport.base_ref = "v3-1-test".into();
+
+        assert_eq!(json(&show_of(backport), None).base_ref, Some("v3-1-test"));
+    }
+
+    #[test]
+    fn json_omits_a_target_branch_that_is_not_known_yet() {
+        // A row stored before the branch was captured, and not yet re-synced:
+        // absent says "unknown", where `""` would claim a branch with no name.
+        let mut unknown = pr();
+        unknown.base_ref = String::new();
+
+        assert_eq!(json(&show_of(unknown), None).base_ref, None);
     }
 
     #[test]

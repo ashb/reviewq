@@ -332,7 +332,7 @@ impl Ledger {
             r"
             SELECT number, title, author, author_association, head_sha, is_draft,
                    state, updated_at, labels, milestone, files, files_truncated,
-                   tracked_reason
+                   base_ref, tracked_reason
             FROM prs
             WHERE repo_id = ?1 AND tracked_reason IS NOT NULL
             ORDER BY number
@@ -664,9 +664,9 @@ impl Ledger {
         let rows = stmt
             .query_map(params![repo_id], |row| {
                 let pr = snapshot_from_row(row, 0)?;
-                let tracked_reason: String = row.get(12)?;
-                let attention = attention_from_row(row, 13)?;
-                let deferred_at: Option<String> = row.get(15)?;
+                let tracked_reason: String = row.get(13)?;
+                let attention = attention_from_row(row, 14)?;
+                let deferred_at: Option<String> = row.get(16)?;
                 let deferred_at = deferred_at.as_deref().map(parse_ts).transpose()?;
                 Ok((pr, tracked_reason, attention, deferred_at))
             })?
@@ -730,7 +730,7 @@ impl Ledger {
             .query_map(params![repo_id], |row| {
                 Ok(TrackedPr {
                     pr: snapshot_from_row(row, 0)?,
-                    tracked_reason: row.get(12)?,
+                    tracked_reason: row.get(13)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -802,8 +802,8 @@ impl Ledger {
                 |row| {
                     Ok((
                         snapshot_from_row(row, 0)?,
-                        row.get::<_, Option<String>>(12)?,
                         row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
                     ))
                 },
             )
@@ -930,8 +930,8 @@ fn upsert_row(
         INSERT INTO prs (
           repo_id, number, title, author, author_association, head_sha, is_draft,
           state, updated_at, labels, milestone, files, files_truncated,
-          tracked_reason, first_seen_at
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+          tracked_reason, first_seen_at, base_ref
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
         ON CONFLICT(repo_id, number) DO UPDATE SET
           title=excluded.title,
           author=excluded.author,
@@ -944,7 +944,8 @@ fn upsert_row(
           milestone=excluded.milestone,
           files=excluded.files,
           files_truncated=excluded.files_truncated,
-          tracked_reason=excluded.tracked_reason
+          tracked_reason=excluded.tracked_reason,
+          base_ref=excluded.base_ref
         ",
         params![
             repo_id,
@@ -962,6 +963,7 @@ fn upsert_row(
             pr.files_truncated as i64,
             merged,
             now.to_string(),
+            pr.base_ref,
         ],
     )
     .with_context(|| format!("upserting PR #{}", pr.number))?;
@@ -1031,7 +1033,7 @@ fn stored_rank(reason: &str) -> u8 {
 /// reconstructs a [`PrSnapshot`], so column order and reader cannot drift.
 const PR_COLUMNS: &str = "p.number, p.title, p.author, p.author_association, \
      p.head_sha, p.is_draft, p.state, p.updated_at, p.labels, p.milestone, \
-     p.files, p.files_truncated";
+     p.files, p.files_truncated, p.base_ref";
 
 /// Turn a text-decode failure into the rusqlite error a `query_map` closure
 /// must return.
@@ -1049,7 +1051,7 @@ fn whole_second(ts: Timestamp) -> Timestamp {
     Timestamp::from_second(ts.as_second()).unwrap_or(ts)
 }
 
-/// Read a [`PrSnapshot`] from the twelve [`PR_COLUMNS`] starting at `base`.
+/// Read a [`PrSnapshot`] from the [`PR_COLUMNS`] starting at `base`.
 fn snapshot_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<PrSnapshot> {
     let state_str: String = row.get(base + 6)?;
     let labels_str: String = row.get(base + 8)?;
@@ -1077,13 +1079,14 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<P
         milestone: row.get(base + 9)?,
         files,
         files_truncated: row.get::<_, i64>(base + 11)? != 0,
+        base_ref: row.get(base + 12)?,
     })
 }
 
 fn row_to_tracked(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedPr> {
     Ok(TrackedPr {
         pr: snapshot_from_row(row, 0)?,
-        tracked_reason: row.get(12)?,
+        tracked_reason: row.get(13)?,
     })
 }
 
@@ -1296,6 +1299,7 @@ mod tests {
             author: "octocat".into(),
             author_association: "CONTRIBUTOR".into(),
             head_sha: "abc123".into(),
+            base_ref: "main".into(),
             is_draft: false,
             state: PrState::Open,
             updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),
@@ -1491,7 +1495,84 @@ mod tests {
         assert_eq!(tracked[0].pr.number, 1);
         assert_eq!(tracked[0].pr.milestone.as_deref(), Some("3.2.0"));
         assert_eq!(tracked[0].pr.updated_at, now());
+        assert_eq!(tracked[0].pr.base_ref, "main");
         assert_eq!(tracked[0].tracked_reason, "interest: label area:task-sdk");
+    }
+
+    /// The target branch has to survive every read that rebuilds a snapshot, not
+    /// just the one a test happened to pick: the reads share a column list and a
+    /// positional reader, so an index off by one shows up in only some of them.
+    #[test]
+    fn the_target_branch_reads_back_from_every_snapshot_query() {
+        let (ledger, repo_id) = ledger_with_repo();
+        let mut backport = pr(1);
+        backport.base_ref = "v3-1-test".into();
+        track(&ledger, repo_id, &backport);
+
+        assert_eq!(
+            ledger.list_tracked(repo_id).unwrap()[0].pr.base_ref,
+            "v3-1-test"
+        );
+        assert_eq!(
+            ledger.waiting(repo_id).unwrap()[0].pr.base_ref,
+            "v3-1-test",
+            "waiting: tracked, open, no attention"
+        );
+        assert_eq!(
+            ledger.show(repo_id, 1).unwrap().unwrap().pr.base_ref,
+            "v3-1-test"
+        );
+        assert_eq!(
+            ledger.prs_needing_detail(repo_id, false).unwrap()[0]
+                .pr
+                .base_ref,
+            "v3-1-test",
+            "never detail-synced, so it is due"
+        );
+
+        ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[attn(
+                    AttentionReason::Mention { by: "kaxil".into() },
+                    "2026-08-05T11:00:00Z",
+                )],
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.queue(repo_id).unwrap()[0].pr.base_ref,
+            "v3-1-test",
+            "and through the queue, whose row carries attention columns after it"
+        );
+    }
+
+    /// A ledger written before the target branch was captured must still open,
+    /// with its rows reading as "unknown" until a sync refreshes them.
+    #[test]
+    fn an_existing_row_gains_an_empty_target_branch_and_a_sync_fills_it() {
+        let (ledger, repo_id) = ledger_with_repo();
+        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        // Stand in for a row migration 7 backfilled: the column exists, and no
+        // sweep has written a real value into it yet.
+        ledger
+            .conn
+            .execute("UPDATE prs SET base_ref = '' WHERE number = 1", [])
+            .unwrap();
+
+        let before = ledger.show(repo_id, 1).unwrap().unwrap();
+        assert_eq!(before.pr.base_ref, "", "unknown, not a wrong branch");
+
+        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        assert_eq!(
+            ledger.show(repo_id, 1).unwrap().unwrap().pr.base_ref,
+            "main"
+        );
     }
 
     #[test]

@@ -311,6 +311,7 @@ struct PrNode {
     author: Option<Login>,
     author_association: String,
     head_ref_oid: String,
+    base_ref_name: String,
     updated_at: jiff::Timestamp,
     labels: LabelConn,
     milestone: Option<Milestone>,
@@ -362,6 +363,7 @@ impl PrNode {
             author: self.author.map_or_else(|| "ghost".to_string(), |a| a.login),
             author_association: self.author_association,
             head_sha: self.head_ref_oid,
+            base_ref: self.base_ref_name,
             is_draft: self.is_draft,
             state,
             updated_at: self.updated_at,
@@ -397,6 +399,7 @@ query($q: String!, $size: Int!, $after: String) {
       author { login }
       authorAssociation
       headRefOid
+      baseRefName
       updatedAt
       labels(first: 30) { nodes { name } }
       milestone { title }
@@ -415,6 +418,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       author { login }
       authorAssociation
       headRefOid
+      baseRefName
       updatedAt
       labels(first: 30) { nodes { name } }
       milestone { title }
@@ -999,6 +1003,7 @@ mod tests {
         assert!(snapshot.is_draft);
         assert_eq!(snapshot.state, PrState::Open);
         assert_eq!(snapshot.author, "rjgoyln");
+        assert_eq!(snapshot.base_ref, "main");
         assert!(snapshot.labels.contains(&"area:task-sdk".to_string()));
         // Files arrive with the sweep now.
         let files = snapshot.files.expect("files populated");
@@ -1088,7 +1093,8 @@ mod tests {
             r#"{
                 "number": 1, "title": "t", "isDraft": false, "state": "OPEN",
                 "author": null, "authorAssociation": "NONE",
-                "headRefOid": "abc", "updatedAt": "2026-08-05T12:00:00Z",
+                "headRefOid": "abc", "baseRefName": "main",
+                "updatedAt": "2026-08-05T12:00:00Z",
                 "labels": {"nodes": []}, "milestone": null,
                 "files": {"totalCount": 0, "nodes": []}
             }"#,
@@ -1097,5 +1103,43 @@ mod tests {
         let snapshot = node.into_snapshot().unwrap();
         assert_eq!(snapshot.author, "ghost");
         assert!(!snapshot.files_truncated);
+    }
+
+    #[test]
+    fn the_target_branch_comes_through_the_sweep_selection() {
+        // Both queries select `baseRefName`; this pins that the node reads it and
+        // carries it into the snapshot, rather than quietly defaulting to empty.
+        let node: PrNode = serde_json::from_str(
+            r#"{
+                "number": 7, "title": "backport", "isDraft": false, "state": "OPEN",
+                "author": {"login": "potiuk"}, "authorAssociation": "MEMBER",
+                "headRefOid": "abc", "baseRefName": "v3-1-test",
+                "updatedAt": "2026-08-05T12:00:00Z",
+                "labels": {"nodes": []}, "milestone": null,
+                "files": {"totalCount": 0, "nodes": []}
+            }"#,
+        )
+        .expect("parses");
+
+        assert_eq!(node.into_snapshot().unwrap().base_ref, "v3-1-test");
+    }
+
+    /// A PR selection that omitted `baseRefName` must not silently parse: the
+    /// field is required on the node precisely so a query and its reader cannot
+    /// drift apart unnoticed.
+    #[test]
+    fn a_pr_node_without_a_target_branch_is_refused() {
+        let err = serde_json::from_str::<PrNode>(
+            r#"{
+                "number": 7, "title": "t", "isDraft": false, "state": "OPEN",
+                "author": null, "authorAssociation": "NONE",
+                "headRefOid": "abc", "updatedAt": "2026-08-05T12:00:00Z",
+                "labels": {"nodes": []}, "milestone": null,
+                "files": {"totalCount": 0, "nodes": []}
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("baseRefName"), "{err}");
     }
 }
