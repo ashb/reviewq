@@ -11,6 +11,12 @@ use reviewq_app::sync::{CURSOR_KEY, TRUNCATED_KEY};
 
 /// Report everything that has to be true before a sync can work, and exit
 /// non-zero if any of it isn't.
+///
+/// Every check reports and carries on. A step that fails is a *finding* — that is
+/// the whole output of this command — so returning early on the first one would
+/// hide the rest, and hide every later repo entirely. Only being unable to work
+/// out where the ledger lives ends the run, because there is then nothing to
+/// report about.
 pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
     let mut problems = 0u32;
 
@@ -19,13 +25,19 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
     let db = paths::database_file()?;
     // `Ledger::open` would create an empty file, so a ledger that isn't there
     // yet is reported as a note, never opened.
-    let ledger = db.exists().then(|| Ledger::open(&db)).transpose()?;
-    let db_note = if db.exists() {
-        db.display().to_string()
-    } else {
-        format!("{} (not created yet)", db.display())
+    let ledger = match db.exists().then(|| Ledger::open(&db)).transpose() {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            problems += 1;
+            row("ledger", &warn(&format!("{}: {err:#}", db.display())));
+            None
+        }
     };
-    row("ledger", &db_note);
+    if ledger.is_some() {
+        row("ledger", &db.display().to_string());
+    } else if !db.exists() {
+        row("ledger", &format!("{} (not created yet)", db.display()));
+    }
     row("handoff", &handoff_note(&loaded.config, &mut problems));
 
     for repo in loaded.config.repos() {
@@ -34,24 +46,58 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
 
         row(
             "  last sync",
-            &last_sync_note(ledger.as_ref(), &repo.key(), &mut problems)?,
+            &last_sync_note(ledger.as_ref(), &repo.key(), &mut problems),
         );
 
-        let host = loaded.config.forge_host_for(&repo.host)?;
-        let host_note = match &host.api_base {
-            Some(api_base) => format!("{} ({api_base})", repo.host),
-            None => repo.host.clone(),
+        let host = match loaded.config.forge_host_for(&repo.host) {
+            Ok(host) => {
+                row(
+                    "  forge",
+                    &match &host.api_base {
+                        Some(api_base) => format!("{} ({api_base})", repo.host),
+                        None => repo.host.clone(),
+                    },
+                );
+                host
+            }
+            Err(err) => {
+                problems += 1;
+                row("  forge", &warn(&format!("{err:#}")));
+                continue;
+            }
         };
-        row("  forge", &host_note);
 
-        let token = resolve_token(&host)?;
-        row("  token", &token.source.to_string());
+        let token = match resolve_token(&host) {
+            Ok(token) => {
+                row("  token", &token.source.to_string());
+                token
+            }
+            Err(err) => {
+                problems += 1;
+                row("  token", &warn(&format!("{err:#}")));
+                continue;
+            }
+        };
 
         // Handed the token this step just resolved, rather than letting the
         // adapter resolve its own: `doctor` reports on that step, and a second
         // resolution would mean a second credential-helper prompt for one run.
-        let forge = build(&host, &repo.host, Some(token))?;
-        let viewer = forge.viewer().await?;
+        let forge = match build(&host, &repo.host, Some(token)) {
+            Ok(forge) => forge,
+            Err(err) => {
+                problems += 1;
+                row("  viewer", &warn(&format!("{err:#}")));
+                continue;
+            }
+        };
+        let viewer = match forge.viewer().await {
+            Ok(viewer) => viewer,
+            Err(err) => {
+                problems += 1;
+                row("  viewer", &warn(&format!("{err:#}")));
+                continue;
+            }
+        };
         viewer.rate_limit.trace("doctor:viewer");
 
         let configured = loaded.config.identity.login.trim();
@@ -107,26 +153,44 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
 /// sweep means some PRs in that window were silently missed, so it counts as
 /// a problem rather than just a note. `None` when the ledger doesn't exist
 /// yet — nothing has ever synced.
+/// Reads only: `ensure_repo` would *write* a repo row, so diagnosing would
+/// modify the thing being diagnosed — and it was doing that right below the care
+/// taken not to create the ledger file.
 fn last_sync_note(
     ledger: Option<&Ledger>,
     repo: &reviewq_ledger::RepoKey,
     problems: &mut u32,
-) -> Result<String> {
-    let Some(ledger) = ledger else {
-        return Ok("never".to_string());
+) -> String {
+    let note = |ledger: &Ledger| -> Result<String> {
+        let Some((repo_id, _)) = ledger.repos()?.into_iter().find(|(_, key)| key == repo) else {
+            return Ok("never".to_string());
+        };
+        let Some(at) = ledger.get_meta(repo_id, CURSOR_KEY)? else {
+            return Ok("never".to_string());
+        };
+        if ledger.get_meta(repo_id, TRUNCATED_KEY)?.as_deref() == Some("1") {
+            Ok(format!(
+                "{at} {}",
+                warn("last sweep hit the search cap — some PRs were missed")
+            ))
+        } else {
+            Ok(at)
+        }
     };
-    let repo_id = ledger.ensure_repo(repo)?;
-    let Some(at) = ledger.get_meta(repo_id, CURSOR_KEY)? else {
-        return Ok("never".to_string());
-    };
-    if ledger.get_meta(repo_id, TRUNCATED_KEY)?.as_deref() == Some("1") {
-        *problems += 1;
-        Ok(format!(
-            "{at} {}",
-            warn("last sweep hit the search cap — some PRs were missed")
-        ))
-    } else {
-        Ok(at)
+    match ledger {
+        None => "never".to_string(),
+        Some(ledger) => match note(ledger) {
+            Ok(note) => {
+                if note.contains("search cap") {
+                    *problems += 1;
+                }
+                note
+            }
+            Err(err) => {
+                *problems += 1;
+                warn(&format!("unreadable: {err:#}"))
+            }
+        },
     }
 }
 
@@ -205,12 +269,73 @@ fn warn(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reviewq_ledger::Ledger;
 
     fn config_with(review_command: &[&str]) -> config::Config {
         let mut config: config::Config =
             toml::from_str(config::DEFAULT_CONFIG).expect("default config parses");
         config.handoff.review_command = review_command.iter().map(|s| (*s).to_string()).collect();
         config
+    }
+
+    /// A ledger with one repo and a capped sweep recorded against it.
+    fn ledger_with(repo: &reviewq_ledger::RepoKey, cursor: Option<&str>, capped: bool) -> Ledger {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(repo).expect("repo");
+        if let Some(at) = cursor {
+            ledger.set_meta(repo_id, CURSOR_KEY, at).expect("cursor");
+        }
+        if capped {
+            ledger.set_meta(repo_id, TRUNCATED_KEY, "1").expect("cap");
+        }
+        ledger
+    }
+
+    fn key() -> reviewq_ledger::RepoKey {
+        reviewq_ledger::RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "airflow".into(),
+        }
+    }
+
+    #[test]
+    fn a_repo_the_ledger_has_never_synced_reads_as_never() {
+        let ledger = ledger_with(&key(), None, false);
+        let mut problems = 0;
+
+        assert_eq!(
+            last_sync_note(Some(&ledger), &key(), &mut problems),
+            "never"
+        );
+        assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn a_capped_sweep_is_reported_and_counted() {
+        let ledger = ledger_with(&key(), Some("2026-08-10T18:30:30Z"), true);
+        let mut problems = 0;
+
+        let note = last_sync_note(Some(&ledger), &key(), &mut problems);
+
+        assert!(note.contains("search cap"), "{note}");
+        assert_eq!(problems, 1);
+    }
+
+    #[test]
+    fn reporting_the_last_sync_does_not_register_the_repo() {
+        // `ensure_repo` writes. Diagnosing must not modify what it is diagnosing,
+        // which is also why the ledger file itself is never created here.
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let mut problems = 0;
+
+        let note = last_sync_note(Some(&ledger), &key(), &mut problems);
+
+        assert_eq!(note, "never");
+        assert!(
+            ledger.repos().expect("repos").is_empty(),
+            "doctor wrote a repo row while reporting on it"
+        );
     }
 
     #[test]
