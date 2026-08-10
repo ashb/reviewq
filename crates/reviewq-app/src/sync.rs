@@ -86,7 +86,7 @@ async fn sync_repo(
             .await?;
         stats.total_count = page.total_count;
         stats.cost += page.cost;
-        stats.remaining = page.remaining;
+        stats.remaining = Some(page.remaining);
 
         // Files arrive with the sweep, so classification is pure — no per-PR
         // round trip that could fail mid-page.
@@ -263,7 +263,7 @@ async fn involvement_search(
                 .search_prs_page(&query, page_size, after.as_deref())
                 .await?;
             stats.cost += page.cost;
-            stats.remaining = page.remaining;
+            stats.remaining = Some(page.remaining);
             for pr in &page.prs {
                 if ledger.upsert_pr(
                     repo_id,
@@ -297,6 +297,14 @@ async fn involvement_search(
 /// far better than running the budget to zero and erroring out.
 const DETAIL_BUDGET_FLOOR: u32 = 100;
 
+/// Whether to stop the detail pass rather than spend the tail of the budget.
+///
+/// Pulled out of the loop so it can be tested without a forge: it is one
+/// comparison, and it got the case it exists for backwards.
+fn budget_is_low(remaining: Option<u32>) -> bool {
+    remaining.is_some_and(|left| left < DETAIL_BUDGET_FLOOR)
+}
+
 /// Tier-2: for every tracked PR whose detail is stale, fetch its threads,
 /// reviews and mentions, classify it, and store the resulting attention. This
 /// is the expensive pass — one query per PR — so it runs only over the tracked
@@ -321,7 +329,7 @@ async fn detail_pass(
     for (index, tracked) in pending.iter().enumerate() {
         // The floor is checked against the budget the last fetch reported, so we
         // stop before spending the tail rather than after.
-        if stats.remaining != 0 && stats.remaining < DETAIL_BUDGET_FLOOR {
+        if budget_is_low(stats.remaining) {
             tracing::warn!(
                 remaining = stats.remaining,
                 done = index,
@@ -350,7 +358,7 @@ async fn detail_pass(
             continue;
         };
         stats.cost += detail.cost;
-        stats.remaining = detail.remaining;
+        stats.remaining = Some(detail.remaining);
         if queued {
             stats.queued += 1;
         }
@@ -624,8 +632,13 @@ pub struct Stats {
     pub truncated_unknown: u64,
     /// GraphQL points this repo's sync spent.
     pub cost: u32,
-    /// Points left in the hourly budget, as of the last response.
-    pub remaining: u32,
+    /// Points left in the hourly budget, as of the last response. `None` until
+    /// one has arrived.
+    ///
+    /// Distinct from `Some(0)`, which is the budget genuinely exhausted — the two
+    /// shared a `0` before, so the guard that exists to stop before the budget
+    /// runs out skipped itself in exactly that case.
+    pub remaining: Option<u32>,
 }
 
 /// One repo's sync outcome: the counters it accumulated, plus what the ledger
@@ -687,7 +700,10 @@ pub fn summary_line(summary: &RepoSummary) -> String {
     if s.truncated_unknown > 0 {
         line.push_str(&format!(", {} unknown (truncated)", s.truncated_unknown));
     }
-    line.push_str(&format!("; {} pts, {} left", s.cost, s.remaining));
+    match s.remaining {
+        Some(left) => line.push_str(&format!("; {} pts, {left} left", s.cost)),
+        None => line.push_str(&format!("; {} pts", s.cost)),
+    }
     line
 }
 
@@ -719,7 +735,7 @@ mod tests {
                 queued: 4,
                 truncated_unknown: 0,
                 cost: 61,
-                remaining: 4823,
+                remaining: Some(4823),
             },
             tracked: 7,
             total: 90,
@@ -733,6 +749,33 @@ mod tests {
             summary_line(&summary()),
             "sync apache/airflow: swept 12 of 12 in window, tracked 7/90 (+3 new), \
              5 interest, 2 involved, 4 on the queue; 61 pts, 4823 left"
+        );
+    }
+
+    #[test]
+    fn summary_line_omits_the_budget_before_any_response_reports_one() {
+        let mut unreported = summary();
+        unreported.stats.remaining = None;
+        let line = summary_line(&unreported);
+        assert!(line.ends_with("61 pts"), "{line}");
+        assert!(!line.contains("left"), "{line}");
+    }
+
+    #[test]
+    fn an_exhausted_budget_stops_the_detail_pass() {
+        // The case the guard exists for. It read `remaining != 0 && remaining <
+        // FLOOR`, so nought — the budget actually gone — skipped the check.
+        assert!(budget_is_low(Some(0)));
+        assert!(budget_is_low(Some(DETAIL_BUDGET_FLOOR - 1)));
+    }
+
+    #[test]
+    fn a_healthy_budget_and_an_unreported_one_both_let_the_pass_run() {
+        assert!(!budget_is_low(Some(DETAIL_BUDGET_FLOOR)));
+        assert!(!budget_is_low(Some(5000)));
+        assert!(
+            !budget_is_low(None),
+            "nothing has reported a budget yet, so there is nothing to be low"
         );
     }
 
