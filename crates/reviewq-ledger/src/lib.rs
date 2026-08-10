@@ -71,6 +71,12 @@ impl RepoKey {
 pub struct Located<T> {
     /// The repo the item belongs to.
     pub repo: RepoKey,
+    /// That repo's id, carried because the read already had it.
+    ///
+    /// Without it a caller holding one of these had to ask
+    /// [`ensure_repo`](Ledger::ensure_repo) for the id back — a *write*, on what
+    /// is otherwise a read path, once per selection move in the interface.
+    pub repo_id: i64,
     /// The item itself.
     pub item: T,
 }
@@ -203,6 +209,19 @@ impl Ledger {
         prepare_conn(&conn)?;
         schema::migrate(&mut conn)?;
         Ok(Self { conn })
+    }
+
+    /// `repo`'s id, if the ledger already knows it. A read — see
+    /// [`ensure_repo`](Self::ensure_repo) for the version that registers one.
+    pub fn repo_id(&self, repo: &RepoKey) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT id FROM repos WHERE host = ?1 AND owner = ?2 AND name = ?3",
+                params![repo.host, repo.owner, repo.name],
+                |row| row.get(0),
+            )
+            .optional()
+            .with_context(|| format!("looking up repo {}", repo.slug()))
     }
 
     /// Get-or-create `repo`'s row in `repos`, returning its id — every method
@@ -747,6 +766,7 @@ impl Ledger {
         for (repo_id, repo) in self.repos()? {
             out.extend(read(self, repo_id)?.into_iter().map(|item| Located {
                 repo: repo.clone(),
+                repo_id,
                 item,
             }));
         }
@@ -855,6 +875,33 @@ impl Ledger {
         Ok(rows)
     }
 
+    /// Every repo this ledger knows that has PR `number`.
+    ///
+    /// Lets a command naming a bare number work out which repo it belongs to.
+    /// `&[]` when no repo has it — a caller's answer either way is the same "not
+    /// in the ledger".
+    ///
+    /// A method rather than a free function over a path: as the latter it opened
+    /// its own connection and ran migrations, despite documenting itself as a pure
+    /// lookup, and every caller then opened a second one to do anything with the
+    /// answer.
+    pub fn repos_with_pr(&self, number: u64) -> Result<Vec<RepoKey>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.host, r.owner, r.name FROM prs p \
+             JOIN repos r ON r.id = p.repo_id WHERE p.number = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![number as i64], |row| {
+                Ok(RepoKey {
+                    host: row.get(0)?,
+                    owner: row.get(1)?,
+                    name: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// A PR's attention rows, most-urgent first.
     fn attention(&self, repo_id: i64, number: u64) -> Result<Vec<AttentionRow>> {
         let mut stmt = self.conn.prepare(
@@ -868,40 +915,6 @@ impl Ledger {
         rows.sort_by_key(|a| (a.priority(), a.since));
         Ok(rows)
     }
-}
-
-/// Every repo (already known to this ledger file) that has PR `number`. Lets
-/// a command that names a bare number but has no config to consult — `done`,
-/// `mute`, `show`, ... are ledger-only — resolve which repo it belongs to,
-/// without needing a `RepoKey` up front the way [`Ledger::ensure_repo`] does.
-/// `Ok(&[])` both when the file doesn't exist yet (nothing has ever been
-/// synced) and when it exists but has never heard of this number — either
-/// way, the caller's answer is the same "not in the ledger".
-///
-/// Doesn't create the file: unlike `Ledger::open`, a pure lookup should never
-/// have the side effect of creating a database that didn't exist.
-pub fn repos_with_pr(path: &std::path::Path, number: u64) -> Result<Vec<RepoKey>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let mut conn =
-        Connection::open(path).with_context(|| format!("opening ledger {}", path.display()))?;
-    prepare_conn(&conn)?;
-    schema::migrate(&mut conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT r.host, r.owner, r.name FROM prs p \
-         JOIN repos r ON r.id = p.repo_id WHERE p.number = ?1",
-    )?;
-    let rows = stmt
-        .query_map(params![number as i64], |row| {
-            Ok(RepoKey {
-                host: row.get(0)?,
-                owner: row.get(1)?,
-                name: row.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
 }
 
 /// Insert or update one PR row against `conn` (a connection or an open
@@ -1433,25 +1446,52 @@ mod tests {
 
     #[test]
     fn repos_with_pr_finds_the_owning_repo_without_a_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ledger.sqlite");
         let other = RepoKey {
             host: "github.com".into(),
             owner: "someone".into(),
             name: "else".into(),
         };
+        let ledger = Ledger::open_in_memory().unwrap();
 
-        assert!(repos_with_pr(&path, 1).unwrap().is_empty());
+        assert!(ledger.repos_with_pr(1).unwrap().is_empty());
 
-        let ledger = Ledger::open(&path).unwrap();
         let a = ledger.ensure_repo(&repo()).unwrap();
         ledger.upsert_pr(a, &pr(1), None, now()).unwrap();
         let b = ledger.ensure_repo(&other).unwrap();
         ledger.upsert_pr(b, &pr(2), None, now()).unwrap();
 
-        assert_eq!(repos_with_pr(&path, 1).unwrap(), vec![repo()]);
-        assert_eq!(repos_with_pr(&path, 2).unwrap(), vec![other]);
-        assert!(repos_with_pr(&path, 999).unwrap().is_empty());
+        assert_eq!(ledger.repos_with_pr(1).unwrap(), vec![repo()]);
+        assert_eq!(ledger.repos_with_pr(2).unwrap(), vec![other]);
+        assert!(ledger.repos_with_pr(999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn repo_id_reads_without_registering() {
+        let ledger = Ledger::open_in_memory().unwrap();
+
+        assert_eq!(ledger.repo_id(&repo()).unwrap(), None);
+        assert!(
+            ledger.repos().unwrap().is_empty(),
+            "looking a repo up must not create it"
+        );
+
+        let id = ledger.ensure_repo(&repo()).unwrap();
+        assert_eq!(ledger.repo_id(&repo()).unwrap(), Some(id));
+    }
+
+    #[test]
+    fn a_whole_database_read_carries_each_rows_repo_id() {
+        // What stops the interface asking `ensure_repo` — a write — for an id the
+        // read already had, every time the selection moves.
+        let ledger = Ledger::open_in_memory().unwrap();
+        let id = ledger.ensure_repo(&repo()).unwrap();
+        track(&ledger, id, &pr(1));
+
+        let waiting = ledger.waiting_all().unwrap();
+
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].repo_id, id);
+        assert_eq!(waiting[0].repo, repo());
     }
 
     #[test]

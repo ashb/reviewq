@@ -8,16 +8,18 @@ use anyhow::{Result, bail};
 use jiff::Timestamp;
 use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};
-use reviewq_ledger::{Ledger, PrShow, RepoKey};
+use reviewq_ledger::{PrShow, RepoKey};
 use serde::Serialize;
 
 use crate::cli::ShowArgs;
 use crate::commands::EXIT_EMPTY;
 use reviewq_app::config::{self, Loaded};
-use reviewq_app::paths;
 
 pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
     let target = &args.target;
+    // One handle for the whole command: resolving the repo and reading the PR are
+    // two reads on the same connection.
+    let ledger = reviewq_app::resolve::open()?;
     // A full URL already names its repo — no need to search for it, and it
     // disambiguates a number that's ambiguous across configured repos.
     let repo = match &target.repo {
@@ -27,7 +29,7 @@ pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
             name: url.name.clone(),
         },
         None => {
-            let mut repos = reviewq_ledger::repos_with_pr(&paths::database_file()?, target.number)?;
+            let mut repos = ledger.repos_with_pr(target.number)?;
             match repos.len() {
                 0 => return not_in_ledger(args.json, target.number),
                 1 => repos.remove(0),
@@ -43,8 +45,11 @@ pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
             }
         }
     };
-    let ledger = Ledger::open(&paths::database_file()?)?;
-    let repo_id = ledger.ensure_repo(&repo)?;
+    // A read: `show` is read-only, so a repo the ledger has never heard of is
+    // "not in the ledger", not a row to create on the way to saying so.
+    let Some(repo_id) = ledger.repo_id(&repo)? else {
+        return not_in_ledger(args.json, target.number);
+    };
     let Some(show) = ledger.show(repo_id, target.number)? else {
         return not_in_ledger(args.json, target.number);
     };

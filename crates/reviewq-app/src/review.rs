@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, RepoRef};
-use crate::paths;
 
 /// A resolved handoff: the command to run, and what to run it with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +132,7 @@ fn resolve_repo(config: &Config, number: u64) -> Result<RepoRef> {
         return Ok((*repo).clone());
     }
 
-    let found = reviewq_ledger::repos_with_pr(&paths::database_file()?, number)?;
+    let found = crate::resolve::open()?.repos_with_pr(number)?;
     match found.as_slice() {
         [key] => repos
             .into_iter()

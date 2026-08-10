@@ -401,8 +401,10 @@ pub enum Refreshed {
 /// ambiguous across repos is refused here too rather than resolving to whichever
 /// repo happened to come back first.
 pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
-    let db = paths::database_file()?;
-    let Some(key) = crate::resolve::repo_with_pr(number)? else {
+    // One handle for the whole call: the resolution below is a read on the same
+    // connection the refresh then writes through.
+    let ledger = crate::resolve::open()?;
+    let Some(key) = crate::resolve::repo_with_pr(&ledger, number)? else {
         return Ok(Refreshed::Untracked);
     };
 
@@ -422,8 +424,9 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         .find(|p| p.repos.contains(&repo))
         .with_context(|| format!("{} is no longer configured", repo.slug()))?;
 
-    let ledger = Ledger::open(&db)?;
-    let repo_id = ledger.ensure_repo(&key)?;
+    let repo_id = ledger
+        .repo_id(&key)?
+        .context("the number resolved to this repo a moment ago")?;
     let Some(show) = ledger.show(repo_id, number)? else {
         return Ok(Refreshed::Untracked);
     };

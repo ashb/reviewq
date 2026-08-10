@@ -38,7 +38,7 @@ pub async fn done(loaded: &Loaded, args: &NumberArgs) -> Result<ExitCode> {
 ///
 /// One load, used for both halves: finding the repo and reaching its forge.
 async fn mark_read(cfg: &Config, number: u64) -> Result<()> {
-    let key = repo_for(number)?;
+    let key = repo_for(&reviewq_app::resolve::open()?, number)?;
     let repo = cfg
         .repos()
         .find(|r| r.key() == key)

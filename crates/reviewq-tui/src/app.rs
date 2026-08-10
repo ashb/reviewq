@@ -362,7 +362,8 @@ impl Hooks {
                 let config = Arc::clone(&for_mark_read);
                 tokio::task::spawn_blocking(move || {
                     let marked = Handle::current().block_on(async move {
-                        let key = reviewq_app::resolve::repo_for(number)?;
+                        let key =
+                            reviewq_app::resolve::repo_for(&reviewq_app::resolve::open()?, number)?;
                         let repo = config
                             .repos()
                             .find(|r| r.key() == key)
@@ -553,14 +554,12 @@ impl App {
     }
 
     /// Read the selected PR's full detail.
+    ///
+    /// The row carries its own `repo_id`, so moving the selection stays a read.
     fn load_detail(&mut self) -> Result<()> {
         self.detail = match self.current() {
             None => None,
-            Some(item) => {
-                let repo_id = self.ledger.ensure_repo(&item.repo)?;
-                let number = item.item.pr.number;
-                self.ledger.show(repo_id, number)?
-            }
+            Some(item) => self.ledger.show(item.repo_id, item.item.pr.number)?,
         };
         Ok(())
     }
@@ -765,12 +764,9 @@ impl App {
         self.current().map(|item| item.item.pr.number)
     }
 
-    /// The `repo_id` the selected PR belongs to, resolved through the ledger.
-    fn selected_repo_id(&self) -> Result<Option<i64>> {
-        match self.current() {
-            None => Ok(None),
-            Some(item) => Ok(Some(self.ledger.ensure_repo(&item.repo)?)),
-        }
+    /// The `repo_id` the selected PR belongs to, as the queue read reported it.
+    fn selected_repo_id(&self) -> Option<i64> {
+        self.current().map(|item| item.repo_id)
     }
 
     /// Open the selected PR in a browser, reporting either way in the header.
@@ -1020,7 +1016,7 @@ impl App {
 
     /// Record the PR done, then let the forge know in the background.
     fn mark_done(&mut self, number: u64, hooks: &Hooks) -> Result<()> {
-        let Some(repo_id) = self.selected_repo_id()? else {
+        let Some(repo_id) = self.selected_repo_id() else {
             return Ok(());
         };
         let head = match &self.detail {
@@ -1090,7 +1086,7 @@ impl App {
     /// Snooze the PR for a duration in the CLI's syntax.
     fn apply_snooze(&mut self, number: u64, duration: &str) -> Result<()> {
         let until = reviewq_app::actions::snooze_until(Timestamp::now(), duration)?;
-        let Some(repo_id) = self.selected_repo_id()? else {
+        let Some(repo_id) = self.selected_repo_id() else {
             return Ok(());
         };
         let until = reviewq_app::actions::snooze(&self.ledger, repo_id, number, until)?;
@@ -1100,7 +1096,7 @@ impl App {
 
     /// Mute the selected PR, or unmute an already-muted one.
     fn toggle_mute(&mut self) -> Result<()> {
-        let (Some(number), Some(repo_id)) = (self.selected_number(), self.selected_repo_id()?)
+        let (Some(number), Some(repo_id)) = (self.selected_number(), self.selected_repo_id())
         else {
             return Ok(());
         };
@@ -1116,7 +1112,7 @@ impl App {
 
     /// Sink the selected PR to the bottom of the queue, or restore it.
     fn toggle_defer(&mut self) -> Result<()> {
-        let (Some(number), Some(repo_id)) = (self.selected_number(), self.selected_repo_id()?)
+        let (Some(number), Some(repo_id)) = (self.selected_number(), self.selected_repo_id())
         else {
             return Ok(());
         };
