@@ -6,15 +6,20 @@
 //! base16-ocean accents — keeping each hue's meaning constant across themes and
 //! adapting only its lightness for contrast.
 //!
-//! reviewq reuses that accent layer and nothing else, for two reasons.
+//! reviewq reuses that accent layer and nothing else: it renders no file content,
+//! so a syntax theme would buy it nothing.
 //!
-//! It renders no file content, so a syntax theme would buy it nothing. And it
-//! deliberately does not fill its own background: wiff fills because a
-//! highlighted document has to be internally coherent, whereas reviewq is
-//! chrome, so it sits on the terminal's own background and inherits whatever
-//! theme is already there. Sharing hues while leaving the background alone is
-//! what makes the two match — a background reviewq guessed would instead fight
-//! whatever the terminal actually uses.
+//! It does fill its own background, as wiff does. It did not, once, on the
+//! grounds that chrome should sit on the terminal's own and inherit whatever
+//! theme is there — which is defensible until the palette can be switched, and
+//! then it isn't: a light palette over a dark terminal is dark text on a dark
+//! background, and a switch that leaves the background alone changes a few
+//! foreground hues and calls itself a theme. Owning the background is what makes
+//! the choice mean anything.
+//!
+//! The cost is real and accepted: reviewq no longer composes with terminal
+//! transparency or a background image, and a terminal theme it doesn't match is
+//! a terminal theme it now covers.
 //!
 //! The accents are duplicated here as constants rather than imported. wiff is a
 //! git dependency on another project's unstable internals, and `wiff-diff`
@@ -70,12 +75,11 @@ const TEXT_CONTRAST: f64 = 4.5;
 /// text: secondary text is allowed to recede, but not to become unreadable.
 const DIM_CONTRAST: f64 = 3.0;
 
-/// The background a dark terminal is assumed to have. Never painted — accents
-/// are only made legible *against* it, so this is an assumption about the
-/// terminal rather than something drawn over it.
+/// The dark palette's background: painted, and the reference every accent in that
+/// palette is made legible against.
 const DARK_BG: Rgb = rgb(0x1e, 0x1e, 0x1e);
 
-/// The background a light terminal is assumed to have. See [`DARK_BG`].
+/// The light palette's background. See [`DARK_BG`].
 const LIGHT_BG: Rgb = rgb(0xff, 0xff, 0xff);
 
 /// Which reference background the palette is adapted for.
@@ -124,12 +128,10 @@ pub struct Theme {
     pub warn: Rgb,
     /// The key letter in a footer binding, as distinct from its label.
     pub key: Rgb,
-    /// Which background this palette was adapted for.
-    ///
-    /// Carried so the interface can offer the other one: a terminal that switches
-    /// light and dark on a schedule leaves a running reviewq adapted for the
-    /// wrong background, and asking it which it is now takes the same OSC 11 query
-    /// that is unreliable enough to be why this is configured.
+    /// The background everything is painted on, and the reference every accent
+    /// above was made legible against.
+    pub bg: Rgb,
+    /// Which of the two palettes this is, so the interface can offer the other.
     pub mode: Mode,
 }
 
@@ -178,6 +180,7 @@ impl Theme {
             quiet: readable(BLUE, bg, DIM_CONTRAST),
             warn: readable(ORANGE, bg, TEXT_CONTRAST),
             key: readable(GOLD, bg, TEXT_CONTRAST),
+            bg,
             mode,
         }
     }

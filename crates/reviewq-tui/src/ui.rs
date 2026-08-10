@@ -29,6 +29,13 @@ const MOUSE_GESTURES: &[(&str, &str)] = &[
 
 /// Draw the whole screen: header, the queue beside the detail, footer.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // The background first, over everything. ratatui styles are patches — a span
+    // that names only a foreground leaves the cell's background alone — so one
+    // fill here reaches every cell that nothing else deliberately repaints.
+    frame.render_widget(
+        Block::new().style(Style::default().bg(color(app.theme.bg))),
+        frame.area(),
+    );
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -348,7 +355,12 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     {
         lines.push(Line::from(""));
         lines.push(section("Description", t));
-        lines.extend(tui_markdown::from_str(body).lines);
+        lines.extend(
+            tui_markdown::from_str(body)
+                .lines
+                .into_iter()
+                .map(without_background),
+        );
     }
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -358,6 +370,19 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     let total = paragraph.line_count(inner.width);
     frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), inner);
     (total, inner)
+}
+
+/// Drop any background a markdown span carries.
+///
+/// `tui-markdown` paints inline code on a background of its own. That was
+/// invisible while reviewq left the background to the terminal; now that it paints
+/// one, an unstripped span is a black hole in the middle of a description. The
+/// foreground styling still tells code apart.
+fn without_background(mut line: Line<'_>) -> Line<'_> {
+    for span in &mut line.spans {
+        span.style.bg = None;
+    }
+    line
 }
 
 /// Remove `<!-- ... -->` runs from markdown.
@@ -617,8 +642,9 @@ fn keyed_hint(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
 
 /// A bordered box of `lines`, centred and sized to its content.
 ///
-/// [`Clear`]ed rather than filled, so it occludes without guessing the
-/// terminal's background — the same reason nothing else here paints one.
+/// [`Clear`]ed *and* filled: `Clear` resets the cells beneath to nothing, which
+/// would let the terminal's own background show through the one place the layout
+/// is deliberately opaque.
 fn modal(frame: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, t: &Theme) {
     let width = lines
         .iter()
@@ -633,6 +659,7 @@ fn modal(frame: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color(t.focus)))
+        .style(Style::default().bg(color(t.bg)))
         .padding(Padding::horizontal(1))
         .title(Span::styled(
             title.to_string(),
@@ -705,6 +732,7 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, t: &Theme) -> u16 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color(t.focus)))
+        .style(Style::default().bg(color(t.bg)))
         .padding(Padding::horizontal(1))
         .title(Span::styled(" Keys ", Style::default().fg(color(t.focus))));
     let inner = block.inner(area);
@@ -922,6 +950,55 @@ Adds a `deferrable` flag to `S3KeySensor`.
     /// happened to match somewhere else on the grid.
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         render(app, width, height).join("\n")
+    }
+
+    /// Every cell's background after a render, as a set — so a hole shows up as an
+    /// extra entry rather than having to be hunted for.
+    fn backgrounds(app: &mut App, width: u16, height: u16) -> std::collections::BTreeSet<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|(x, y)| format!("{:?}", buffer[(x, y)].bg))
+            .collect()
+    }
+
+    #[test]
+    fn the_palette_paints_its_own_background_everywhere() {
+        // reviewq used to leave the background to the terminal, which made
+        // switching palettes meaningless: a light palette over a dark terminal is
+        // dark text on a dark background. Owning every cell is what makes the
+        // choice mean something — and a cell it misses is a hole showing the
+        // terminal through.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+
+        assert_eq!(
+            backgrounds(&mut app, 100, 22),
+            ["Rgb(30, 30, 30)".to_string()].into_iter().collect(),
+            "the dark palette's background, and nothing else"
+        );
+
+        app.theme = app.theme.toggled();
+        assert_eq!(
+            backgrounds(&mut app, 100, 22),
+            ["Rgb(255, 255, 255)".to_string()].into_iter().collect(),
+            "and the light one after toggling"
+        );
+    }
+
+    #[test]
+    fn an_overlay_is_opaque_rather_than_letting_the_terminal_through() {
+        // `Clear` resets the cells beneath it to nothing, which is the one place
+        // the fill above would not reach.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.overlay = Overlay::Help { scroll: 0 };
+
+        assert_eq!(
+            backgrounds(&mut app, 100, 24),
+            ["Rgb(30, 30, 30)".to_string()].into_iter().collect(),
+            "including under the modal"
+        );
     }
 
     #[test]
