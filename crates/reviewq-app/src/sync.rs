@@ -1110,7 +1110,7 @@ mod engine_tests {
         .await
         .expect_err("the forge failed");
 
-        assert!(err.to_string().contains("fell over"), "{err:#}");
+        assert!(err.to_string().contains("detail for #2"), "{err:#}");
         assert_eq!(
             ledger.list_tracked(repo_id).expect("tracked").len(),
             2,

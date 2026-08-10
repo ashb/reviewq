@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 reviewq-core.workspace = true
 
-anyhow.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true

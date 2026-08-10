@@ -8,12 +8,12 @@ license.workspace = true
 [dependencies]
 reviewq-core.workspace = true
 
-anyhow.workspace = true
 async-trait.workspace = true
 jiff.workspace = true
 octocrab.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

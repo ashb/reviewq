@@ -32,6 +32,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
 use reviewq_app::sync::Refreshed;
+use reviewq_forge::ForgeError;
 use reviewq_ledger::{Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey};
 use std::sync::mpsc;
 
@@ -65,10 +66,22 @@ pub(crate) fn test_config() -> HeldConfig {
 fn failure_note(number: u64, err: &anyhow::Error) -> String {
     match err.downcast_ref::<LedgerError>() {
         Some(LedgerError::FromTheFuture) => {
-            "this ledger was written by a newer reviewq — upgrade to read it".to_string()
+            return "this ledger was written by a newer reviewq — upgrade to read it".to_string();
         }
         Some(LedgerError::Busy { .. }) => {
-            format!("#{number} is waiting on another reviewq's write — try again")
+            return format!("#{number} is waiting on another reviewq's write — try again");
+        }
+        _ => {}
+    }
+    match err.downcast_ref::<ForgeError>() {
+        Some(ForgeError::Rejected { host, .. }) => {
+            format!("{host} rejected the token — check `reviewq doctor`")
+        }
+        Some(ForgeError::BudgetSpent { host }) => {
+            format!("{host}'s API budget is spent — it refills on the hour")
+        }
+        Some(ForgeError::NoToken(_)) => {
+            format!("no token for #{number}'s host — see `reviewq doctor`")
         }
         _ => format!("#{number} refresh failed: {err:#}"),
     }
@@ -1540,12 +1553,40 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_rejected_token_is_told_apart_from_the_forge_being_unreachable() {
+        // The point of the forge's errors being typed: one of these needs a new
+        // token and the other needs nothing but time.
+        let mut app = app();
+        app.deliver(
+            70135,
+            Err(ForgeError::Rejected {
+                host: "github.com".into(),
+                source: "Bad credentials".into(),
+            }
+            .into()),
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("rejected the token"), "{status}");
+
+        app.deliver(
+            70135,
+            Err(ForgeError::BudgetSpent {
+                host: "github.com".into(),
+            }
+            .into()),
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("budget is spent"), "{status}");
+        assert!(status.contains("refills"), "{status}");
+    }
+
+    #[test]
     fn any_other_failure_is_quoted_as_it_arrived() {
         let mut app = app();
-        app.deliver(70135, Err(anyhow::anyhow!("bad credentials")));
+        app.deliver(70135, Err(anyhow::anyhow!("something nobody typed")));
 
         let status = app.status.clone().expect("a status");
-        assert!(status.contains("bad credentials"), "{status}");
+        assert!(status.contains("something nobody typed"), "{status}");
     }
 
     #[test]

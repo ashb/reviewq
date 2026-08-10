@@ -8,10 +8,9 @@
 
 use std::sync::Mutex;
 
-use anyhow::{Result, bail};
 use jiff::Timestamp;
 use reviewq_core::model::{PrSnapshot, PrState};
-use reviewq_forge::{Forge, PrDetail, RateLimit, SweepPage, Viewer};
+use reviewq_forge::{Forge, ForgeError, PrDetail, RateLimit, Result, SweepPage, Viewer};
 
 /// Parse a timestamp, for the fixtures below and the tests that build on them.
 pub(crate) fn ts(s: &str) -> Timestamp {
@@ -208,7 +207,10 @@ impl Forge for FakeForge {
     ) -> Result<Option<PrDetail>> {
         self.asked.lock().expect("lock").details.push(number);
         if self.detail_errors.lock().expect("lock").contains(&number) {
-            bail!("the forge fell over on #{number}");
+            return Err(ForgeError::Unreachable {
+                doing: format!("fetching detail for #{number}"),
+                source: "the fake was told to fail".into(),
+            });
         }
         Ok(self.details.lock().expect("lock").get(&number).cloned())
     }

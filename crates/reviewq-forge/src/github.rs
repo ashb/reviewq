@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use jiff::Timestamp;
 use octocrab::models::activity::Notification;
@@ -20,7 +19,46 @@ use serde::Deserialize;
 
 use crate::host::GITHUB_TOKEN_ENV;
 use crate::types::{PrDetail, RateLimit, SweepPage, Viewer};
-use crate::{Forge, ForgeHost, Token, resolve_token};
+use crate::{Forge, ForgeError, ForgeHost, Result, Token, resolve_token};
+
+/// Classify what octocrab reported.
+///
+/// The three that change what a reader should do are told apart here, once, rather
+/// than every call site guessing: credentials the forge refused, a spent budget,
+/// and everything else.
+fn classify(host: &str, doing: String, err: octocrab::Error) -> ForgeError {
+    let message = err.to_string();
+    let rejected = message.contains("401")
+        || message.contains("Bad credentials")
+        || message.contains("Unauthorized");
+    let budget = message.contains("rate limit") || message.contains("API rate limit exceeded");
+    if rejected {
+        ForgeError::Rejected {
+            host: host.to_string(),
+            source: Box::new(err),
+        }
+    } else if budget {
+        ForgeError::BudgetSpent {
+            host: host.to_string(),
+        }
+    } else {
+        ForgeError::Unreachable {
+            doing,
+            source: Box::new(err),
+        }
+    }
+}
+
+/// Anything that isn't the forge's fault: a bad `api_base`, a state we don't know.
+fn unreachable(
+    doing: impl Into<String>,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> ForgeError {
+    ForgeError::Unreachable {
+        doing: doing.into(),
+        source: Box::new(source),
+    }
+}
 
 /// A GitHub connection bound to one host.
 ///
@@ -96,9 +134,11 @@ impl GithubForge {
         if let Some(api_base) = &self.host.api_base {
             builder = builder
                 .base_uri(api_base.as_str())
-                .with_context(|| format!("invalid api_base {api_base:?}"))?;
+                .map_err(|err| unreachable(format!("invalid api_base {api_base:?}"), err))?;
         }
-        let built = builder.build().context("building GitHub client")?;
+        let built = builder
+            .build()
+            .map_err(|err| unreachable("building the GitHub client", err))?;
         Ok(self.client.get_or_init(|| built))
     }
 
@@ -112,10 +152,13 @@ impl GithubForge {
         // silenced at reviewq's -v levels (see the binary's tracing setup).
         tracing::debug!(op, "graphql request");
         let payload = serde_json::json!({ "query": query, "variables": variables });
-        self.client()?
-            .graphql(&payload)
-            .await
-            .with_context(|| format!("GitHub GraphQL request failed ({op})"))
+        self.client()?.graphql(&payload).await.map_err(|err| {
+            classify(
+                &self.web_host,
+                format!("GitHub GraphQL request ({op})"),
+                err,
+            )
+        })
     }
 }
 
@@ -138,12 +181,13 @@ impl Forge for GithubForge {
     }
 
     async fn rest_core_remaining(&self) -> Result<(u32, u32)> {
-        let limits = self
-            .client()?
-            .ratelimit()
-            .get()
-            .await
-            .context("fetching REST rate limit")?;
+        let limits = self.client()?.ratelimit().get().await.map_err(|err| {
+            classify(
+                &self.web_host,
+                "fetching the REST rate limit".to_string(),
+                err,
+            )
+        })?;
         Ok((
             limits.resources.core.remaining as u32,
             limits.resources.core.limit as u32,
@@ -226,7 +270,13 @@ impl Forge for GithubForge {
             .client()?
             .post("/graphql", Some(&payload))
             .await
-            .with_context(|| format!("GitHub GraphQL request failed ({op})"))?;
+            .map_err(|err| {
+                classify(
+                    &self.web_host,
+                    format!("GitHub GraphQL request ({op})"),
+                    err,
+                )
+            })?;
 
         let data = match response {
             GraphqlResponse::Ok(ok) => ok.data,
@@ -241,10 +291,20 @@ impl Forge for GithubForge {
                     );
                     return Ok(None);
                 }
-                bail!(
-                    "GitHub GraphQL request failed ({op}): {}",
-                    render_graphql_errors(&err.errors)
-                );
+                // A GraphQL error list, not a transport failure — the forge
+                // answered and refused. Rejected credentials come back this way
+                // too, so the message is checked before settling on unreachable.
+                let rendered = render_graphql_errors(&err.errors);
+                if rendered.contains("Bad credentials") {
+                    return Err(ForgeError::Rejected {
+                        host: self.web_host.clone(),
+                        source: rendered.into(),
+                    });
+                }
+                return Err(ForgeError::Unreachable {
+                    doing: format!("GitHub GraphQL request ({op}): {rendered}"),
+                    source: "the forge returned errors".into(),
+                });
             }
         };
         data.rate_limit.trace("sync:detail");
@@ -271,11 +331,21 @@ impl Forge for GithubForge {
             .per_page(50)
             .send()
             .await
-            .with_context(|| format!("listing notifications for {owner}/{name}"))?;
-        let notifications: Vec<Notification> = client
-            .all_pages(first_page)
-            .await
-            .with_context(|| format!("paginating notifications for {owner}/{name}"))?;
+            .map_err(|err| {
+                classify(
+                    &self.web_host,
+                    format!("listing notifications for {owner}/{name}"),
+                    err,
+                )
+            })?;
+        let notifications: Vec<Notification> =
+            client.all_pages(first_page).await.map_err(|err| {
+                classify(
+                    &self.web_host,
+                    format!("paginating notifications for {owner}/{name}"),
+                    err,
+                )
+            })?;
 
         // The subject URL is the PR's REST API URL (".../pulls/{number}"); it's
         // the only field that names which PR a notification belongs to.
@@ -292,7 +362,13 @@ impl Forge for GithubForge {
                     .notifications()
                     .mark_as_read(n.id)
                     .await
-                    .with_context(|| format!("marking notification {} read", n.id))?;
+                    .map_err(|err| {
+                        classify(
+                            &self.web_host,
+                            format!("marking notification {} read", n.id),
+                            err,
+                        )
+                    })?;
             }
         }
         Ok(())
@@ -418,8 +494,10 @@ struct PathNode {
 
 impl PrNode {
     fn into_snapshot(self) -> Result<PrSnapshot> {
-        let state = PrState::from_wire(&self.state)
-            .with_context(|| format!("PR #{}: unknown state {:?}", self.number, self.state))?;
+        let state = PrState::from_wire(&self.state).ok_or_else(|| ForgeError::Unreachable {
+            doing: format!("PR #{}: unknown state {:?}", self.number, self.state),
+            source: "the forge reported a pull-request state this build does not know".into(),
+        })?;
         let paths: Vec<String> = self.files.nodes.into_iter().map(|n| n.path).collect();
         let files_truncated = self.files.total_count > paths.len() as u32;
         Ok(PrSnapshot {
@@ -495,7 +573,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 }
 ";
 
-/// Join GraphQL error messages for an `anyhow` chain.
+/// Join GraphQL error messages into one line for a [`ForgeError`].
 ///
 /// Written here rather than reusing octocrab's own `Display`, which isn't
 /// publicly re-exported and which pads the message with source locations and a

@@ -17,9 +17,55 @@ pub use host::{
 };
 pub use types::{PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
 
-use anyhow::{Result, bail};
 use async_trait::async_trait;
 use reviewq_core::model::PrSnapshot;
+
+/// What can go wrong reaching a forge.
+///
+/// Typed for the same reason the ledger's are: an interface handed one string can
+/// only print it. "Your token was rejected" needs a new token, "the budget is
+/// spent" needs waiting for the reset, and "the network is unreachable" needs
+/// neither — and every one of them arrived as `anyhow::Error` before.
+#[derive(Debug, thiserror::Error)]
+pub enum ForgeError {
+    /// No token could be resolved for the host.
+    #[error("{0}")]
+    NoToken(String),
+
+    /// The forge rejected the credentials it was given.
+    #[error("{host} rejected the token — it may have expired or lack the scopes reviewq needs")]
+    Rejected {
+        /// The host that refused.
+        host: String,
+        /// What it said.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The point budget for this window is spent.
+    #[error("{host}'s API budget is spent; it refills on the hour")]
+    BudgetSpent {
+        /// The host that is rate-limiting.
+        host: String,
+    },
+
+    /// Nothing configured knows this host, or its provider has no adapter.
+    #[error("{0}")]
+    NoAdapter(String),
+
+    /// The request could not be made or its answer not understood.
+    #[error("{doing}")]
+    Unreachable {
+        /// What was being attempted.
+        doing: String,
+        /// Why it failed.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+/// Every fallible forge operation fails with a [`ForgeError`].
+pub type Result<T> = std::result::Result<T, ForgeError>;
 
 /// One forge's operations. Each is roughly a single logical request; the
 /// implementation handles pagination and wire formats.
@@ -131,8 +177,16 @@ pub fn parse_pull_request_url(forges: &ForgeTable, url: &str) -> Result<Option<P
 
     let parsed = match host.provider.as_deref() {
         Some("github") => github::GithubForge::parse_web_path(path),
-        Some(other) => bail!("no forge adapter for provider {other:?}"),
-        None => bail!("forge host {host_name:?} has no provider"),
+        Some(other) => {
+            return Err(ForgeError::NoAdapter(format!(
+                "no forge adapter for provider {other:?}"
+            )));
+        }
+        None => {
+            return Err(ForgeError::NoAdapter(format!(
+                "forge host {host_name:?} has no provider"
+            )));
+        }
     };
     Ok(parsed.map(|(owner, name, number)| PullRequestRef {
         host: host_name.to_string(),
@@ -162,7 +216,11 @@ pub fn build(host: &ForgeHost, host_name: &str, token: Option<Token>) -> Result<
             Some(token) => github::GithubForge::with_token(host, host_name, token),
             None => github::GithubForge::new(host, host_name),
         })),
-        Some(other) => bail!("no forge adapter for provider {other:?}"),
-        None => bail!("forge host has no provider"),
+        Some(other) => Err(ForgeError::NoAdapter(format!(
+            "no forge adapter for provider {other:?}"
+        ))),
+        None => Err(ForgeError::NoAdapter(
+            "forge host has no provider".to_string(),
+        )),
     }
 }

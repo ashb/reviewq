@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, bail};
+use crate::{ForgeError, Result};
 use serde::{Deserialize, Serialize};
 
 /// The public GitHub host, used when `[repo]` names no other.
@@ -120,15 +120,19 @@ const SUPPORTED_PROVIDERS: &[&str] = &["github"];
 /// neither built in nor configured, if it names no provider, or if it names one
 /// with no adapter yet.
 pub fn resolve_host(table: &ForgeTable, host: &str) -> Result<ForgeHost> {
-    let resolved = table.host(host).with_context(|| {
-        format!("unknown forge host {host:?}; add a [forge.\"{host}\"] entry naming its provider")
+    let resolved = table.host(host).ok_or_else(|| {
+        ForgeError::NoAdapter(format!(
+            "unknown forge host {host:?}; add a [forge.\"{host}\"] entry naming its provider"
+        ))
     })?;
     match resolved.provider.as_deref() {
         Some(provider) if SUPPORTED_PROVIDERS.contains(&provider) => Ok(resolved),
-        Some(other) => {
-            bail!("forge host {host:?} names provider {other:?}, which has no adapter yet")
-        }
-        None => bail!("forge host {host:?} has no provider"),
+        Some(other) => Err(ForgeError::NoAdapter(format!(
+            "forge host {host:?} names provider {other:?}, which has no adapter yet"
+        ))),
+        None => Err(ForgeError::NoAdapter(format!(
+            "forge host {host:?} has no provider"
+        ))),
     }
 }
 
@@ -213,7 +217,7 @@ pub fn resolve_token(host: &ForgeHost) -> Result<Token> {
             source: TokenSource::GhCli,
         });
     }
-    bail!(
+    Err(ForgeError::NoToken(format!(
         "no token found for {host}: set ${OVERRIDE_ENV}{}, configure a token_command, \
          or make `gh auth token` work",
         host.token_env
@@ -221,35 +225,38 @@ pub fn resolve_token(host: &ForgeHost) -> Result<Token> {
             .map(|v| format!(" / ${v}"))
             .unwrap_or_default(),
         host = host.provider.as_deref().unwrap_or("this host"),
-    )
+    )))
 }
 
 /// Run a configured `token_command` (argv, no shell) and return its trimmed
 /// stdout. A non-zero exit, empty output, or missing program is an error — never
 /// a silent fall-through to the next source.
 fn run_token_command(argv: &[String]) -> Result<String> {
-    let (program, args) = argv
-        .split_first()
-        .context("token_command is empty; give it a program and arguments")?;
+    let (program, args) = argv.split_first().ok_or_else(|| {
+        ForgeError::NoToken("token_command is empty; give it a program and arguments".to_string())
+    })?;
     let output = std::process::Command::new(program)
         .args(args)
         .output()
-        .with_context(|| format!("running token_command {program:?}"))?;
+        .map_err(|err| ForgeError::NoToken(format!("running token_command {program:?}: {err}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
+        return Err(ForgeError::NoToken(format!(
             "token_command `{}` failed ({}): {}",
             argv.join(" "),
             output.status,
             stderr.trim()
-        );
+        )));
     }
     let token = String::from_utf8(output.stdout)
-        .context("token_command output was not UTF-8")?
+        .map_err(|_| ForgeError::NoToken("token_command output was not UTF-8".to_string()))?
         .trim()
         .to_string();
     if token.is_empty() {
-        bail!("token_command `{}` produced no output", argv.join(" "));
+        return Err(ForgeError::NoToken(format!(
+            "token_command `{}` produced no output",
+            argv.join(" ")
+        )));
     }
     Ok(token)
 }
@@ -276,7 +283,9 @@ fn resolve_from_env(
     {
         let path = path.trim();
         if path.is_empty() {
-            bail!("the token file path in ${var} is empty");
+            return Err(ForgeError::NoToken(format!(
+                "the token file path in ${var} is empty"
+            )));
         }
         let value = read_token_file(Path::new(path))?;
         return Ok(Some(Token {
@@ -317,17 +326,21 @@ fn is_github(host: &ForgeHost) -> bool {
 fn non_empty(value: &str, describe: impl FnOnce() -> String) -> Result<String> {
     let token = value.trim();
     if token.is_empty() {
-        bail!(describe());
+        return Err(ForgeError::NoToken(describe()));
     }
     Ok(token.to_string())
 }
 
 fn read_token_file(path: &Path) -> Result<String> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("reading token from {}", path.display()))?;
+    let contents = std::fs::read_to_string(path).map_err(|err| {
+        ForgeError::NoToken(format!("reading token from {}: {err}", path.display()))
+    })?;
     let token = contents.trim();
     if token.is_empty() {
-        bail!("the token file {} is empty", path.display());
+        return Err(ForgeError::NoToken(format!(
+            "the token file {} is empty",
+            path.display()
+        )));
     }
     Ok(token.to_string())
 }
@@ -343,7 +356,10 @@ fn gh_auth_token() -> Result<Option<String>> {
     if !output.status.success() {
         return Ok(None);
     }
-    let token = String::from_utf8(output.stdout)?.trim().to_string();
+    let token = String::from_utf8(output.stdout)
+        .map_err(|_| ForgeError::NoToken("`gh auth token` output was not UTF-8".to_string()))?
+        .trim()
+        .to_string();
     Ok((!token.is_empty()).then_some(token))
 }
 

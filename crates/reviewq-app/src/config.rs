@@ -471,7 +471,7 @@ impl Config {
 
     /// The resolved forge settings for `host`, with a supported provider.
     pub fn forge_host_for(&self, host: &str) -> Result<ForgeHost> {
-        resolve_host(&self.forges, host)
+        Ok(resolve_host(&self.forges, host)?)
     }
 
     /// Resolve `host`'s settings and build a [`Forge`] for it — the sequence
@@ -493,7 +493,7 @@ impl Config {
     /// collapsing them here would cost it that granularity.
     pub fn forge_for(&self, host: &str) -> Result<Box<dyn Forge>> {
         let resolved = self.forge_host_for(host)?;
-        build(&resolved, host, None)
+        Ok(build(&resolved, host, None)?)
     }
 
     /// The relationships that involve me in `project`: its own override if set,

@@ -40,9 +40,9 @@ pub fn done(ledger: &Ledger, repo_id: i64, number: u64, head_sha: &str) -> Resul
 /// Callers log a failure rather than surfacing it.
 pub async fn mark_notifications_read(cfg: &Config, repo: &RepoRef, number: u64) -> Result<()> {
     let forge = cfg.forge_for(&repo.host)?;
-    forge
+    Ok(forge
         .mark_pr_notifications_read(&repo.owner, &repo.name, number)
-        .await
+        .await?)
 }
 
 /// Suppress everything on a PR until `until`, mentions included.
