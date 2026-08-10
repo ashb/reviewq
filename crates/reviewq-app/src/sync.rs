@@ -40,7 +40,21 @@ pub async fn run(cfg: &Config, progress: &mut dyn SyncProgress) -> Result<ExitCo
         let rules = cfg.interest_for(project)?;
         for repo in &project.repos {
             let repo_id = ledger.ensure_repo(&repo.key())?;
-            sync_repo(cfg, &ledger, repo_id, project, repo, &rules, now, progress).await?;
+            // Built here rather than inside the per-repo sync, so that sync is
+            // reachable with a forge a test supplies.
+            let forge = cfg.forge_for(&repo.host)?;
+            sync_repo(
+                cfg,
+                forge.as_ref(),
+                &ledger,
+                repo_id,
+                project,
+                repo,
+                &rules,
+                now,
+                progress,
+            )
+            .await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -53,6 +67,7 @@ pub async fn run(cfg: &Config, progress: &mut dyn SyncProgress) -> Result<ExitCo
 #[allow(clippy::too_many_arguments)]
 async fn sync_repo(
     cfg: &Config,
+    forge: &dyn Forge,
     ledger: &Ledger,
     repo_id: i64,
     project: &Project,
@@ -61,8 +76,6 @@ async fn sync_repo(
     now: Timestamp,
     progress: &mut dyn SyncProgress,
 ) -> Result<()> {
-    let forge = cfg.forge_for(&repo.host)?;
-
     let since = sweep_since(ledger, repo_id, cfg, now)?;
 
     // Oldest-updated first, so the cursor watermark advances monotonically and
@@ -134,7 +147,7 @@ async fn sync_repo(
     ledger.set_meta(repo_id, TRUNCATED_KEY, if truncated { "1" } else { "0" })?;
 
     let review_requested = involvement_search(
-        forge.as_ref(),
+        forge,
         ledger,
         repo_id,
         repo,
@@ -148,7 +161,7 @@ async fn sync_repo(
     .await?;
 
     detail_pass(
-        forge.as_ref(),
+        forge,
         ledger,
         repo_id,
         repo,
@@ -791,12 +804,13 @@ mod tests {
         assert!(!summary_line(&summary()).contains("unknown"));
     }
 
-    /// A sink that records what it was told, standing in for the CLI's stderr
-    /// one wherever a test needs to drive a sync without printing.
+    /// A sink that records what it was told, standing in for the CLI's stderr one
+    /// wherever a test drives a sync without printing. What it recorded is
+    /// asserted by the engine tests that actually run a sync through it.
     #[derive(Default)]
-    struct RecordingProgress {
-        pages: Vec<(String, usize, u32)>,
-        finished: Vec<String>,
+    pub(super) struct RecordingProgress {
+        pub(super) pages: Vec<(String, usize, u32)>,
+        pub(super) finished: Vec<String>,
     }
 
     impl SyncProgress for RecordingProgress {
@@ -808,14 +822,614 @@ mod tests {
             self.finished.push(summary.repo.clone());
         }
     }
+}
 
-    #[test]
-    fn a_recording_sink_captures_pages_and_completions_without_printing() {
+/// The sync engine driven against a forge a test supplies.
+///
+/// Every pass here takes `&dyn Forge` and an open [`Ledger`], so all of it is
+/// reachable without a network: what these cover is the sweep's pagination and
+/// cursor, the search cap, the budget floor, and what survives a failure
+/// part-way through — none of which the shape of the code was enough to
+/// guarantee.
+#[cfg(test)]
+mod engine_tests {
+    use super::tests::RecordingProgress;
+    use super::*;
+    use reviewq_core::model::{PrState, Verdict};
+    use reviewq_forge::{PrDetail, RateLimit, SweepPage, Viewer};
+    use reviewq_ledger::RepoKey;
+    use std::sync::Mutex;
+
+    fn ts(s: &str) -> Timestamp {
+        s.parse().expect("timestamp")
+    }
+
+    fn now() -> Timestamp {
+        ts("2026-08-11T12:00:00Z")
+    }
+
+    fn pr(number: u64, updated: &str) -> PrSnapshot {
+        PrSnapshot {
+            number,
+            title: format!("PR {number}"),
+            author: "potiuk".into(),
+            author_association: "MEMBER".into(),
+            head_sha: format!("sha{number}"),
+            base_ref: "main".into(),
+            is_draft: false,
+            state: PrState::Open,
+            updated_at: ts(updated),
+            labels: vec!["area:task-sdk".into()],
+            milestone: None,
+            // The sweep always carries files, so classification is never
+            // `NeedsFiles`.
+            files: Some(vec!["task-sdk/src/thing.py".into()]),
+            files_truncated: false,
+        }
+    }
+
+    fn rate_limit(remaining: u32) -> RateLimit {
+        RateLimit {
+            limit: 5000,
+            cost: 1,
+            remaining,
+            reset_at: ts("2026-08-11T13:00:00Z"),
+        }
+    }
+
+    /// One page a scripted forge will serve.
+    #[derive(Clone)]
+    struct Page {
+        prs: Vec<PrSnapshot>,
+        next: Option<String>,
+        total_count: u32,
+        remaining: u32,
+    }
+
+    impl Page {
+        fn of(prs: Vec<PrSnapshot>) -> Self {
+            let total_count = prs.len() as u32;
+            Self {
+                prs,
+                next: None,
+                total_count,
+                remaining: 4900,
+            }
+        }
+
+        fn then(mut self, cursor: &str) -> Self {
+            self.next = Some(cursor.to_string());
+            self
+        }
+
+        /// Claim more matches than the page carries, as a truncated window does.
+        fn of_total(mut self, total: u32) -> Self {
+            self.total_count = total;
+            self
+        }
+    }
+
+    /// What the fake was asked, so a test can assert on the questions as well as
+    /// the answers.
+    #[derive(Default)]
+    struct Asked {
+        searches: Vec<(String, Option<String>)>,
+        details: Vec<u64>,
+    }
+
+    /// A forge that serves scripted pages and details, and records its calls.
+    struct FakeForge {
+        /// Search pages, served in order; the last is reused if asked again.
+        pages: Mutex<std::collections::VecDeque<Page>>,
+        /// Per-PR detail. A number absent from here is a PR the forge no longer
+        /// has, which is the deleted-PR path.
+        details: Mutex<std::collections::HashMap<u64, PrDetail>>,
+        /// Numbers whose detail fetch should fail outright.
+        detail_errors: Mutex<std::collections::HashSet<u64>>,
+        asked: Mutex<Asked>,
+    }
+
+    impl FakeForge {
+        fn new(pages: Vec<Page>) -> Self {
+            Self {
+                pages: Mutex::new(pages.into()),
+                details: Mutex::new(std::collections::HashMap::new()),
+                detail_errors: Mutex::new(std::collections::HashSet::new()),
+                asked: Mutex::new(Asked::default()),
+            }
+        }
+
+        /// Give `number` a detail response that holds nothing of interest.
+        fn with_detail(self, number: u64, remaining: u32) -> Self {
+            self.details.lock().expect("lock").insert(
+                number,
+                PrDetail {
+                    number,
+                    head_sha: format!("sha{number}"),
+                    body: String::new(),
+                    last_reviewed_sha: None,
+                    last_verdict: None,
+                    last_action_at: None,
+                    threads: vec![],
+                    reviewers: vec![],
+                    mentions: vec![],
+                    new_commits: 0,
+                    review_request: None,
+                    cost: 1,
+                    remaining,
+                },
+            );
+            self
+        }
+
+        /// Give `number` a detail response that puts it on the queue: someone
+        /// asked me to review it.
+        fn with_review_request(self, number: u64, remaining: u32) -> Self {
+            let this = self.with_detail(number, remaining);
+            if let Some(detail) = this.details.lock().expect("lock").get_mut(&number) {
+                detail.review_request = Some(reviewq_core::model::ReviewRequest { team: None });
+            }
+            this
+        }
+
+        fn failing_detail(self, number: u64) -> Self {
+            self.detail_errors.lock().expect("lock").insert(number);
+            self
+        }
+
+        fn searches(&self) -> Vec<(String, Option<String>)> {
+            self.asked.lock().expect("lock").searches.clone()
+        }
+
+        fn details_asked(&self) -> Vec<u64> {
+            self.asked.lock().expect("lock").details.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Forge for FakeForge {
+        async fn viewer(&self) -> Result<Viewer> {
+            Ok(Viewer {
+                login: "ashb".into(),
+                rate_limit: rate_limit(4900),
+            })
+        }
+
+        async fn rest_core_remaining(&self) -> Result<(u32, u32)> {
+            Ok((5000, 5000))
+        }
+
+        async fn search_prs_page(
+            &self,
+            query: &str,
+            _page_size: u32,
+            after: Option<&str>,
+        ) -> Result<SweepPage> {
+            self.asked
+                .lock()
+                .expect("lock")
+                .searches
+                .push((query.to_string(), after.map(str::to_string)));
+            let mut pages = self.pages.lock().expect("lock");
+            let page = if pages.len() > 1 {
+                pages.pop_front().expect("a page")
+            } else {
+                pages.front().cloned().unwrap_or_else(|| Page::of(vec![]))
+            };
+            Ok(SweepPage {
+                prs: page.prs,
+                next: page.next,
+                total_count: page.total_count,
+                cost: 1,
+                remaining: page.remaining,
+            })
+        }
+
+        async fn fetch_pr(
+            &self,
+            _owner: &str,
+            _name: &str,
+            number: u64,
+        ) -> Result<Option<PrSnapshot>> {
+            Ok(Some(pr(number, "2026-08-11T09:00:00Z")))
+        }
+
+        async fn fetch_pr_detail(
+            &self,
+            _owner: &str,
+            _name: &str,
+            number: u64,
+            _login: &str,
+        ) -> Result<Option<PrDetail>> {
+            self.asked.lock().expect("lock").details.push(number);
+            if self.detail_errors.lock().expect("lock").contains(&number) {
+                bail!("the forge fell over on #{number}");
+            }
+            Ok(self.details.lock().expect("lock").get(&number).cloned())
+        }
+
+        async fn mark_pr_notifications_read(
+            &self,
+            _owner: &str,
+            _name: &str,
+            _number: u64,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn web_url(&self, owner: &str, name: &str, number: u64) -> String {
+            format!("https://github.com/{owner}/{name}/pull/{number}")
+        }
+
+        fn handoff_credentials(&self) -> Result<(&str, &str)> {
+            Ok(("GITHUB_TOKEN", "fake"))
+        }
+    }
+
+    /// A config with one repo, one label rule, and no involvement searches — so a
+    /// test that only cares about the sweep isn't also scripting those.
+    fn config(extra: &str) -> Config {
+        toml::from_str(&format!(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{{ owner = "apache", name = "airflow" }}]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            [involvement]
+            reasons = []
+            {extra}
+            "#
+        ))
+        .expect("config parses")
+    }
+
+    fn repo_key() -> RepoKey {
+        RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "airflow".into(),
+        }
+    }
+
+    /// Run one repo's whole sync against `forge`, returning the ledger it wrote.
+    async fn sync(cfg: &Config, forge: &dyn Forge) -> (Ledger, i64, RecordingProgress) {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
         let mut progress = RecordingProgress::default();
-        progress.page("updated", 30, 120);
-        progress.repo_finished(&summary());
+        let project = &cfg.projects[0];
+        let rules = cfg.interest_for(project).expect("rules");
+        sync_repo(
+            cfg,
+            forge,
+            &ledger,
+            repo_id,
+            project,
+            &project.repos[0],
+            &rules,
+            now(),
+            &mut progress,
+        )
+        .await
+        .expect("sync");
+        (ledger, repo_id, progress)
+    }
 
-        assert_eq!(progress.pages, vec![("updated".to_string(), 30, 120)]);
-        assert_eq!(progress.finished, vec!["apache/airflow".to_string()]);
+    #[tokio::test]
+    async fn the_sweep_follows_every_page_and_leaves_the_cursor_at_the_newest_seen() {
+        let cfg = config("");
+        let forge = FakeForge::new(vec![
+            Page::of(vec![
+                pr(1, "2026-08-09T09:00:00Z"),
+                pr(2, "2026-08-09T10:00:00Z"),
+            ])
+            .then("cursor-1")
+            .of_total(4),
+            // Deliberately not in ascending order: the watermark is the newest
+            // `updatedAt` on the page, not the first row of the last one.
+            Page::of(vec![
+                pr(3, "2026-08-09T08:00:00Z"),
+                pr(4, "2026-08-10T11:00:00Z"),
+            ])
+            .of_total(4),
+        ])
+        .with_detail(1, 4900)
+        .with_detail(2, 4900)
+        .with_detail(3, 4900)
+        .with_detail(4, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        let asked = forge.searches();
+        assert_eq!(asked.len(), 2, "both pages fetched: {asked:?}");
+        assert_eq!(asked[0].1, None, "first page asks with no cursor");
+        assert_eq!(
+            asked[1].1.as_deref(),
+            Some("cursor-1"),
+            "the second follows the first's cursor"
+        );
+        assert_eq!(ledger.list_tracked(repo_id).expect("tracked").len(), 4);
+        assert_eq!(
+            ledger.get_meta(repo_id, CURSOR_KEY).expect("cursor"),
+            Some("2026-08-10T11:00:00Z".to_string()),
+            "the watermark is the newest updatedAt swept, not the last page's first row"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_with_more_matches_than_it_served_is_recorded_as_truncated() {
+        // The forge caps a search at 1000 results however many match. A window
+        // that blew past it means PRs were silently missed, which `doctor`
+        // reports and which must not read as a clean sync.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![
+            Page::of(vec![pr(1, "2026-08-09T09:00:00Z")]).of_total(reviewq_forge::SEARCH_CAP + 5),
+        ])
+        .with_detail(1, 4900);
+
+        let (ledger, repo_id, progress) = sync(&cfg, &forge).await;
+
+        assert_eq!(
+            ledger.get_meta(repo_id, TRUNCATED_KEY).expect("flag"),
+            Some("1".to_string())
+        );
+        assert!(progress.finished.contains(&"apache/airflow".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_window_it_served_whole_clears_a_previous_truncation() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        ledger
+            .set_meta(repo_id, TRUNCATED_KEY, "1")
+            .expect("stale flag");
+
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
+            .with_detail(1, 4900);
+        let project = &cfg.projects[0];
+        let rules = cfg.interest_for(project).expect("rules");
+        sync_repo(
+            &cfg,
+            &forge,
+            &ledger,
+            repo_id,
+            project,
+            &project.repos[0],
+            &rules,
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("sync");
+
+        assert_eq!(
+            ledger.get_meta(repo_id, TRUNCATED_KEY).expect("flag"),
+            Some("0".to_string()),
+            "a full window must not leave yesterday's truncation standing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_detail_pass_stops_before_spending_the_budget_and_keeps_what_it_did() {
+        // Each PR commits on its own, and the sweep watermark is already stored,
+        // so stopping short costs nothing but a second run.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![
+            pr(1, "2026-08-09T09:00:00Z"),
+            pr(2, "2026-08-09T10:00:00Z"),
+            pr(3, "2026-08-09T11:00:00Z"),
+        ])])
+        // The first detail comes back reporting the budget *gone*, so the pass
+        // must stop rather than fetch the other two. Nought rather than merely
+        // low: that is the value the guard used to skip itself on.
+        .with_review_request(1, 0)
+        .with_detail(2, 4900)
+        .with_detail(3, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        assert_eq!(
+            forge.details_asked(),
+            vec![1],
+            "it stopped after the response that reported the low budget"
+        );
+        assert_eq!(
+            ledger.queue(repo_id).expect("queue").len(),
+            1,
+            "what it did finish is committed"
+        );
+        assert_eq!(
+            ledger
+                .prs_needing_detail(repo_id, false)
+                .expect("pending")
+                .len(),
+            2,
+            "and the rest are still due, so the next sync finishes them"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pr_the_forge_no_longer_has_is_recorded_and_not_retried() {
+        // A deleted PR used to abort the whole sync. It has to be remembered as
+        // unavailable, or every later sync would ask again and fail again.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![
+            pr(1, "2026-08-09T09:00:00Z"),
+            pr(2, "2026-08-09T10:00:00Z"),
+        ])])
+        // #1 has no detail scripted at all, which is the forge saying it's gone.
+        .with_review_request(2, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        assert_eq!(
+            forge.details_asked(),
+            vec![1, 2],
+            "the sync carried on past it"
+        );
+        assert_eq!(
+            ledger.queue(repo_id).expect("queue").len(),
+            1,
+            "only the PR that still exists is on the queue"
+        );
+        let pending: Vec<u64> = ledger
+            .prs_needing_detail(repo_id, false)
+            .expect("pending")
+            .iter()
+            .map(|t| t.pr.number)
+            .collect();
+        assert!(
+            !pending.contains(&1),
+            "a PR known to be gone must not be asked for again, was {pending:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_detail_fetch_that_fails_stops_the_sync_and_keeps_the_pages_it_committed() {
+        // Unlike a deleted PR, a forge error is not something to absorb: it could
+        // be a token or an outage, and carrying on would write a queue computed
+        // from half the data.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![
+            pr(1, "2026-08-09T09:00:00Z"),
+            pr(2, "2026-08-09T10:00:00Z"),
+        ])])
+        .with_review_request(1, 4900)
+        .failing_detail(2);
+
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        let project = &cfg.projects[0];
+        let rules = cfg.interest_for(project).expect("rules");
+        let err = sync_repo(
+            &cfg,
+            &forge,
+            &ledger,
+            repo_id,
+            project,
+            &project.repos[0],
+            &rules,
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect_err("the forge failed");
+
+        assert!(err.to_string().contains("fell over"), "{err:#}");
+        assert_eq!(
+            ledger.list_tracked(repo_id).expect("tracked").len(),
+            2,
+            "the sweep page committed before the failure stays committed"
+        );
+        assert_eq!(
+            ledger.get_meta(repo_id, CURSOR_KEY).expect("cursor"),
+            Some("2026-08-09T10:00:00Z".to_string()),
+            "so does the cursor, which is what makes the next run resume"
+        );
+        assert_eq!(
+            ledger.queue(repo_id).expect("queue").len(),
+            1,
+            "the PR whose detail did land is on the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_involvement_search_tracks_a_pr_no_interest_rule_matched() {
+        // The rules here match `area:task-sdk`; this PR carries no labels, so
+        // only being asked to review it puts it in the ledger.
+        let cfg = config("");
+        let mut unmatched = pr(7, "2026-08-09T09:00:00Z");
+        unmatched.labels.clear();
+        let forge = FakeForge::new(vec![Page::of(vec![unmatched])]).with_review_request(7, 4900);
+
+        // Ask for the involvement pass this time.
+        let cfg_involved = Config {
+            involvement: crate::config::Involvement {
+                reasons: vec!["review_requested".into()],
+            },
+            ..cfg
+        };
+        let (ledger, repo_id, progress) = sync(&cfg_involved, &forge).await;
+
+        let searches = forge.searches();
+        assert!(
+            searches
+                .iter()
+                .any(|(query, _)| query.contains("review-requested:ashb")),
+            "the involvement search ran: {searches:?}"
+        );
+        assert_eq!(
+            ledger.list_tracked(repo_id).expect("tracked").len(),
+            1,
+            "tracked by involvement, not by a rule"
+        );
+        assert!(
+            progress
+                .pages
+                .iter()
+                .any(|(what, _, _)| what == "review_requested"),
+            "and reported under its own name: {:?}",
+            progress.pages
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pr_whose_files_were_truncated_is_counted_rather_than_guessed_at() {
+        // A path rule can neither match nor be ruled out against a partial file
+        // list, so the PR is left untracked and counted — not silently dropped.
+        let cfg = config("");
+        let mut partial = pr(9, "2026-08-09T09:00:00Z");
+        partial.labels.clear();
+        partial.files = Some(vec!["something.py".into()]);
+        partial.files_truncated = true;
+
+        let with_paths: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            paths = ["task-sdk/**"]
+            [involvement]
+            reasons = []
+            "#,
+        )
+        .expect("config parses");
+        let forge = FakeForge::new(vec![Page::of(vec![partial])]);
+
+        let (ledger, repo_id, progress) = sync(&with_paths, &forge).await;
+
+        assert!(
+            ledger.list_tracked(repo_id).expect("tracked").is_empty(),
+            "unknown is not a match"
+        );
+        assert_eq!(
+            ledger.count_truncated_untracked(repo_id).expect("counted"),
+            1
+        );
+        assert!(
+            progress.finished.contains(&"apache/airflow".to_string()),
+            "the repo still finished"
+        );
+        let _ = &cfg;
+    }
+
+    #[tokio::test]
+    async fn a_merged_pr_loses_the_attention_it_was_holding() {
+        let cfg = config("");
+        let mut merged = pr(4, "2026-08-09T09:00:00Z");
+        merged.state = PrState::Merged;
+        let forge = FakeForge::new(vec![Page::of(vec![merged])]).with_review_request(4, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        assert!(
+            ledger.queue(repo_id).expect("queue").is_empty(),
+            "a merged PR is archived out of the queue unless the project opts in"
+        );
+        let _ = Verdict::Approved;
     }
 }

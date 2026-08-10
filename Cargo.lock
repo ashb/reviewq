@@ -2494,6 +2494,7 @@ name = "reviewq-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "etcetera",
  "jiff",
  "reviewq-core",
@@ -2501,6 +2502,7 @@ dependencies = [
  "reviewq-ledger",
  "serde",
  "tempfile",
+ "tokio",
  "toml",
  "tracing",
 ]

@@ -18,7 +18,10 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+toml.workspace = true
 
 [lints]
 workspace = true
