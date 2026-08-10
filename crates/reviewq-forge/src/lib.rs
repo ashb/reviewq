@@ -75,7 +75,8 @@ pub trait Forge: Send + Sync {
     /// `https://github.com/apache/airflow/pull/12345`. Each provider's own
     /// layout (GitHub's `/pull/N`, a future provider's own) lives in its
     /// adapter; nothing above this trait renders one itself. No I/O, so it
-    /// isn't `async`.
+    /// isn't `async` — and no credential either, so a caller that only wants to
+    /// show someone where a PR is never resolves a token to do it.
     fn web_url(&self, owner: &str, name: &str, number: u64) -> String;
 
     /// The env var name and value to hand this forge's token to an external
@@ -84,20 +85,83 @@ pub trait Forge: Send + Sync {
     /// second, separate login. Which env var name that tool expects is a
     /// provider convention (GitHub tooling — `gh`, `wiff` — reads
     /// `GITHUB_TOKEN`), so each adapter answers for itself rather than the
-    /// caller guessing. No I/O, so it isn't `async`.
-    fn handoff_credentials(&self) -> (&str, &str);
+    /// caller guessing.
+    ///
+    /// Fallible because this is one of the few operations that genuinely needs
+    /// the token, and an adapter resolves one only when asked — which can fail,
+    /// or prompt.
+    fn handoff_credentials(&self) -> Result<(&str, &str)>;
 }
 
-/// Build the adapter for `host_name` (resolved to `host`) authenticated with
-/// `token`, choosing it by provider. No I/O happens here — it just constructs
-/// a client; the first real request is whatever the caller makes with it.
+/// A pull request named by its web URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestRef {
+    /// The host it lives on, from the URL itself.
+    pub host: String,
+    /// The repo owner.
+    pub owner: String,
+    /// The repo name.
+    pub name: String,
+    /// The pull request number.
+    pub number: u64,
+}
+
+/// Read a pull-request URL, using the layout its host's provider uses.
+///
+/// Dispatched on the provider exactly as [`build`] is, because the path shape is
+/// the provider's business — GitHub's `/owner/name/pull/N` is not GitLab's
+/// `/owner/name/-/merge_requests/N`. It needs no token, so a caller can resolve a
+/// pasted URL before deciding whether to connect.
+///
+/// `Ok(None)` when `url` simply isn't a URL, so a caller can fall back to reading
+/// it as a bare number. An error means it *looked* like one on a host that
+/// nothing configured knows about, which is worth saying rather than shrugging at.
+pub fn parse_pull_request_url(forges: &ForgeTable, url: &str) -> Result<Option<PullRequestRef>> {
+    let Some(after_scheme) = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))
+    else {
+        return Ok(None);
+    };
+    // Splitting scheme and host off is URL syntax, not forge knowledge; what the
+    // rest of the path means is the provider's.
+    let (host_name, path) = after_scheme.split_once('/').unwrap_or((after_scheme, ""));
+    let host = resolve_host(forges, host_name)?;
+
+    let parsed = match host.provider.as_deref() {
+        Some("github") => github::GithubForge::parse_web_path(path),
+        Some(other) => bail!("no forge adapter for provider {other:?}"),
+        None => bail!("forge host {host_name:?} has no provider"),
+    };
+    Ok(parsed.map(|(owner, name, number)| PullRequestRef {
+        host: host_name.to_string(),
+        owner,
+        name,
+        number,
+    }))
+}
+
+/// Build the adapter for `host_name` (resolved to `host`), choosing it by
+/// provider.
+///
+/// Nothing happens here but construction: no I/O, and no credential resolution
+/// either. An adapter resolves its own token the first time an operation actually
+/// needs one, so building one to ask for a URL costs nothing and cannot prompt.
+///
+/// `token` presets that resolution for a caller that has already done it and
+/// wants to report on it — `doctor` — so the reporting doesn't cost a second
+/// resolution. `None` leaves it to the adapter.
 ///
 /// `host` is expected to have come from [`resolve_host`], which already rejects
 /// unsupported providers; the match here is the defensive backstop and the
 /// single place a new adapter is registered.
-pub fn build(host: &ForgeHost, host_name: &str, token: &str) -> Result<Box<dyn Forge>> {
+pub fn build(host: &ForgeHost, host_name: &str, token: Option<Token>) -> Result<Box<dyn Forge>> {
     match host.provider.as_deref() {
-        Some("github") => Ok(Box::new(github::GithubForge::new(host, host_name, token)?)),
+        Some("github") => Ok(Box::new(match token {
+            Some(token) => github::GithubForge::with_token(host, host_name, token),
+            None => github::GithubForge::new(host, host_name),
+        })),
         Some(other) => bail!("no forge adapter for provider {other:?}"),
         None => bail!("forge host has no provider"),
     }

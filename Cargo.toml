@@ -29,7 +29,9 @@ reviewq-ledger = { path = "crates/reviewq-ledger" }
 reviewq-tui = { path = "crates/reviewq-tui" }
 
 anyhow = "1.0.104"
-crossterm = "0.29"
+# `osc52` is the clipboard escape sequence, which the tui uses to copy a PR URL
+# through the terminal it already owns rather than via a display-server library.
+crossterm = { version = "0.29", features = ["osc52"] }
 async-trait = "0.1"
 clap = { version = "4.6.5", features = ["derive"] }
 etcetera = "0.11.0"

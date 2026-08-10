@@ -32,7 +32,7 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Unmute(args) => actions::unmute(&args),
         Command::Defer(args) => actions::defer(&args),
         Command::Undefer(args) => actions::undefer(&args),
-        Command::Track(args) => actions::track(&args),
+        Command::Track(args) => actions::track(config, &args).await,
         Command::Review(args) => review::run(config, &args).await,
         Command::Tui => tui::run().await,
         Command::Doctor => doctor::run(config).await,

@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ClassifyCtx, PrSnapshot, classify};
 use reviewq_core::rules::{Evaluation, Interest};
@@ -18,7 +18,7 @@ use reviewq_forge::{Forge, PrDetail};
 use reviewq_ledger::{Ledger, TrackedReason};
 
 use crate::config::{Config, Project, RepoRef};
-use crate::{config, paths};
+use crate::{actions, config, paths};
 
 /// Cursor: the high-water mark of `updatedAt` we have swept up to.
 pub const CURSOR_KEY: &str = "last_sync_at";
@@ -454,6 +454,61 @@ pub async fn sync_one(config_path: Option<&Path>, number: u64) -> Result<Refresh
             remaining: detail.remaining,
         },
     })
+}
+
+/// Start tracking `number`, fetching it if the ledger has never seen it, then
+/// give it a detail pass so it can reach the queue.
+///
+/// The entry point for "put this PR in my queue" from a bare number or a pasted
+/// URL: `reviewq track`/`add`, and the TUI's offer to fetch a PR you asked to go
+/// to and which turned out to be unknown.
+///
+/// Which repo it belongs to comes from config, not the ledger — the whole point
+/// is that the ledger may know nothing about it. With more than one repo
+/// configured a bare number is ambiguous, so `repo` names one.
+pub async fn track_one(
+    config_path: Option<&Path>,
+    repo: Option<&RepoRef>,
+    number: u64,
+) -> Result<(actions::Tracked, Refreshed)> {
+    // Always reaches the forge, whether or not the ledger already has the PR:
+    // `track` means "track it and go and get it", so it needs config, unlike the
+    // purely local actions.
+    let loaded = config::load(config_path)
+        .with_context(|| format!("tracking #{number} needs a usable config to fetch it"))?;
+    let cfg = &loaded.config;
+    let repo = match repo {
+        Some(repo) => repo.clone(),
+        None => {
+            let mut repos = cfg.repos();
+            let first = repos.next().context("no repos configured")?.clone();
+            if repos.next().is_some() {
+                bail!(
+                    "more than one repo is configured — name one, or give a full \
+                     pull-request URL"
+                );
+            }
+            first
+        }
+    };
+
+    let ledger = Ledger::open(&paths::database_file()?)?;
+    let repo_id = ledger.ensure_repo(&repo.key())?;
+    let forge = cfg.forge_for(&repo.host)?;
+    let tracked = actions::track(
+        &ledger,
+        repo_id,
+        &repo,
+        number,
+        forge.as_ref(),
+        Timestamp::now(),
+    )
+    .await?;
+
+    // A freshly-stored PR holds no attention until something classifies it, so
+    // the detail pass is what actually puts it on the queue.
+    let refreshed = sync_one(config_path, number).await?;
+    Ok((tracked, refreshed))
 }
 
 /// Fetch one PR's tier-2 detail, classify it against what the fetch saw, and

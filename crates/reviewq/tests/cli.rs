@@ -52,11 +52,11 @@ fn every_subcommand_is_reachable() {
     }
 }
 
-/// `done`/`snooze`/`mute`/`unmute`/`defer`/`undefer`/`track` are ledger-only —
-/// no config needed — so a missing PR is reported the same clear way for all
-/// of them, against a hermetic, empty ledger. `done` additionally needs no
-/// network for this case: it fails on the same existence check before ever
-/// touching config.
+/// `done`/`snooze`/`mute`/`unmute`/`defer`/`undefer` are ledger-only — no config
+/// needed — so a missing PR is reported the same clear way for all of them,
+/// against a hermetic, empty ledger. `done` additionally needs no network for
+/// this case: it fails on the same existence check before ever touching config.
+/// `track` is deliberately not in this list; see below.
 #[test]
 fn an_action_on_an_unknown_pr_is_a_clear_error() {
     // Unique per test run, not just per file name, so concurrent `cargo test`
@@ -74,7 +74,6 @@ fn an_action_on_an_unknown_pr_is_a_clear_error() {
         vec!["unmute", "999"],
         vec!["defer", "999"],
         vec!["undefer", "999"],
-        vec!["track", "999"],
     ] {
         let output = Command::new(BIN)
             .args(&args)
@@ -91,6 +90,85 @@ fn an_action_on_an_unknown_pr_is_a_clear_error() {
         );
     }
     let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn track_needs_a_config_because_it_fetches() {
+    // `track` is the one action that is not ledger-only: it means "track this PR
+    // and go and get it", so it reaches the forge and therefore needs config —
+    // unlike done/snooze/mute/defer, which only write a local flag.
+    let db = std::env::temp_dir().join(format!("reviewq-cli-track-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+
+    let output = Command::new(BIN)
+        .args(["track", "999"])
+        .env("REVIEWQ_CONFIG", "/nonexistent/reviewq/config.toml")
+        .env("REVIEWQ_DB", &db)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("binary runs");
+
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("tracking #999"), "{stderr}");
+    assert!(stderr.contains("config"), "{stderr}");
+
+    let _ = std::fs::remove_file(&db);
+}
+
+/// A review runs in the repo's checkout when config names one — which is what
+/// lets the review tool publish back: wiff records the repository it was run in,
+/// and refuses to publish a review pulled from outside one.
+///
+/// `pwd` stands in for the review command, so what the test reads is the working
+/// directory the child actually got.
+#[test]
+fn a_review_runs_in_the_repos_checkout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkout = dir.path().join("airflow");
+    std::fs::create_dir(&checkout).expect("checkout");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{{ owner = "apache", name = "airflow", path = "{}" }}]
+            [[project.interest]]
+            labels = ["x"]
+
+            [handoff]
+            review_command = ["/bin/pwd"]
+
+            # No token can resolve from this, so nothing here reaches the network:
+            # the post-review refresh fails its config step and only warns.
+            [forge."github.com"]
+            token_env = "REVIEWQ_TEST_ABSENT_TOKEN"
+            "#,
+            checkout.display()
+        ),
+    )
+    .expect("write config");
+
+    let output = Command::new(BIN)
+        .args(["review", "1"])
+        .env("REVIEWQ_CONFIG", &config)
+        .env("REVIEWQ_DB", dir.path().join("reviewq.db"))
+        .env("REVIEWQ_TEST_ABSENT_TOKEN", "")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("binary runs");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The temp dir may be reached through a symlink (/var -> /private/var on
+    // macOS), so the leaf is what is asserted rather than the whole path.
+    assert!(
+        stdout.trim().ends_with("airflow"),
+        "expected the checkout as cwd, got {stdout:?} (stderr: {})",
+        stderr(&output)
+    );
 }
 
 #[test]

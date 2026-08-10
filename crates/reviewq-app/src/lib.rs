@@ -10,7 +10,9 @@
 //! the frontend decides whether that becomes a progress line, a status bar, or
 //! nothing at all.
 
+pub mod actions;
 pub mod config;
 pub mod paths;
 pub mod resolve;
+pub mod review;
 pub mod sync;

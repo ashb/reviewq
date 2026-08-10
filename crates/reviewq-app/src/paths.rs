@@ -29,6 +29,23 @@ pub fn database_file() -> Result<PathBuf> {
     Ok(data_dir()?.join("reviewq.db"))
 }
 
+/// Expand a leading `~` to the home directory, leaving every other path alone.
+///
+/// A path in a config file is typed by a person, and a person writes `~/code/foo`.
+/// Nothing else expands it — a shell would have, but config is read straight off
+/// disk — so a literal `~` directory would be looked for and not found.
+///
+/// Only a leading `~` or `~/`, and only the current user's home: `~someone/x` is
+/// a shell feature that needs the password database, and guessing at it would be
+/// worse than leaving it as typed.
+pub fn expand_tilde(path: &std::path::Path) -> Result<PathBuf> {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return Ok(path.to_path_buf());
+    };
+    let base = etcetera::choose_base_strategy().context("cannot determine home directory")?;
+    Ok(base.home_dir().join(rest))
+}
+
 /// The directory [`database_file`] sits in, `$XDG_DATA_HOME/reviewq`. Created
 /// by `Ledger::open` when it first writes the ledger.
 pub fn data_dir() -> Result<PathBuf> {

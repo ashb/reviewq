@@ -34,9 +34,11 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
         format!("{} (not created yet)", db.display())
     };
     row("ledger", &db_note);
+    row("handoff", &handoff_note(&loaded.config, &mut problems));
 
     for repo in loaded.config.repos() {
         row("repo", &repo.slug());
+        row("  checkout", &checkout_note(repo, &mut problems));
 
         row(
             "  last sync",
@@ -53,7 +55,10 @@ pub async fn run(config_path: Option<&Path>) -> Result<ExitCode> {
         let token = resolve_token(&host)?;
         row("  token", &token.source.to_string());
 
-        let forge = build(&host, &repo.host, &token.value)?;
+        // Handed the token this step just resolved, rather than letting the
+        // adapter resolve its own: `doctor` reports on that step, and a second
+        // resolution would mean a second credential-helper prompt for one run.
+        let forge = build(&host, &repo.host, Some(token))?;
         let viewer = forge.viewer().await?;
         viewer.rate_limit.trace("doctor:viewer");
 
@@ -133,6 +138,60 @@ fn last_sync_note(
     }
 }
 
+/// The review command, and whether it can actually name a PR.
+///
+/// A `{number}` with no `{url}` only works run from inside a checkout of the
+/// right repo — the handoff tool has nothing else to resolve the number against,
+/// and reports something like "the repository has no remotes". reviewq itself
+/// runs from anywhere, and its TUI usually runs from wherever you happened to
+/// open it, so this is a trap worth naming rather than leaving to be discovered
+/// when a review fails.
+///
+/// A config written before `{url}` existed still says `{number}`, which is the
+/// common way to end up here: the default changed, existing files didn't.
+fn handoff_note(config: &config::Config, problems: &mut u32) -> String {
+    let argv = &config.handoff.review_command;
+    let shown = argv.join(" ");
+    let mentions = |token: &str| argv.iter().any(|arg| arg.contains(token));
+    // Naming a checkout is the other way a bare number resolves: the handoff runs
+    // in that directory, so the tool can read the number against its remote.
+    let all_have_checkouts = config.repos().all(|repo| repo.path.is_some());
+
+    if mentions("{number}") && !mentions("{url}") && !all_have_checkouts {
+        *problems += 1;
+        format!(
+            "{shown} {}",
+            warn(
+                "substitutes {number} but not {url} — that only resolves inside a \
+                 checkout, and not every repo sets `path`"
+            )
+        )
+    } else {
+        shown
+    }
+}
+
+/// Where a review of this repo runs.
+///
+/// Nothing in a sync reads a working tree, so this is not required to load — but
+/// the handoff runs in it, and a review tool that publishes back needs it: wiff
+/// will not publish a review it mirrored by URL from outside the repository, and
+/// says so only *after* you have written the review. That's a bad moment to find
+/// out, so a repo without one counts as a problem here rather than being noted in
+/// passing.
+fn checkout_note(repo: &config::RepoRef, problems: &mut u32) -> String {
+    match &repo.path {
+        Some(path) => path.display().to_string(),
+        None => {
+            *problems += 1;
+            warn(
+                "none — set `path` to the local checkout, or a review cannot be \
+                 published back to the PR",
+            )
+        }
+    }
+}
+
 fn row(label: &str, value: &str) {
     println!(
         "{:<10} {value}",
@@ -146,4 +205,117 @@ fn ok(text: &str) -> String {
 
 fn warn(text: &str) -> String {
     format!("{}", text.if_supports_color(Stdout, |t| t.yellow()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(review_command: &[&str]) -> config::Config {
+        let mut config: config::Config =
+            toml::from_str(config::DEFAULT_CONFIG).expect("default config parses");
+        config.handoff.review_command = review_command.iter().map(|s| (*s).to_string()).collect();
+        config
+    }
+
+    #[test]
+    fn a_url_handoff_is_reported_without_comment() {
+        let mut problems = 0;
+        let note = handoff_note(
+            &config_with(&["wiff", "forge", "pull", "{url}"]),
+            &mut problems,
+        );
+        assert_eq!(note, "wiff forge pull {url}");
+        assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn a_number_only_handoff_is_flagged() {
+        // The trap: it works from inside the right checkout and nowhere else, and
+        // a config written before `{url}` existed still looks like this.
+        let mut problems = 0;
+        let note = handoff_note(
+            &config_with(&["wiff", "forge", "pull", "{number}"]),
+            &mut problems,
+        );
+        assert!(note.contains("only resolves inside a checkout"), "{note}");
+        assert_eq!(
+            problems, 1,
+            "it should count against a clean bill of health"
+        );
+    }
+
+    #[test]
+    fn a_handoff_using_both_is_fine() {
+        let mut problems = 0;
+        let note = handoff_note(
+            &config_with(&["review", "--id", "{number}", "--url", "{url}"]),
+            &mut problems,
+        );
+        assert!(!note.contains("only resolves"), "{note}");
+        assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn a_number_only_handoff_is_fine_once_every_repo_names_a_checkout() {
+        // The handoff runs in the checkout, so the tool has a remote to read the
+        // number against — which is the whole reason `path` exists.
+        let mut config = config_with(&["wiff", "forge", "pull", "{number}"]);
+        for project in &mut config.projects {
+            for repo in &mut project.repos {
+                repo.path = Some(std::path::PathBuf::from("/somewhere/airflow"));
+            }
+        }
+        let mut problems = 0;
+
+        let note = handoff_note(&config, &mut problems);
+
+        assert_eq!(note, "wiff forge pull {number}");
+        assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn a_repo_with_no_checkout_is_counted_as_a_problem() {
+        let repo = config::RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: None,
+        };
+        let mut problems = 0;
+
+        let note = checkout_note(&repo, &mut problems);
+
+        assert!(note.contains("set `path`"), "{note}");
+        assert_eq!(
+            problems, 1,
+            "it should count against a clean bill of health"
+        );
+    }
+
+    #[test]
+    fn a_repo_with_a_checkout_reports_the_path_and_is_no_problem() {
+        let repo = config::RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: Some(std::path::PathBuf::from("/home/ash/code/airflow")),
+        };
+        let mut problems = 0;
+
+        assert_eq!(
+            checkout_note(&repo, &mut problems),
+            "/home/ash/code/airflow"
+        );
+        assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn a_handoff_naming_neither_is_left_alone() {
+        // Someone's wrapper script may resolve the PR itself; not our business.
+        let mut problems = 0;
+        let note = handoff_note(&config_with(&["my-review-script"]), &mut problems);
+        assert_eq!(note, "my-review-script");
+        assert_eq!(problems, 0);
+    }
 }

@@ -24,6 +24,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 portable-pty.workspace = true
+toml.workspace = true
 tempfile.workspace = true
 
 [lints]

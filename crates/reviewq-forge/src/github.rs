@@ -6,6 +6,7 @@
 //! trip and a PR arrives ready to classify.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -19,44 +20,86 @@ use serde::Deserialize;
 
 use crate::host::GITHUB_TOKEN_ENV;
 use crate::types::{PrDetail, RateLimit, SweepPage, Viewer};
-use crate::{Forge, ForgeHost};
+use crate::{Forge, ForgeHost, Token, resolve_token};
 
 /// A GitHub connection bound to one host.
+///
+/// Constructing one costs nothing and needs no credential: the token and the API
+/// client behind it are resolved on first use and remembered. Resolution can run
+/// a subprocess — a configured `token_command`, `gh auth token` — and that
+/// subprocess may prompt, so it must not happen for a caller that only wanted
+/// [`web_url`](Forge::web_url).
 pub struct GithubForge {
-    inner: Octocrab,
+    /// The host's resolved settings, kept because the token and the client are
+    /// derived from them on demand rather than up front.
+    host: ForgeHost,
     /// The host's own hostname (`github.com`, or a GitHub Enterprise host),
-    /// doubling as its web root — kept alongside the API client so
+    /// doubling as its web root — kept alongside the settings so
     /// [`web_url`](Forge::web_url) needs no extra argument from the caller.
     web_host: String,
-    /// The token, kept alongside the API client (which only ever sees it as
-    /// an auth header) so [`handoff_credentials`](Forge::handoff_credentials)
-    /// can hand it to an external tool.
-    token: String,
-    /// The env var external GitHub tooling expects that token under: the
-    /// host's own `token_env` if configured, else GitHub's own convention.
+    /// The env var external GitHub tooling expects the token under: the host's
+    /// own `token_env` if configured, else GitHub's own convention. Known from
+    /// config alone, so naming it never triggers a resolution.
     token_env: String,
+    /// The token, resolved at most once — see [`token`](Self::token).
+    token: OnceLock<Token>,
+    /// The API client, built from that token on the same terms.
+    client: OnceLock<Octocrab>,
 }
 
 impl GithubForge {
-    /// Build an adapter for `host`, using its `api_base` when set so a GitHub
-    /// Enterprise instance works without code changes.
-    pub fn new(host: &ForgeHost, host_name: &str, token: &str) -> Result<Self> {
-        let mut builder = Octocrab::builder().personal_token(token.to_string());
-        if let Some(api_base) = &host.api_base {
-            builder = builder
-                .base_uri(api_base.as_str())
-                .with_context(|| format!("invalid api_base {api_base:?}"))?;
-        }
-        let inner = builder.build().context("building GitHub client")?;
-        Ok(Self {
-            inner,
+    /// An adapter for `host` that will resolve its own token when it first needs
+    /// one.
+    pub fn new(host: &ForgeHost, host_name: &str) -> Self {
+        Self {
+            host: host.clone(),
             web_host: host_name.to_string(),
-            token: token.to_string(),
             token_env: host
                 .token_env
                 .clone()
                 .unwrap_or_else(|| GITHUB_TOKEN_ENV.to_string()),
-        })
+            token: OnceLock::new(),
+            client: OnceLock::new(),
+        }
+    }
+
+    /// An adapter for `host` using a token already in hand.
+    ///
+    /// For a caller that resolved one itself and wants to report on it —
+    /// `doctor`, which prints where the token came from as its own step — so that
+    /// reporting doesn't cost a second resolution, and a second prompt.
+    pub fn with_token(host: &ForgeHost, host_name: &str, token: Token) -> Self {
+        let forge = Self::new(host, host_name);
+        let _ = forge.token.set(token);
+        forge
+    }
+
+    /// The token, resolving it once on first use.
+    ///
+    /// `OnceLock` rather than a lock held across the resolution: two threads
+    /// racing here would resolve twice and one result is dropped, which is
+    /// cheaper than serialising every authenticated call behind a mutex.
+    fn token(&self) -> Result<&Token> {
+        if let Some(token) = self.token.get() {
+            return Ok(token);
+        }
+        let resolved = resolve_token(&self.host)?;
+        Ok(self.token.get_or_init(|| resolved))
+    }
+
+    /// The API client, built once from the token.
+    fn client(&self) -> Result<&Octocrab> {
+        if let Some(client) = self.client.get() {
+            return Ok(client);
+        }
+        let mut builder = Octocrab::builder().personal_token(self.token()?.value.clone());
+        if let Some(api_base) = &self.host.api_base {
+            builder = builder
+                .base_uri(api_base.as_str())
+                .with_context(|| format!("invalid api_base {api_base:?}"))?;
+        }
+        let built = builder.build().context("building GitHub client")?;
+        Ok(self.client.get_or_init(|| built))
     }
 
     async fn graphql<T: serde::de::DeserializeOwned>(
@@ -69,7 +112,7 @@ impl GithubForge {
         // silenced at reviewq's -v levels (see the binary's tracing setup).
         tracing::debug!(op, "graphql request");
         let payload = serde_json::json!({ "query": query, "variables": variables });
-        self.inner
+        self.client()?
             .graphql(&payload)
             .await
             .with_context(|| format!("GitHub GraphQL request failed ({op})"))
@@ -96,7 +139,7 @@ impl Forge for GithubForge {
 
     async fn rest_core_remaining(&self) -> Result<(u32, u32)> {
         let limits = self
-            .inner
+            .client()?
             .ratelimit()
             .get()
             .await
@@ -180,7 +223,7 @@ impl Forge for GithubForge {
         let payload = serde_json::json!({ "query": DETAIL_QUERY, "variables": vars });
         tracing::debug!(op, "graphql request");
         let response: GraphqlResponse<DetailQuery> = self
-            .inner
+            .client()?
             .post("/graphql", Some(&payload))
             .await
             .with_context(|| format!("GitHub GraphQL request failed ({op})"))?;
@@ -215,13 +258,13 @@ impl Forge for GithubForge {
     }
 
     async fn mark_pr_notifications_read(&self, owner: &str, name: &str, number: u64) -> Result<()> {
+        let client = self.client()?;
         // Deliberately not `.all(true)` — that opts into *every* notification
         // for the repo, read ones included ("If set, show notifications
         // marked as read", per octocrab's docs), which on a busy repo means
         // paginating the whole read backlog on every single `reviewq done`.
         // The default is already unread-only, matching what `done` needs.
-        let first_page = self
-            .inner
+        let first_page = client
             .activity()
             .notifications()
             .list_for_repo(owner, name)
@@ -229,8 +272,7 @@ impl Forge for GithubForge {
             .send()
             .await
             .with_context(|| format!("listing notifications for {owner}/{name}"))?;
-        let notifications: Vec<Notification> = self
-            .inner
+        let notifications: Vec<Notification> = client
             .all_pages(first_page)
             .await
             .with_context(|| format!("paginating notifications for {owner}/{name}"))?;
@@ -245,7 +287,7 @@ impl Forge for GithubForge {
                 .as_ref()
                 .is_some_and(|url| url.as_str().ends_with(&suffix));
             if is_this_pr {
-                self.inner
+                client
                     .activity()
                     .notifications()
                     .mark_as_read(n.id)
@@ -260,8 +302,32 @@ impl Forge for GithubForge {
         format!("https://{}/{owner}/{name}/pull/{number}", self.web_host)
     }
 
-    fn handoff_credentials(&self) -> (&str, &str) {
-        (&self.token_env, &self.token)
+    fn handoff_credentials(&self) -> Result<(&str, &str)> {
+        Ok((&self.token_env, self.token()?.value.as_str()))
+    }
+}
+
+impl GithubForge {
+    /// Read `owner`, `name` and the number out of the path of a pull-request
+    /// URL on this provider — the inverse of [`Forge::web_url`], and kept beside
+    /// it so the pair cannot drift.
+    ///
+    /// Associated rather than a method: parsing a URL needs no connection and no
+    /// token, so an interface can do it before deciding whether to fetch
+    /// anything.
+    ///
+    /// `path` is everything after the host. GitHub's shape is
+    /// `/owner/name/pull/N`, and the number is read as its leading digits
+    /// because a URL copied from a browser rarely ends there — `/files`, `?w=1`
+    /// and a `#issuecomment-…` permalink all arrive stuck to it.
+    pub fn parse_web_path(path: &str) -> Option<(String, String, u64)> {
+        let (repo, tail) = path.trim_start_matches('/').split_once("/pull/")?;
+        let (owner, name) = repo.split_once('/')?;
+        if owner.is_empty() || name.is_empty() {
+            return None;
+        }
+        let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+        Some((owner.to_string(), name.to_string(), digits.parse().ok()?))
     }
 }
 
@@ -920,12 +986,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pull_request_path_round_trips_with_web_url() {
+        // The pair has to agree, so the parse is tested against what `web_url`
+        // actually builds rather than against a URL written out by hand.
+        let host = ForgeHost {
+            provider: Some("github".to_string()),
+            ..Default::default()
+        };
+        let forge = GithubForge::new(&host, "github.com");
+        let url = forge.web_url("apache", "airflow", 70135);
+        let path = url.strip_prefix("https://github.com").expect("host");
+
+        assert_eq!(
+            GithubForge::parse_web_path(path),
+            Some(("apache".to_string(), "airflow".to_string(), 70135))
+        );
+    }
+
+    #[test]
+    fn a_pull_request_path_tolerates_what_a_browser_adds() {
+        // A URL copied from a browser rarely ends at the number.
+        for tail in [
+            "",
+            "/",
+            "/files",
+            "/commits/abc123",
+            "?w=1",
+            "#issuecomment-2851",
+        ] {
+            let path = format!("/apache/airflow/pull/70135{tail}");
+            assert_eq!(
+                GithubForge::parse_web_path(&path),
+                Some(("apache".to_string(), "airflow".to_string(), 70135)),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_pull_request_is_refused() {
+        for path in [
+            "/apache/airflow",
+            "/apache/airflow/issues/70135",
+            "/apache/airflow/pull/notanumber",
+            "/pull/70135",
+            "",
+        ] {
+            assert_eq!(GithubForge::parse_web_path(path), None, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn web_url_matches_githubs_pull_layout() {
         let host = ForgeHost {
             provider: Some("github".to_string()),
             ..Default::default()
         };
-        let forge = GithubForge::new(&host, "github.com", "token").unwrap();
+        let forge = GithubForge::new(&host, "github.com");
         assert_eq!(
             forge.web_url("apache", "airflow", 12345),
             "https://github.com/apache/airflow/pull/12345"
@@ -939,11 +1056,20 @@ mod tests {
             api_base: Some("https://github.acme.example/api/v3".to_string()),
             ..Default::default()
         };
-        let forge = GithubForge::new(&host, "github.acme.example", "token").unwrap();
+        let forge = GithubForge::new(&host, "github.acme.example");
         assert_eq!(
             forge.web_url("acme", "widgets", 7),
             "https://github.acme.example/acme/widgets/pull/7"
         );
+    }
+
+    /// A token as if already resolved, for the adapters a test presets rather
+    /// than letting resolve from this machine's environment.
+    fn token(value: &str) -> Token {
+        Token {
+            value: value.to_string(),
+            source: crate::TokenSource::Override,
+        }
     }
 
     #[tokio::test]
@@ -952,9 +1078,11 @@ mod tests {
             provider: Some("github".to_string()),
             ..Default::default()
         };
-        let forge = GithubForge::new(&host, "github.com", "secret-token").unwrap();
+        let forge = GithubForge::with_token(&host, "github.com", token("secret-token"));
         assert_eq!(
-            forge.handoff_credentials(),
+            forge
+                .handoff_credentials()
+                .expect("a preset token needs no resolution"),
             ("GITHUB_TOKEN", "secret-token")
         );
     }
@@ -966,9 +1094,11 @@ mod tests {
             token_env: Some("ACME_GH_TOKEN".to_string()),
             ..Default::default()
         };
-        let forge = GithubForge::new(&host, "github.acme.example", "secret-token").unwrap();
+        let forge = GithubForge::with_token(&host, "github.acme.example", token("secret-token"));
         assert_eq!(
-            forge.handoff_credentials(),
+            forge
+                .handoff_credentials()
+                .expect("a preset token needs no resolution"),
             ("ACME_GH_TOKEN", "secret-token")
         );
     }

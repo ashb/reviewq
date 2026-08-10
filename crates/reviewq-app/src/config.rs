@@ -12,9 +12,7 @@ use anyhow::{Context, Result, bail};
 use reviewq_core::rules::{ConditionInput, Interest, RuleInput};
 use serde::{Deserialize, Serialize};
 
-use reviewq_forge::{
-    DEFAULT_HOST, Forge, ForgeHost, ForgeTable, build, resolve_host, resolve_token,
-};
+use reviewq_forge::{DEFAULT_HOST, Forge, ForgeHost, ForgeTable, build, resolve_host};
 
 /// Written verbatim to the config path on first run. Kept as a literal (rather
 /// than serialised from `Config::default()`) so the comments survive.
@@ -100,6 +98,17 @@ pub struct RepoRef {
     /// public GitHub.
     #[serde(default = "default_host")]
     pub host: String,
+    /// A local checkout of this repo, if there is one. Optional: reviewq itself
+    /// never reads the working tree — the queue comes from the forge.
+    ///
+    /// What it is for is the handoff, which runs with this as its working
+    /// directory. A review tool given a bare `{number}` can only resolve it
+    /// against a checkout's remote; and one that mirrors a PR by `{url}` from
+    /// outside a checkout has nothing to publish back through — wiff refuses
+    /// with "publishing a forge review pulled outside its repository is not
+    /// supported". Naming the checkout fixes both.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 }
 
 impl RepoRef {
@@ -338,9 +347,20 @@ fn load_from(path: &Path, create_if_missing: bool) -> Result<Loaded> {
 
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let config: Config =
+    let mut config: Config =
         toml::from_str(&raw).with_context(|| format!("parsing config {}", path.display()))?;
+    // Before validation, so a `~/code/foo` checkout is checked as the directory it
+    // means rather than as the literal path nobody has.
+    config.expand_paths()?;
     config.validate(path)?;
+    for repo in config.repos_without_a_checkout() {
+        tracing::warn!(
+            repo = %repo,
+            "no `path` configured — a review of it runs wherever reviewq was \
+             started, so a review tool cannot publish back or resolve a bare PR \
+             number; see `reviewq doctor`"
+        );
+    }
 
     Ok(Loaded {
         config,
@@ -350,6 +370,33 @@ fn load_from(path: &Path, create_if_missing: bool) -> Result<Loaded> {
 }
 
 impl Config {
+    /// Resolve the paths in the file to the ones they name, which today means
+    /// expanding a leading `~` on each repo's checkout.
+    fn expand_paths(&mut self) -> Result<()> {
+        for project in &mut self.projects {
+            for repo in &mut project.repos {
+                if let Some(checkout) = repo.path.take() {
+                    repo.path = Some(crate::paths::expand_tilde(&checkout)?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The configured repos with no local checkout named, as `owner/name`.
+    ///
+    /// A warning rather than a validation error, and deliberately so: refusing to
+    /// load would take `sync`, `list` and `show` down with it, none of which ever
+    /// look at a working tree — and it would take `doctor` down too, which is the
+    /// one command whose job is to explain the problem. So every command says it
+    /// once, and `doctor` counts it against a clean bill of health.
+    pub fn repos_without_a_checkout(&self) -> Vec<String> {
+        self.repos()
+            .filter(|repo| repo.path.is_none())
+            .map(RepoRef::slug)
+            .collect()
+    }
+
     fn validate(&self, path: &Path) -> Result<()> {
         let at = || path.display();
 
@@ -388,6 +435,19 @@ impl Config {
             resolve_host(&self.forges, &repo.host).with_context(|| {
                 format!("resolving the forge host for {} in {}", repo.slug(), at())
             })?;
+            // Checked here rather than when a review is handed off: a typo in a
+            // path is worth hearing about at load, not at the one moment you
+            // wanted to start reading a diff.
+            if let Some(checkout) = &repo.path
+                && !checkout.is_dir()
+            {
+                bail!(
+                    "repo {}'s path {} is not a directory (from {})",
+                    repo.slug(),
+                    checkout.display(),
+                    at()
+                );
+            }
         }
 
         // Compile every project's rules so glob errors and the
@@ -409,21 +469,26 @@ impl Config {
         resolve_host(&self.forges, host)
     }
 
-    /// Resolve `host`'s settings, resolve a token for it, and build a connected
-    /// [`Forge`] — the sequence every command that talks to the forge repeats.
-    /// Takes a bare host rather than a [`RepoRef`], since credential
-    /// resolution only ever depends on which host a repo lives on, never its
-    /// owner/name — callers with a `RepoRef` in hand pass `&repo.host`;
-    /// callers that only resolved a repo's identity from the ledger (no
-    /// config `RepoRef` at all) pass that instead.
+    /// Resolve `host`'s settings and build a [`Forge`] for it — the sequence
+    /// every command that talks to the forge repeats.
+    ///
+    /// No token is resolved here. The adapter does that the first time an
+    /// operation needs to authenticate, which keeps the cheap, unprivileged
+    /// operations cheap: asking where a PR lives must not run a credential
+    /// helper, and must not fail because one is locked.
+    ///
+    /// Takes a bare host rather than a [`RepoRef`], since credential resolution
+    /// only ever depends on which host a repo lives on, never its owner/name —
+    /// callers with a `RepoRef` in hand pass `&repo.host`; callers that only
+    /// resolved a repo's identity from the ledger (no config `RepoRef` at all)
+    /// pass that instead.
     ///
     /// `doctor` is the one command that calls the pieces directly instead of
     /// this: it reports on each step (host, token) as it succeeds, so
     /// collapsing them here would cost it that granularity.
     pub fn forge_for(&self, host: &str) -> Result<Box<dyn Forge>> {
         let resolved = self.forge_host_for(host)?;
-        let token = resolve_token(&resolved)?;
-        build(&resolved, host, &token.value)
+        build(&resolved, host, None)
     }
 
     /// The relationships that involve me in `project`: its own override if set,
@@ -706,6 +771,109 @@ mod tests {
             !path.exists(),
             "must not create the file it complained about"
         );
+    }
+
+    #[test]
+    fn a_repo_may_name_its_local_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let checkout = dir.path().join("airflow");
+        std::fs::create_dir(&checkout).expect("checkout dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+                [identity]
+                login = "ashb"
+                [[project]]
+                repos = [{{ owner = "apache", name = "airflow", path = "{}" }}]
+                [[project.interest]]
+                labels = ["x"]
+                "#,
+                checkout.display()
+            ),
+        )
+        .expect("write config");
+
+        let loaded = load_from(&path, false).expect("loads");
+        assert_eq!(
+            loaded.config.repos().next().expect("repo").path.as_deref(),
+            Some(checkout.as_path())
+        );
+    }
+
+    #[test]
+    fn a_checkout_path_that_is_not_a_directory_is_rejected_at_load() {
+        // A typo here would otherwise surface as a failed handoff, at the one
+        // moment you wanted to start reading a diff.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+                [identity]
+                login = "ashb"
+                [[project]]
+                repos = [{{ owner = "apache", name = "airflow", path = "{}" }}]
+                [[project.interest]]
+                labels = ["x"]
+                "#,
+                dir.path().join("nope").display()
+            ),
+        )
+        .expect("write config");
+
+        let err = load_from(&path, false).unwrap_err();
+        assert!(err.to_string().contains("is not a directory"), "{err:#}");
+    }
+
+    #[test]
+    fn a_checkout_path_expands_a_leading_tilde() {
+        // Nothing else would: config is read straight off disk, so a `~` typed by
+        // a person has to be expanded here or looked for literally.
+        let config: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
+            [[project.interest]]
+            labels = ["x"]
+            "#,
+        )
+        .expect("config parses");
+        let mut config = config;
+        config.expand_paths().expect("expands");
+
+        let expanded = config.repos().next().expect("repo").path.clone().unwrap();
+        assert!(expanded.is_absolute(), "{}", expanded.display());
+        assert!(expanded.ends_with("code/airflow"), "{}", expanded.display());
+        assert!(!expanded.starts_with("~"));
+    }
+
+    #[test]
+    fn a_repo_without_a_checkout_stays_none() {
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        assert_eq!(config.repos().next().expect("repo").path, None);
+    }
+
+    #[test]
+    fn a_repo_with_no_checkout_is_named_so_every_command_can_say_so() {
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        assert_eq!(
+            config.repos_without_a_checkout(),
+            vec!["apache/airflow".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_repo_with_a_checkout_is_not_named() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config: Config = toml::from_str(&minimal("")).expect("parses");
+        config.projects[0].repos[0].path = Some(dir.path().to_path_buf());
+
+        assert!(config.repos_without_a_checkout().is_empty());
     }
 
     #[test]

@@ -13,9 +13,19 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 use reviewq_core::model::{PrState, Verdict};
 use reviewq_ledger::{Located, QueueItem, RepoKey};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, Overlay, SNOOZE_PRESETS};
 use crate::keys::{self, Action};
 use crate::theme::{Theme, color};
+
+/// What the mouse does, for the key reference.
+///
+/// Not in [`keys::BINDINGS`]: that table maps key chords to actions, and a click
+/// is neither — but someone opening the reference to find out what they can press
+/// wants to know the mouse works too.
+const MOUSE_GESTURES: &[(&str, &str)] = &[
+    ("click", "select the row, or focus the pane"),
+    ("wheel", "scroll what is under the pointer"),
+];
 
 /// Draw the whole screen: header, the queue beside the detail, footer.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -41,17 +51,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.set_page(cols[0].height.saturating_sub(2) as usize);
 
     header(frame, rows[0], app);
-    queue_pane(frame, cols[0], app);
-    let lines = detail_pane(frame, cols[1], app);
+    let queue_inner = queue_pane(frame, cols[0], app);
+    let (lines, detail_inner) = detail_pane(frame, cols[1], app);
     // Now that the content has been laid out, its length is known — which is
     // what stops a scroll running off the end of a short description.
     app.set_detail_lines(lines);
+    // And where it landed is known, which is what turns a click into a row.
+    app.set_pane_areas(queue_inner, detail_inner);
     footer(frame, rows[2], app);
 
     // Last, so it covers the panes rather than being drawn under them.
-    if app.help {
-        help_overlay(frame, rows[1], &app.theme);
-    }
+    overlay(frame, rows[1], app);
 }
 
 fn header(frame: &mut Frame, area: Rect, app: &App) {
@@ -107,7 +117,9 @@ fn panel(frame: &mut Frame, area: Rect, title: &str, focused: bool, t: &Theme) -
     inner
 }
 
-fn queue_pane(frame: &mut Frame, area: Rect, app: &App) {
+/// Draw the queue, returning the area its rows occupy so a click can be resolved
+/// back to one.
+fn queue_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
     let t = &app.theme;
     let inner = panel(frame, area, "Queue", app.focus == Focus::Queue, t);
     if app.queue.is_empty() {
@@ -117,12 +129,13 @@ fn queue_pane(frame: &mut Frame, area: Rect, app: &App) {
                 .wrap(Wrap { trim: true }),
             inner,
         );
-        return;
+        return inner;
     }
 
-    // Keep the selected row on screen by scrolling the window, not the cursor.
+    // The window is held in `App`, moved only when the selection nears an edge —
+    // see `keep_selection_visible`.
     let height = inner.height as usize;
-    let first = app.selected.saturating_sub(height.saturating_sub(1));
+    let first = app.queue_scroll.min(app.queue.len().saturating_sub(1));
     let lines: Vec<Line> = app
         .queue
         .iter()
@@ -132,6 +145,7 @@ fn queue_pane(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(index, item)| queue_row(item, index == app.selected, app.repo_count > 1, t))
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    inner
 }
 
 fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) -> Line<'static> {
@@ -175,9 +189,9 @@ fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) 
     Line::from(spans)
 }
 
-/// Draw the detail pane, returning how many lines its content came to so the
-/// caller can bound scrolling.
-fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> usize {
+/// Draw the detail pane, returning how many lines its content came to — so the
+/// caller can bound scrolling — and the area it drew them in.
+fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     let t = &app.theme;
     let title = match app.current() {
         Some(item) => number_label(app.repo_count > 1, &item.repo, item.item.pr.number),
@@ -191,7 +205,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> usize {
                 .style(Style::default().fg(color(t.dim))),
             inner,
         );
-        return 0;
+        return (0, inner);
     };
 
     let pr = &show.pr;
@@ -220,10 +234,23 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> usize {
                 Style::default().fg(color(t.dim)),
             ),
         ]),
-        Line::from(Span::styled(
-            format!("updated {}", stamp(pr.updated_at)),
-            Style::default().fg(color(t.dim)),
-        )),
+        Line::from(vec![
+            Span::styled(
+                format!("updated {}", stamp(pr.updated_at)),
+                Style::default().fg(color(t.dim)),
+            ),
+            // Which branch the change is aimed at, where it is known — a row
+            // stored before it was captured has it empty until the next sync, and
+            // an arrow pointing at nothing would read as a bug.
+            Span::styled(
+                if pr.base_ref.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · → {}", pr.base_ref)
+                },
+                Style::default().fg(color(t.dim)),
+            ),
+        ]),
     ];
 
     if pr.is_draft {
@@ -330,7 +357,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> usize {
     // the end.
     let total = paragraph.line_count(inner.width);
     frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), inner);
-    total
+    (total, inner)
 }
 
 /// Remove `<!-- ... -->` runs from markdown.
@@ -373,7 +400,7 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw("   "));
         }
         spans.push(Span::styled(
-            binding.keys,
+            footer_keys(binding),
             Style::default().fg(color(t.key)).bold(),
         ));
         spans.push(Span::styled(
@@ -382,6 +409,15 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A binding's chord as the footer shows it — terser than the overlay's where
+/// that buys a column or two, since the footer is what has to keep fitting.
+fn footer_keys(binding: &keys::Binding) -> &'static str {
+    match binding.action {
+        Action::Down => "jk",
+        _ => binding.keys,
+    }
 }
 
 /// A binding's footer label.
@@ -396,17 +432,242 @@ fn footer_label(binding: &keys::Binding, focus: Focus) -> &'static str {
         (Action::Down, Focus::Detail) => "scroll",
         (Action::SwitchPane, _) => "pane",
         (Action::RefreshSelected, _) => "refresh",
+        (Action::Review, _) => "review",
+        (Action::Done, _) => "done",
+        (Action::Snooze, _) => "snooze",
         _ => binding.what,
     }
 }
 
-/// The key reference, centred over the panes.
+/// Draw whichever overlay is up, over `area`.
+fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
+    let t = app.theme.clone();
+    let t = &t;
+    match app.overlay.clone() {
+        Overlay::None => {}
+        Overlay::Help { scroll } => {
+            let max = help_overlay(frame, area, scroll, t);
+            app.set_help_max_scroll(max);
+        }
+        Overlay::Launching { number } => modal(
+            frame,
+            area,
+            &format!(" Reviewing #{number} "),
+            vec![Line::from(Span::styled(
+                "Handing over to your review command…",
+                Style::default().fg(color(t.text)),
+            ))],
+            t,
+        ),
+        Overlay::OfferFetch { number } => modal(
+            frame,
+            area,
+            &format!(" #{number} "),
+            vec![
+                Line::from(Span::styled(
+                    "Not in your ledger. Fetch it now?",
+                    Style::default().fg(color(t.text)),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "It will be tracked from then on, as `reviewq track` would.",
+                    Style::default().fg(color(t.dim)),
+                )),
+                Line::from(""),
+                keyed_hint(&[("y / ⏎", "fetch"), ("any other key", "cancel")], t),
+            ],
+            t,
+        ),
+        Overlay::Fetching { number } => modal(
+            frame,
+            area,
+            &format!(" #{number} "),
+            vec![Line::from(Span::styled(
+                "Fetching from the forge…",
+                Style::default().fg(color(t.text)),
+            ))],
+            t,
+        ),
+        Overlay::ConfirmDone { number } => modal(
+            frame,
+            area,
+            &format!(" Done #{number} "),
+            vec![
+                Line::from(Span::styled(
+                    "Mark it handled at its current head?",
+                    Style::default().fg(color(t.text)),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "New commits bring it back. A review requested of you stays.",
+                    Style::default().fg(color(t.dim)),
+                )),
+                Line::from(""),
+                keyed_hint(&[("y / ⏎", "yes"), ("any other key", "cancel")], t),
+            ],
+            t,
+        ),
+        Overlay::SnoozePresets { number } => {
+            let mut lines = vec![Line::from(Span::styled(
+                "Suppress everything on it, mentions included, for:",
+                Style::default().fg(color(t.dim)),
+            ))];
+            lines.push(Line::from(""));
+            for (key, _, label) in SNOOZE_PRESETS {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {key}   "),
+                        Style::default().fg(color(t.key)).bold(),
+                    ),
+                    Span::styled((*label).to_string(), Style::default().fg(color(t.text))),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(keyed_hint(
+                &[("o", "another duration"), ("Esc", "cancel")],
+                t,
+            ));
+            modal(frame, area, &format!(" Snooze #{number} "), lines, t)
+        }
+        Overlay::SnoozePrompt {
+            number,
+            input,
+            error,
+        } => prompt_modal(
+            frame,
+            area,
+            &format!(" Snooze #{number} for "),
+            &input,
+            "e.g. 12h, 3d, 1w2d",
+            error.as_deref(),
+            "snooze",
+            t,
+        ),
+        Overlay::JumpPrompt { input, error } => prompt_modal(
+            frame,
+            area,
+            " Go to ",
+            &input,
+            "a number, #number, or a pasted pull-request URL",
+            error.as_deref(),
+            "go",
+            t,
+        ),
+    }
+}
+
+/// A modal with a one-line text field: what has been typed, a hint at the form
+/// it takes, why the last attempt was refused, and how to confirm or cancel.
+#[allow(clippy::too_many_arguments)]
+fn prompt_modal(
+    frame: &mut Frame,
+    screen: Rect,
+    title: &str,
+    input: &str,
+    hint: &str,
+    error: Option<&str>,
+    confirm: &str,
+    t: &Theme,
+) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(input.to_string(), Style::default().fg(color(t.text))),
+            // A block stands in for a cursor: the field is one line and takes no
+            // editing beyond typing and backspace, so a real one would be more
+            // machinery than it earns.
+            Span::styled("▏", Style::default().fg(color(t.focus))),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {hint}"),
+            Style::default().fg(color(t.dim)),
+        )),
+    ];
+    if let Some(error) = error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {error}"),
+            Style::default().fg(color(t.urgent)),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(keyed_hint(&[("⏎", confirm), ("Esc", "cancel")], t));
+    modal(frame, screen, title, lines, t);
+}
+
+/// A row of `key label` pairs, for the bottom of a modal.
+fn keyed_hint(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::raw("  ")];
+    for (key, label) in pairs {
+        if spans.len() > 1 {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(
+            (*key).to_string(),
+            Style::default().fg(color(t.key)).bold(),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(color(t.dim)),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// A bordered box of `lines`, centred and sized to its content.
+///
+/// [`Clear`]ed rather than filled, so it occludes without guessing the
+/// terminal's background — the same reason nothing else here paints one.
+fn modal(frame: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, t: &Theme) {
+    let width = lines
+        .iter()
+        .map(Line::width)
+        .chain(std::iter::once(title.chars().count()))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(4) as u16;
+    let height = lines.len().saturating_add(2) as u16;
+    let area = centred(screen, width.min(screen.width), height.min(screen.height));
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color(t.focus)))
+        .padding(Padding::horizontal(1))
+        .title(Span::styled(
+            title.to_string(),
+            Style::default().fg(color(t.focus)),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The key reference, centred over the panes, scrolled to `scroll`.
+///
+/// Returns how far it can still scroll, so the caller can hold the offset there.
 ///
 /// Sized to its content rather than to a fraction of the screen, so it doesn't
 /// leave a wide empty box on a big terminal. [`Clear`] blanks the cells beneath
 /// instead of painting a background colour, which keeps the overlay from having
 /// to guess the terminal's own — the same reason nothing else here fills.
-fn help_overlay(frame: &mut Frame, screen: Rect, t: &Theme) {
+fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, t: &Theme) -> u16 {
+    let heading = |text: &str| {
+        Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(color(t.focus))
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let entry = |keys: &str, what: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {keys:<12}"), Style::default().fg(color(t.key))),
+            Span::styled(what.to_string(), Style::default().fg(color(t.text))),
+        ])
+    };
+
     let mut rows: Vec<Line> = Vec::new();
     let mut group = "";
     for binding in keys::described() {
@@ -414,27 +675,23 @@ fn help_overlay(frame: &mut Frame, screen: Rect, t: &Theme) {
             if !rows.is_empty() {
                 rows.push(Line::from(""));
             }
-            rows.push(Line::from(Span::styled(
-                binding.group.to_string(),
-                Style::default()
-                    .fg(color(t.focus))
-                    .add_modifier(Modifier::BOLD),
-            )));
+            rows.push(heading(binding.group));
             group = binding.group;
         }
-        rows.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<12}", binding.keys),
-                Style::default().fg(color(t.key)),
-            ),
-            Span::styled(binding.what, Style::default().fg(color(t.text))),
-        ]));
+        rows.push(entry(binding.keys, binding.what));
     }
+
     rows.push(Line::from(""));
-    rows.push(Line::from(Span::styled(
-        "  any key to close",
-        Style::default().fg(color(t.dim)),
-    )));
+    rows.push(heading("Mouse"));
+    for (gesture, what) in MOUSE_GESTURES {
+        rows.push(entry(gesture, what));
+    }
+
+    rows.push(Line::from(""));
+    rows.push(keyed_hint(
+        &[("↑↓", "scroll"), ("any other key", "close")],
+        t,
+    ));
 
     let width = rows
         .iter()
@@ -442,8 +699,8 @@ fn help_overlay(frame: &mut Frame, screen: Rect, t: &Theme) {
         .max()
         .unwrap_or(0)
         .saturating_add(4) as u16;
-    let height = rows.len().saturating_add(2) as u16;
-    let area = centred(screen, width.min(screen.width), height.min(screen.height));
+    let wanted = rows.len().saturating_add(2) as u16;
+    let area = centred(screen, width.min(screen.width), wanted.min(screen.height));
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -453,7 +710,11 @@ fn help_overlay(frame: &mut Frame, screen: Rect, t: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(rows), inner);
+    let total = rows.len();
+    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+    // What is left below the last visible row. Zero when it all fits, which is
+    // what stops a scroll key doing anything on a tall terminal.
+    total.saturating_sub(inner.height as usize) as u16
 }
 
 /// The `width` x `height` rect at the middle of `area`, clamped to fit.
@@ -505,10 +766,11 @@ fn stamp(ts: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, Focus};
+    use crate::app::{App, Focus, Hooks, Overlay};
     use jiff::Timestamp;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot};
     use reviewq_ledger::{Ledger, TrackedReason};
 
@@ -604,6 +866,35 @@ Adds a `deferrable` flag to `S3KeySensor`.
         ledger
     }
 
+    /// Store `pr` as the only thing on the queue: tracked, with one attention row,
+    /// since the queue is built from attention rather than from tracking alone.
+    fn queue_only(ledger: &Ledger, repo_id: i64, pr: &PrSnapshot) {
+        let now = ts("2026-08-10T12:00:00Z");
+        ledger
+            .upsert_pr(
+                repo_id,
+                pr,
+                Some(TrackedReason::Interest("label x".into())),
+                now,
+            )
+            .expect("upsert");
+        ledger
+            .commit_detail(
+                repo_id,
+                pr.number,
+                &MyState::default(),
+                &[],
+                &[],
+                &[Attention {
+                    reason: AttentionReason::Mention { by: "kaxil".into() },
+                    since: ts("2026-08-10T09:00:00Z"),
+                }],
+                None,
+                now,
+            )
+            .expect("detail");
+    }
+
     /// Render at `width`x`height` and return the screen as plain text, one
     /// String per row, trailing blanks trimmed.
     fn render(app: &mut App, width: u16, height: u16) -> Vec<String> {
@@ -652,6 +943,37 @@ Adds a `deferrable` flag to `S3KeySensor`.
         assert!(screen.contains("p1"), "{screen}");
         // Footer bindings.
         assert!(screen.contains("quit"), "{screen}");
+    }
+
+    #[test]
+    fn the_detail_pane_says_which_branch_the_pr_targets() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+        let mut backport = pr(70135, "Fix the thing on 3.1");
+        backport.base_ref = "v3-1-test".into();
+        queue_only(&ledger, repo_id, &backport);
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+
+        let screen = render(&mut app, 100, 22).join("\n");
+
+        assert!(screen.contains("→ v3-1-test"), "{screen}");
+    }
+
+    #[test]
+    fn the_detail_pane_says_nothing_about_a_branch_it_has_not_synced_yet() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+        let mut unknown = pr(70135, "Stored before the branch was captured");
+        unknown.base_ref = String::new();
+        queue_only(&ledger, repo_id, &unknown);
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+
+        let screen = render(&mut app, 100, 22).join("\n");
+
+        assert!(
+            !screen.contains('→'),
+            "an arrow pointing at nothing:\n{screen}"
+        );
     }
 
     #[test]
@@ -757,12 +1079,12 @@ Adds a `deferrable` flag to `S3KeySensor`.
         assert_eq!(app.focus, Focus::Queue);
         let queue_focused = render(&mut app, 100, 24).join("\n");
         assert!(queue_focused.contains("move"), "{queue_focused}");
-        assert!(queue_focused.contains("Tab pane"), "{queue_focused}");
 
         app.focus = Focus::Detail;
         let detail_focused = render(&mut app, 100, 24).join("\n");
+        // The same key, relabelled for what it now does.
         assert!(detail_focused.contains("scroll"), "{detail_focused}");
-        assert!(detail_focused.contains("Tab pane"), "{detail_focused}");
+        assert!(!detail_focused.contains("jk move"), "{detail_focused}");
     }
 
     #[test]
@@ -819,11 +1141,21 @@ Adds a `deferrable` flag to `S3KeySensor`.
     #[test]
     fn the_help_overlay_lists_every_binding_grouped() {
         let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
-        app.help = true;
-        let screen = render(&mut app, 100, 24).join("\n");
+        app.overlay = Overlay::Help { scroll: 0 };
+        // Tall enough for the whole reference — which grows as bindings are added,
+        // so this has room to spare. What it does when it *doesn't* fit is the
+        // next test's business.
+        let screen = render(&mut app, 100, 40).join("\n");
 
         assert!(screen.contains("Keys"), "{screen}");
-        for group in ["Navigate", "View", "Session"] {
+        for group in [
+            "Navigate",
+            "View",
+            "Act on the PR",
+            "Forge",
+            "Session",
+            "Mouse",
+        ] {
             assert!(screen.contains(group), "missing group {group}:\n{screen}");
         }
         // Including the ones the footer no longer has room for.
@@ -833,11 +1165,45 @@ Adds a `deferrable` flag to `S3KeySensor`.
             "first",
             "last",
             "switch pane",
+            "mute, or unmute",
+            "defer to the bottom",
+            "refresh from the forge",
+            "open it in your browser",
+            "copy its URL",
             "quit",
+            "select the row, or focus the pane",
         ] {
             assert!(screen.contains(what), "missing binding {what}:\n{screen}");
         }
-        assert!(screen.contains("any key to close"), "{screen}");
+        assert!(screen.contains("close"), "{screen}");
+    }
+
+    #[test]
+    fn the_help_overlay_scrolls_when_it_does_not_fit() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        app.overlay = Overlay::Help { scroll: 0 };
+
+        // Too short for the whole reference: the top shows, the tail does not.
+        // "Session" is the marker because it appears nowhere else — the footer's
+        // own "q / Esc quit" would make that a false negative.
+        let top = render(&mut app, 100, 18).join("\n");
+        assert!(top.contains("Navigate"), "{top}");
+        assert!(
+            !top.contains("Session"),
+            "the tail should be below the fold:\n{top}"
+        );
+
+        // That render reported how far it can go, so End reaches the end.
+        app.on_overlay_key(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &Hooks::live(),
+        )
+        .expect("scroll to end");
+        let bottom = render(&mut app, 100, 18).join("\n");
+        assert!(
+            bottom.contains("Session"),
+            "the tail should be reachable:\n{bottom}"
+        );
     }
 
     #[test]
@@ -846,7 +1212,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
         let plain = render(&mut app, 100, 24).join("\n");
         assert!(plain.contains("Adds a deferrable flag"), "{plain}");
 
-        app.help = true;
+        app.overlay = Overlay::Help { scroll: 0 };
         let covered = render(&mut app, 100, 24).join("\n");
         // A line the overlay is drawn across is cut, not shown through it. The
         // overlay is sized to its content, so only the rows and columns it
@@ -863,7 +1229,7 @@ Adds a `deferrable` flag to `S3KeySensor`.
     #[test]
     fn the_help_overlay_fits_a_terminal_too_small_for_it() {
         let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
-        app.help = true;
+        app.overlay = Overlay::Help { scroll: 0 };
         for (w, h) in [(30u16, 6u16), (24, 4), (100, 40)] {
             let screen = render(&mut app, w, h);
             assert_eq!(screen.len(), h as usize);

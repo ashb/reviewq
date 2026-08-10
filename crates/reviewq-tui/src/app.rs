@@ -9,22 +9,71 @@
 //! as a task and reports back. Its own [`Ledger`] handle writes while this one
 //! reads, which is what the ledger's WAL mode is for.
 //!
-//! Input and finished work arrive on one channel, so the loop is a single
-//! `recv().await` rather than a `select!`: a keystroke and a completed refresh
-//! are both just reasons to update and redraw. A thread does the blocking
-//! `event::read`, since crossterm's own async stream would be a dependency for
-//! no gain over that.
+//! The loop reads input itself, and takes finished work off a channel between
+//! keystrokes. It does *not* use a thread for input: a background reader would
+//! still be sitting in `event::read` while a review command had the terminal,
+//! stealing that program's keystrokes and swallowing the terminal's reply to the
+//! cursor-position query `Terminal::clear` makes — which surfaces as "the cursor
+//! position could not be read".
+//!
+//! Both input and the side effects are handed in as [`Hooks`], so a test can
+//! drive the real loop from a script with no terminal and no forge.
 
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyEventKind};
+use anyhow::{Context, Result, bail};
+use crossterm::clipboard::CopyToClipboard;
+use crossterm::cursor::Hide;
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode};
+use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
+use ratatui::layout::{Position, Rect};
 use reviewq_app::sync::Refreshed;
-use reviewq_ledger::{Ledger, Located, PrShow, QueueItem};
+use reviewq_ledger::{Ledger, Located, PrShow, QueueItem, RepoKey};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+
+/// A PR's page on the forge.
+///
+/// The forge renders it, because the path shape is the provider's business — the
+/// same reason a pasted URL is handed to the forge to *read*. Building an adapter
+/// costs nothing and resolves no token, so showing someone where a PR is never
+/// waits on a credential helper.
+fn pr_url(repo: &RepoKey, number: u64) -> Result<String> {
+    let loaded = reviewq_app::config::load(None)?;
+    let forge = loaded.config.forge_for(&repo.host)?;
+    Ok(forge.web_url(&repo.owner, &repo.name, number))
+}
+
+/// The program that opens a URL in whatever the desktop uses for one.
+///
+/// Every platform spells its own differently and none of them is worth a
+/// dependency: this is one argument and one process.
+#[cfg(target_os = "macos")]
+const URL_OPENER: &str = "open";
+#[cfg(target_os = "windows")]
+const URL_OPENER: &str = "explorer";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const URL_OPENER: &str = "xdg-open";
+
+/// Rows the wheel scrolls the detail pane per notch.
+///
+/// More than one, because a PR description is long and a terminal sends one event
+/// per notch. The queue moves a single row instead: each step there reloads the
+/// selected PR's detail, so three at a time would read two of them for nothing.
+const WHEEL_ROWS: isize = 3;
+
+/// How long the loop waits for a keystroke before looking for finished work.
+///
+/// Short enough that a refresh landing feels immediate, long enough that an idle
+/// interface is not busy. Only reached when nothing is happening.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 use crate::keys::{self, Action};
 use crate::theme::Theme;
@@ -51,10 +100,30 @@ pub struct App {
     /// First visible line of the detail pane. A PR description easily outruns
     /// the pane, so it scrolls independently of the queue's selection.
     pub detail_scroll: u16,
-    /// The key reference is up, covering the panes beneath it.
-    pub help: bool,
+    /// What is covering the panes, if anything. While something is, it owns the
+    /// keyboard.
+    pub overlay: Overlay,
     /// A one-line note in the header: what is happening, or what just did.
     pub status: Option<String>,
+    /// First visible row of the queue.
+    ///
+    /// Held rather than derived from the selection: deriving it is what made
+    /// moving up off the last row scroll the whole list, because the selection
+    /// was pinned to whichever edge it had reached.
+    pub queue_scroll: usize,
+    /// A PR whose handoff has been asked for but not yet run, so the loop can
+    /// draw the notice first.
+    pending_review: Option<u64>,
+    /// Likewise for a PR to fetch, which is also a network call worth announcing
+    /// before it blocks.
+    pending_fetch: Option<u64>,
+    /// The screen is not to be trusted — something else had the terminal — so
+    /// the next draw must repaint every cell rather than only what changed.
+    repaint: bool,
+    /// How far the key reference can scroll before its last row is on screen.
+    /// Written by the renderer, which is the only thing that knows how much of it
+    /// fits.
+    help_max_scroll: u16,
     /// PRs with a refresh in flight. Keyed by number so pressing `r` twice on
     /// one PR doesn't fetch it twice, while two different PRs can refresh at
     /// once.
@@ -66,6 +135,12 @@ pub struct App {
     /// Lines the detail pane last needed, so scrolling can stop at the end
     /// rather than running off into blank space. Also written by the renderer.
     detail_lines: usize,
+    /// Where the queue's rows and the detail's text last landed on screen, so a
+    /// click can be turned back into the row under the pointer. Written by the
+    /// renderer, which is the only thing that knows where the layout put them;
+    /// empty until the first draw, which makes every hit test miss.
+    queue_area: Rect,
+    detail_area: Rect,
     ledger: Ledger,
     quit: bool,
 }
@@ -82,20 +157,17 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
-    /// A channel with the terminal's input already flowing into it.
-    pub(crate) fn with_input_reader() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        spawn_input_reader(tx.clone());
-        Self { tx, rx }
-    }
-
-    /// A channel nothing is feeding, for a test to load by hand.
-    #[cfg(test)]
-    fn silent() -> Self {
+    /// A fresh channel. Only tasks send on it — input is read by the loop
+    /// itself, so that nothing is holding stdin when a review command wants it.
+    pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self { tx, rx }
     }
 }
+
+/// A side effect that needs a PR's full identity — its repo as well as its
+/// number — because it has to reach the forge the PR lives on.
+type PrHook = Box<dyn Fn(&RepoKey, u64) -> Result<()> + Send + Sync>;
 
 /// The side effects the loop performs, as functions it is given.
 ///
@@ -104,15 +176,59 @@ impl Channel {
 /// loop a struct of hooks. It also keeps `App` unaware of how a refresh is
 /// actually run.
 pub(crate) struct Hooks {
+    /// Wait briefly for a terminal event, returning `None` if none arrived.
+    ///
+    /// Injected for the same reason the rest are: it lets a test drive the real
+    /// loop from a script. It also means input is read here, by the loop, and
+    /// never by a thread of its own — a background reader would still be sitting
+    /// in `read` while a review command had the terminal, stealing that program's
+    /// keystrokes and swallowing the terminal's reply to the cursor-position
+    /// query `Terminal::clear` makes.
+    pub next_event: Box<dyn Fn() -> Result<Option<Event>> + Send + Sync>,
     /// Begin refreshing a PR. Must not block: whatever it starts is expected to
     /// report back as [`Message::Refreshed`] eventually, or never.
     pub refresh: Box<dyn Fn(u64, mpsc::UnboundedSender<Message>) + Send + Sync>,
+    /// Tell the forge a PR's notifications are read. Fire-and-forget: `done` has
+    /// already been recorded locally by the time this runs, and nothing waits on
+    /// it, so a failure is logged and no more.
+    pub mark_read: Box<dyn Fn(u64) + Send + Sync>,
+    /// Fetch a PR the ledger has never seen and start tracking it. Blocks, like
+    /// the handoff, because the interface has nothing to show until it returns
+    /// and the notice explains the wait.
+    pub fetch: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
+    /// Show a PR's page in whatever the desktop opens URLs with.
+    ///
+    /// Takes the PR rather than a URL because working out the URL is itself
+    /// config work — which host, whose layout — and that belongs on this side of
+    /// the seam with every other config touch, not in `App`.
+    pub open_url: PrHook,
+    /// Put a PR's URL on the clipboard, resolved the same way.
+    pub copy_url: PrHook,
+    /// Hand a PR to the configured review command, giving the terminal back for
+    /// its duration and taking it over again afterwards.
+    ///
+    /// Blocks on purpose — the reviewer is *in* that program, and a queue
+    /// redrawing underneath it would be nonsense. It's a hook partly so a test
+    /// can stand in for it, and partly because suspending is the one thing the
+    /// loop cannot do generically: it belongs to the real backend, not to
+    /// `TestBackend`.
+    pub review: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
 }
 
 impl Hooks {
     /// The real ones, refreshing through `reviewq-app`.
     pub(crate) fn live() -> Self {
         Self {
+            next_event: Box::new(|| {
+                // `block_in_place` because `poll` parks the thread: it tells the
+                // runtime to move this worker's other tasks elsewhere first.
+                let ready = tokio::task::block_in_place(|| event::poll(POLL_INTERVAL))
+                    .context("polling the terminal for input")?;
+                if !ready {
+                    return Ok(None);
+                }
+                Ok(Some(event::read().context("reading a terminal event")?))
+            }),
             refresh: Box::new(|number, tx| {
                 // `spawn_blocking` rather than `spawn`, because `sync_one`'s
                 // future is not `Send`: it holds a ledger handle across the forge
@@ -133,17 +249,213 @@ impl Hooks {
                     let _ = tx.send(Message::Refreshed { number, outcome });
                 });
             }),
+            fetch: Box::new(|number| {
+                tokio::task::block_in_place(|| {
+                    Handle::current()
+                        .block_on(reviewq_app::sync::track_one(None, None, number))
+                        .map(|_| ())
+                })
+            }),
+            open_url: Box::new(|repo, number| {
+                let url = pr_url(repo, number)?;
+                // Never handed the terminal, unlike the review command: an opener
+                // returns straight away and its output (`xdg-open` has opinions
+                // about mime caches) would land on top of the queue. So its
+                // streams go nowhere and it is reaped off the UI thread — a
+                // browser that has to cold-start can take seconds, and waiting
+                // here would freeze the interface for them.
+                let mut command = std::process::Command::new(URL_OPENER);
+                command
+                    .arg(&url)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                let mut child = command
+                    .spawn()
+                    .with_context(|| format!("running {URL_OPENER}"))?;
+                tokio::task::spawn_blocking(move || {
+                    // Reaped rather than left: an unwaited child stays a zombie
+                    // for as long as the interface runs.
+                    let _ = child.wait();
+                });
+                Ok(())
+            }),
+            copy_url: Box::new(|repo, number| {
+                let url = pr_url(repo, number)?;
+                // OSC 52, through the terminal that is already ours — so this
+                // works over ssh and inside tmux, where a clipboard library
+                // talking to the local display server would put the URL on the
+                // wrong machine's clipboard. The terminal may decline (or not
+                // support it) silently; there is no reply to wait for.
+                execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(&url))
+                    .context("writing the clipboard escape sequence")
+            }),
+            review: Box::new(|number| {
+                let handoff = reviewq_app::review::handoff_for(None, number)?;
+
+                // Raw mode goes, the alternate screen stays.
+                //
+                // Leaving the alternate screen would drop the terminal back to
+                // the shell's scrollback for however long the review command
+                // takes to draw — seconds, for one that resolves a token first —
+                // and reviewq's own frame, notice and all, would vanish the
+                // instant you pressed the key. Staying put leaves the notice on
+                // screen until the command paints over it.
+                //
+                // The cost: a handoff command that only *prints* would write over
+                // that frame and have its output wiped when reviewq repaints. The
+                // configured default is a full-screen reviewer, so this trades in
+                // favour of the common case.
+                //
+                // The cursor stays hidden. Showing it would leave it blinking in
+                // the middle of reviewq's own frame — next to the notice — for as
+                // long as the command takes to draw. A full-screen command shows
+                // its own where it wants one.
+                //
+                // Mouse reporting goes with raw mode: the child asks for whatever
+                // it wants, and turns that off again when it exits, which would
+                // otherwise leave reviewq with no mouse for the rest of the
+                // session.
+                let _ = disable_raw_mode();
+                let _ = execute!(std::io::stdout(), DisableMouseCapture);
+
+                let ran = handoff
+                    .command()
+                    .status()
+                    .with_context(|| format!("running {:?}", handoff.argv[0]));
+
+                // Taken back whatever happened, so a review command that dies
+                // doesn't leave the queue drawing onto a cooked terminal. The
+                // alternate screen is re-entered because a full-screen child
+                // leaves its own on the way out, which drops us to the primary
+                // one; for a child that never took it over this is a no-op.
+                // `Hide` again on the way back: the command may well have shown
+                // the cursor and not put it away.
+                let _ = enable_raw_mode();
+                let _ = execute!(
+                    std::io::stdout(),
+                    EnterAlternateScreen,
+                    EnableMouseCapture,
+                    Hide
+                );
+                let status = ran?;
+                if !status.success() {
+                    bail!(
+                        "{:?} exited with {}",
+                        handoff.argv[0],
+                        status
+                            .code()
+                            .map_or_else(|| "a signal".to_string(), |code| code.to_string())
+                    );
+                }
+                Ok(())
+            }),
+            mark_read: Box::new(|number| {
+                tokio::task::spawn_blocking(move || {
+                    let marked = Handle::current().block_on(async move {
+                        let key = reviewq_app::resolve::repo_for(number)?;
+                        let loaded = reviewq_app::config::load(None)?;
+                        let repo = loaded
+                            .config
+                            .repos()
+                            .find(|r| r.key() == key)
+                            .cloned()
+                            .context("the PR's repo is no longer configured")?;
+                        reviewq_app::actions::mark_notifications_read(None, &repo, number).await
+                    });
+                    if let Err(err) = marked {
+                        tracing::warn!(number, %err, "could not mark GitHub notifications read");
+                    }
+                });
+            }),
         }
     }
 }
+
+/// What is covering the panes.
+///
+/// Several actions need a follow-up keystroke — a confirmation, a duration — so
+/// this is a small state machine rather than a flag. Whichever variant is up owns
+/// the keyboard, which is why the bindings table does not describe their keys:
+/// each overlay says on screen what it accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Overlay {
+    /// The panes have the keyboard.
+    #[default]
+    None,
+    /// Handing the terminal over to the review command.
+    ///
+    /// Drawn before the handoff rather than after: the command may take a moment
+    /// to appear — resolving a token, starting up — and an unexplained pause with
+    /// reviewq's own frame still on screen reads as a hang.
+    Launching {
+        /// The PR being handed off.
+        number: u64,
+    },
+    /// The key reference, scrolled to this row. It outgrew a short terminal as
+    /// soon as there were actions worth listing, so it scrolls rather than
+    /// silently truncating.
+    Help {
+        /// First visible row of the reference.
+        scroll: u16,
+    },
+    /// Confirming a `done`, which is the one action worth a second thought: it
+    /// is the most-pressed, and clears reasons that only a sync brings back.
+    ConfirmDone {
+        /// The PR it would mark done.
+        number: u64,
+    },
+    /// Picking a snooze duration from presets.
+    SnoozePresets {
+        /// The PR it would snooze.
+        number: u64,
+    },
+    /// A PR asked for by number that the ledger has never seen — offering to
+    /// fetch it rather than refusing.
+    ///
+    /// A number you typed is a number you meant, and it not being here is more
+    /// often "my sweep hasn't reached it" than a mistake. Offering the fetch
+    /// turns a dead end into the thing you were going to do next anyway.
+    OfferFetch {
+        /// The PR to fetch.
+        number: u64,
+    },
+    /// Fetching a PR the ledger had never seen.
+    Fetching {
+        /// The PR being fetched.
+        number: u64,
+    },
+    /// Typing a PR number to jump to.
+    JumpPrompt {
+        /// What has been typed so far.
+        input: String,
+        /// Why the last attempt didn't land, shown under the field.
+        error: Option<String>,
+    },
+    /// Typing a snooze duration, for one the presets don't cover.
+    SnoozePrompt {
+        /// The PR it would snooze.
+        number: u64,
+        /// What has been typed so far.
+        input: String,
+        /// Why the last attempt was rejected, shown under the field.
+        error: Option<String>,
+    },
+}
+
+/// The snooze presets, in the order they're listed and the key that picks each.
+pub(crate) const SNOOZE_PRESETS: &[(char, &str, &str)] = &[
+    ('1', "1d", "tomorrow"),
+    ('3', "3d", "3 days"),
+    ('7', "1w", "a week"),
+    ('4', "4w", "4 weeks"),
+];
 
 /// Something the loop should wake up for.
 ///
 /// Input and finished work share one channel so the loop is a single `recv`:
 /// both are just reasons to update state and redraw.
 pub(crate) enum Message {
-    /// A terminal event — a keystroke, or a resize.
-    Input(Event),
     /// A refresh task finished, for better or worse.
     Refreshed {
         /// The PR it was refreshing.
@@ -153,21 +465,10 @@ pub(crate) enum Message {
     },
 }
 
-/// Read terminal events on a thread, forwarding them to the loop.
-///
-/// `event::read` blocks, which an async task must not do. A thread can, and
-/// this one needs no shutdown path: on quit the receiver drops, the next `send`
-/// fails, and the thread ends — or the process exits first, which is the usual
-/// case since it is parked in `read` waiting for a key that never comes.
-fn spawn_input_reader(tx: mpsc::UnboundedSender<Message>) {
-    std::thread::spawn(move || {
-        while let Ok(event) = event::read() {
-            if tx.send(Message::Input(event)).is_err() {
-                break;
-            }
-        }
-    });
-}
+/// How many rows of context to keep between the selection and an edge before the
+/// list starts scrolling. Vim calls this `scrolloff`; three is its common value
+/// and enough to see what's coming without the list moving under every keypress.
+const SCROLLOFF: usize = 3;
 
 /// Which pane has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -199,11 +500,18 @@ impl App {
             repo_count: 0,
             focus: Focus::default(),
             detail_scroll: 0,
-            help: false,
+            overlay: Overlay::None,
+            queue_scroll: 0,
+            pending_review: None,
+            pending_fetch: None,
+            repaint: false,
+            help_max_scroll: 0,
             status: None,
             refreshing: BTreeSet::new(),
             page: 1,
             detail_lines: 0,
+            queue_area: Rect::ZERO,
+            detail_area: Rect::ZERO,
             ledger,
             quit: false,
         };
@@ -259,6 +567,35 @@ impl App {
     /// too short to show anything still moves by one row instead of stalling.
     pub(crate) fn set_page(&mut self, rows: usize) {
         self.page = rows.max(1);
+        // A resize changes what "near the edge" means, so the window may need
+        // moving even though the selection hasn't.
+        self.keep_selection_visible();
+    }
+
+    /// Move the queue's window only when the selection gets near an edge.
+    ///
+    /// Within [`SCROLLOFF`] rows of the top or bottom the list scrolls to keep
+    /// that much context ahead; anywhere else in the window the selection moves
+    /// alone. Deriving the window from the selection instead — pinning it to
+    /// whichever edge it had reached — meant that from the last row, moving up
+    /// scrolled the whole list at the same time, which reads as two things
+    /// happening for one keypress.
+    ///
+    /// The margin shrinks on a pane too short to honour it, and the ends of the
+    /// list win over it: there is nothing above row zero to keep in view.
+    fn keep_selection_visible(&mut self) {
+        let page = self.page;
+        let margin = SCROLLOFF.min(page.saturating_sub(1) / 2);
+        let top = self.queue_scroll;
+
+        if self.selected < top + margin {
+            self.queue_scroll = self.selected.saturating_sub(margin);
+        } else if self.selected + margin >= top + page {
+            self.queue_scroll = (self.selected + margin + 1).saturating_sub(page);
+        }
+        // Never past the end: a short queue, or one that shrank under an action,
+        // would otherwise leave the window looking at nothing.
+        self.queue_scroll = self.queue_scroll.min(self.queue.len().saturating_sub(page));
     }
 
     /// Rows a paging key moves by — whatever the last render measured.
@@ -266,11 +603,31 @@ impl App {
         self.page
     }
 
+    /// Record how far the key reference can usefully scroll, and hold it there.
+    /// Called by the renderer, which knows both how many rows it has and how
+    /// many fit.
+    pub(crate) fn set_help_max_scroll(&mut self, max: u16) {
+        self.help_max_scroll = max;
+        if let Overlay::Help { scroll } = self.overlay {
+            self.overlay = Overlay::Help {
+                scroll: scroll.min(max),
+            };
+        }
+    }
+
     /// Record how many lines the detail pane's content came to, so scrolling
     /// can stop at the last line instead of running into empty space.
     pub(crate) fn set_detail_lines(&mut self, lines: usize) {
         self.detail_lines = lines;
         self.clamp_detail_scroll();
+    }
+
+    /// Record where the two panes' contents were drawn, so a mouse position can
+    /// be resolved to the row under it. The areas inside the borders, not the
+    /// panes: a click on a border is on no row.
+    pub(crate) fn set_pane_areas(&mut self, queue: Rect, detail: Rect) {
+        self.queue_area = queue;
+        self.detail_area = detail;
     }
 
     /// Hold the detail scroll within its content. Re-applied after a render
@@ -303,58 +660,476 @@ impl App {
         B::Error: std::error::Error + Send + Sync + 'static,
     {
         while !self.quit {
+            // Something else had the terminal, so ratatui's record of what is on
+            // screen is stale: clear it, or its diffing renderer will leave
+            // whatever the other program drew.
+            if std::mem::take(&mut self.repaint) {
+                terminal.clear()?;
+            }
             terminal.draw(|frame| ui::draw(frame, self))?;
 
-            // Nothing animates, so there is no tick: the loop sleeps until a key
-            // is pressed, the terminal resizes, or a task reports back.
-            match channel.rx.recv().await {
-                Some(Message::Input(Event::Key(key))) => {
-                    // Windows reports press and release; acting on both
-                    // double-fires.
-                    if key.kind == KeyEventKind::Press {
-                        self.dispatch(keys::action_for(key), channel, hooks)?;
-                    }
+            // A handoff runs here rather than in `dispatch`, because the draw
+            // above is what puts "launching" on screen before the terminal is
+            // given away — 1Password may prompt, and an unexplained pause with
+            // reviewq's last frame still showing is alarming.
+            if let Some(number) = self.pending_review.take() {
+                self.hand_off(number, channel, hooks);
+                continue;
+            }
+            if let Some(number) = self.pending_fetch.take() {
+                self.fetch_unknown(number, hooks);
+                continue;
+            }
+
+            // Results from tasks first, and without waiting: they may be already
+            // queued, and a keystroke should not have to arrive to reveal them.
+            while let Ok(message) = channel.rx.try_recv() {
+                let Message::Refreshed { number, outcome } = message;
+                self.on_refreshed(number, outcome);
+            }
+            if self.quit {
+                break;
+            }
+
+            match (hooks.next_event)()? {
+                // Windows reports press and release; acting on both double-fires.
+                Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    self.dispatch(key, channel, hooks)?;
                 }
+                Some(Event::Mouse(mouse)) => self.on_mouse(mouse)?,
                 // A resize is reason enough to redraw, which the top of the loop
-                // does unconditionally.
-                Some(Message::Input(_)) => {}
-                Some(Message::Refreshed { number, outcome }) => {
-                    self.on_refreshed(number, outcome);
-                }
-                // The input reader has gone and no task holds a sender, so
-                // nothing further can arrive and waiting again would hang.
-                None => break,
+                // does unconditionally; nothing arriving is reason for neither.
+                Some(_) | None => {}
             }
         }
         Ok(())
     }
 
-    /// Route an action: the ones with side effects go to a hook, the rest are
-    /// state changes [`update`](Self::update) applies.
+    /// Route a keystroke.
     ///
-    /// Splitting them is what lets `update` be tested by naming an action
-    /// directly, without synthesising key events or standing up a forge.
-    fn dispatch(&mut self, action: Option<Action>, channel: &Channel, hooks: &Hooks) -> Result<()> {
-        match action {
+    /// An overlay that is up gets it raw, because what a key means there is the
+    /// overlay's business — `3` picks a duration, `y` confirms — and none of that
+    /// belongs in a table of global bindings. Otherwise it resolves to an
+    /// [`Action`]: the ones with side effects are performed here, where the hooks
+    /// and the ledger are, and the rest go to [`update`](Self::update).
+    fn dispatch(&mut self, key: KeyEvent, channel: &Channel, hooks: &Hooks) -> Result<()> {
+        if self.overlay != Overlay::None {
+            return self.on_overlay_key(key, hooks);
+        }
+        match keys::action_for(key) {
             Some(Action::RefreshSelected) => {
                 if let Some(number) = self.refresh_target() {
                     (hooks.refresh)(number, channel.tx.clone());
                 }
                 Ok(())
             }
+            Some(Action::Review) => {
+                if let Some(number) = self.selected_number() {
+                    // Held for the loop to perform after one more draw, so the
+                    // notice is up before the terminal is handed over.
+                    self.overlay = Overlay::Launching { number };
+                    self.pending_review = Some(number);
+                }
+                Ok(())
+            }
+            Some(Action::Done) => {
+                if let Some(number) = self.selected_number() {
+                    self.overlay = Overlay::ConfirmDone { number };
+                }
+                Ok(())
+            }
+            Some(Action::Snooze) => {
+                if let Some(number) = self.selected_number() {
+                    self.overlay = Overlay::SnoozePresets { number };
+                }
+                Ok(())
+            }
+            Some(Action::OpenInBrowser) => self.open_selected(hooks),
+            Some(Action::CopyUrl) => self.copy_selected_url(hooks),
+            Some(Action::ToggleMute) => self.toggle_mute(),
+            Some(Action::ToggleDefer) => self.toggle_defer(),
             other => self.update(other),
         }
+    }
+
+    /// The selected PR's number, or `None` on an empty queue.
+    fn selected_number(&self) -> Option<u64> {
+        self.current().map(|item| item.item.pr.number)
+    }
+
+    /// The `repo_id` the selected PR belongs to, resolved through the ledger.
+    fn selected_repo_id(&self) -> Result<Option<i64>> {
+        match self.current() {
+            None => Ok(None),
+            Some(item) => Ok(Some(self.ledger.ensure_repo(&item.repo)?)),
+        }
+    }
+
+    /// Open the selected PR in a browser, reporting either way in the header.
+    ///
+    /// A failure is a status line rather than an error out of the loop: the
+    /// browser not opening is no reason for the queue to stop.
+    fn open_selected(&mut self, hooks: &Hooks) -> Result<()> {
+        let Some((repo, number)) = self.selected_pr() else {
+            return Ok(());
+        };
+        self.status = Some(match (hooks.open_url)(&repo, number) {
+            Ok(()) => format!("#{number} opened"),
+            Err(err) => format!("#{number} could not be opened: {err:#}"),
+        });
+        Ok(())
+    }
+
+    /// Put the selected PR's URL on the clipboard, reporting either way.
+    fn copy_selected_url(&mut self, hooks: &Hooks) -> Result<()> {
+        let Some((repo, number)) = self.selected_pr() else {
+            return Ok(());
+        };
+        self.status = Some(match (hooks.copy_url)(&repo, number) {
+            Ok(()) => format!("#{number}'s URL copied"),
+            Err(err) => format!("#{number}'s URL could not be copied: {err:#}"),
+        });
+        Ok(())
+    }
+
+    /// The selected PR's repo and number — the identity a hook needs to reach the
+    /// forge for it.
+    fn selected_pr(&self) -> Option<(RepoKey, u64)> {
+        self.current()
+            .map(|item| (item.repo.clone(), item.item.pr.number))
+    }
+
+    /// Handle a mouse event: a click selects the row under the pointer, the wheel
+    /// scrolls whichever pane it is over.
+    ///
+    /// The pane under the pointer is what acts, and takes focus with it. A wheel
+    /// over the detail that scrolled the queue instead — because the queue
+    /// happened to have focus — would be worse than doing nothing.
+    fn on_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        // An overlay owns the keyboard, and the mouse with it: the rows are still
+        // drawn underneath, so a click on one you cannot see would act on
+        // whatever the modal is covering.
+        if !matches!(self.overlay, Overlay::None) {
+            return Ok(());
+        }
+        let at = Position::new(mouse.column, mouse.row);
+        let pane = if self.queue_area.contains(at) {
+            Focus::Queue
+        } else if self.detail_area.contains(at) {
+            Focus::Detail
+        } else {
+            return Ok(());
+        };
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.focus = pane;
+                if pane == Focus::Queue {
+                    self.select_row_at(mouse.row)?;
+                }
+                Ok(())
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                self.focus = pane;
+                let rows = match pane {
+                    Focus::Queue => 1,
+                    Focus::Detail => WHEEL_ROWS,
+                };
+                self.scroll(if mouse.kind == MouseEventKind::ScrollUp {
+                    -rows
+                } else {
+                    rows
+                })
+            }
+            // Drags, releases, middle and right buttons: nothing here wants them.
+            _ => Ok(()),
+        }
+    }
+
+    /// Select the queue row drawn at screen row `row`.
+    ///
+    /// Screen rows map one-to-one onto queue entries — the list is a line per PR,
+    /// never wrapped — so the entry is the window's first plus how far down the
+    /// pane the click landed. Below the last PR is empty space, and a click there
+    /// is ignored rather than jumping to the end of the queue.
+    fn select_row_at(&mut self, row: u16) -> Result<()> {
+        let offset = row.saturating_sub(self.queue_area.y) as usize;
+        let index = self.queue_scroll.saturating_add(offset);
+        if index >= self.queue.len() {
+            return Ok(());
+        }
+        self.move_to(index)
+    }
+
+    /// Handle a key while an overlay owns the keyboard.
+    pub(crate) fn on_overlay_key(&mut self, key: KeyEvent, hooks: &Hooks) -> Result<()> {
+        let escape = matches!(key.code, KeyCode::Esc);
+        match self.overlay.clone() {
+            // Nothing to accept: the loop replaces it the moment the handoff
+            // returns, so a keystroke here is one the review command will get.
+            Overlay::None | Overlay::Launching { .. } => Ok(()),
+            // Movement scrolls the reference; anything else dismisses it, so it
+            // still needs nothing remembered to get out of.
+            Overlay::Help { scroll } => {
+                let page = self.page().try_into().unwrap_or(u16::MAX);
+                let moved = match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => Some(scroll.saturating_add(1)),
+                    KeyCode::Up | KeyCode::Char('k') => Some(scroll.saturating_sub(1)),
+                    KeyCode::PageDown => Some(scroll.saturating_add(page)),
+                    KeyCode::PageUp => Some(scroll.saturating_sub(page)),
+                    KeyCode::Home | KeyCode::Char('g') => Some(0),
+                    KeyCode::End | KeyCode::Char('G') => Some(u16::MAX),
+                    _ => None,
+                };
+                self.overlay = match moved {
+                    Some(to) => Overlay::Help {
+                        scroll: to.min(self.help_max_scroll),
+                    },
+                    None => Overlay::None,
+                };
+                Ok(())
+            }
+            Overlay::OfferFetch { number } => {
+                let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
+                if confirmed {
+                    // Held for the loop, so the notice is drawn before the fetch
+                    // blocks on the forge — same reason as the handoff.
+                    self.overlay = Overlay::Fetching { number };
+                    self.pending_fetch = Some(number);
+                } else {
+                    self.overlay = Overlay::None;
+                }
+                Ok(())
+            }
+            // Nothing to accept: the loop replaces it when the fetch returns.
+            Overlay::Fetching { .. } => Ok(()),
+            Overlay::ConfirmDone { number } => {
+                let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
+                self.overlay = Overlay::None;
+                if confirmed {
+                    self.mark_done(number, hooks)?;
+                }
+                Ok(())
+            }
+            Overlay::SnoozePresets { number } => {
+                if escape {
+                    self.overlay = Overlay::None;
+                    return Ok(());
+                }
+                if matches!(key.code, KeyCode::Char('o')) {
+                    self.overlay = Overlay::SnoozePrompt {
+                        number,
+                        input: String::new(),
+                        error: None,
+                    };
+                    return Ok(());
+                }
+                let picked = SNOOZE_PRESETS
+                    .iter()
+                    .find(|(k, _, _)| KeyCode::Char(*k) == key.code);
+                if let Some((_, duration, _)) = picked {
+                    self.overlay = Overlay::None;
+                    self.apply_snooze(number, duration)?;
+                }
+                // Anything else is ignored rather than dismissing: a mistyped key
+                // shouldn't silently abandon what you were doing.
+                Ok(())
+            }
+            Overlay::JumpPrompt { mut input, error } => {
+                match key.code {
+                    KeyCode::Esc => self.overlay = Overlay::None,
+                    KeyCode::Enter => match self.jump_to(&input) {
+                        // `jump_to` may have put up its own overlay — the offer to
+                        // fetch an unknown PR — so only close the prompt if it
+                        // left the field.
+                        Ok(()) => {
+                            if matches!(self.overlay, Overlay::JumpPrompt { .. }) {
+                                self.overlay = Overlay::None;
+                            }
+                        }
+                        // Back to the field with the reason, keeping what was
+                        // typed: the number may be right and just not here.
+                        Err(err) => {
+                            self.overlay = Overlay::JumpPrompt {
+                                input,
+                                error: Some(format!("{err:#}")),
+                            };
+                        }
+                    },
+                    KeyCode::Backspace => {
+                        input.pop();
+                        self.overlay = Overlay::JumpPrompt { input, error };
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        self.overlay = Overlay::JumpPrompt { input, error: None };
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            Overlay::SnoozePrompt {
+                number,
+                mut input,
+                error,
+            } => {
+                match key.code {
+                    KeyCode::Esc => self.overlay = Overlay::None,
+                    KeyCode::Enter => {
+                        self.overlay = Overlay::None;
+                        if let Err(err) = self.apply_snooze(number, &input) {
+                            // Back to the prompt with the reason, rather than
+                            // losing what was typed.
+                            self.overlay = Overlay::SnoozePrompt {
+                                number,
+                                input,
+                                error: Some(format!("{err:#}")),
+                            };
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        self.overlay = Overlay::SnoozePrompt {
+                            number,
+                            input,
+                            error,
+                        };
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        self.overlay = Overlay::SnoozePrompt {
+                            number,
+                            input,
+                            error: None,
+                        };
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Record the PR done, then let the forge know in the background.
+    fn mark_done(&mut self, number: u64, hooks: &Hooks) -> Result<()> {
+        let Some(repo_id) = self.selected_repo_id()? else {
+            return Ok(());
+        };
+        let head = match &self.detail {
+            Some(show) => show.pr.head_sha.clone(),
+            None => return Ok(()),
+        };
+        reviewq_app::actions::done(&self.ledger, repo_id, number, &head)?;
+        // After the local record, never in front of it: the PR is done whether or
+        // not the forge can be reached.
+        (hooks.mark_read)(number);
+        self.status = Some(format!("#{number} done at {}", short(&head)));
+        self.reload()
+    }
+
+    /// Select the PR `text` names, if it's on the queue.
+    ///
+    /// The distinction between "not on the queue" and "never heard of it" is
+    /// worth drawing: the first means the PR is tracked and simply wants nothing
+    /// — muted, snoozed, or waiting on someone else — and `list --all` will show
+    /// it. A flat "not found" would send you looking for the wrong problem.
+    fn jump_to(&mut self, text: &str) -> Result<()> {
+        let number = self
+            .pr_number_in(text)
+            .with_context(|| format!("{text:?} is not a PR number"))?;
+
+        if let Some(index) = self
+            .queue
+            .iter()
+            .position(|item| item.item.pr.number == number)
+        {
+            self.status = None;
+            return self.move_to(index);
+        }
+
+        if self.is_stored(number)? {
+            bail!("#{number} is tracked but not on the queue — try `list --all`");
+        }
+        // Not a refusal: offer to go and get it.
+        self.overlay = Overlay::OfferFetch { number };
+        Ok(())
+    }
+
+    /// The PR number `text` names — a bare number, `#number`, or a pasted URL.
+    ///
+    /// A URL is handed to the forge, which knows its own layout; only the plain
+    /// forms are read here. Config has to be loaded to know which provider a
+    /// host is, and a failure there just means the URL can't be resolved — not
+    /// that the interface should stop.
+    fn pr_number_in(&self, text: &str) -> Option<u64> {
+        if let Some(number) = bare_pr_number(text) {
+            return Some(number);
+        }
+        let loaded = reviewq_app::config::load(None).ok()?;
+        reviewq_forge::parse_pull_request_url(&loaded.config.forges, text)
+            .ok()?
+            .map(|pr| pr.number)
+    }
+
+    /// Whether any repo the ledger knows has this PR stored at all.
+    fn is_stored(&self, number: u64) -> Result<bool> {
+        for (repo_id, _) in self.ledger.repos()? {
+            if self.ledger.show(repo_id, number)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Snooze the PR for a duration in the CLI's syntax.
+    fn apply_snooze(&mut self, number: u64, duration: &str) -> Result<()> {
+        let until = reviewq_app::actions::snooze_until(Timestamp::now(), duration)?;
+        let Some(repo_id) = self.selected_repo_id()? else {
+            return Ok(());
+        };
+        let until = reviewq_app::actions::snooze(&self.ledger, repo_id, number, until)?;
+        self.status = Some(format!("#{number} snoozed until {until}"));
+        self.reload()
+    }
+
+    /// Mute the selected PR, or unmute an already-muted one.
+    fn toggle_mute(&mut self) -> Result<()> {
+        let (Some(number), Some(repo_id)) = (self.selected_number(), self.selected_repo_id()?)
+        else {
+            return Ok(());
+        };
+        let muted = self.detail.as_ref().is_some_and(|show| show.my_state.muted);
+        reviewq_app::actions::set_muted(&self.ledger, repo_id, number, !muted)?;
+        self.status = Some(if muted {
+            format!("#{number} unmuted — its reasons return on the next sync")
+        } else {
+            format!("#{number} muted")
+        });
+        self.reload()
+    }
+
+    /// Sink the selected PR to the bottom of the queue, or restore it.
+    fn toggle_defer(&mut self) -> Result<()> {
+        let (Some(number), Some(repo_id)) = (self.selected_number(), self.selected_repo_id()?)
+        else {
+            return Ok(());
+        };
+        let deferred = self
+            .detail
+            .as_ref()
+            .is_some_and(|show| show.my_state.deferred_at.is_some());
+        reviewq_app::actions::set_deferred(&self.ledger, repo_id, number, !deferred)?;
+        self.status = Some(if deferred {
+            format!("#{number} undeferred")
+        } else {
+            format!("#{number} deferred to the bottom")
+        });
+        self.reload()
     }
 
     /// Apply a state change. No I/O beyond the ledger reads a moved selection
     /// needs, so a test can call it with any action and inspect the result.
     pub(crate) fn update(&mut self, action: Option<Action>) -> Result<()> {
-        // While the key reference is up it owns the keyboard: any key closes it,
-        // so it can be dismissed without first remembering how.
-        if self.help {
-            self.help = false;
-            return Ok(());
-        }
         let page = self.page() as isize;
         match action {
             None => Ok(()),
@@ -363,7 +1138,14 @@ impl App {
                 Ok(())
             }
             Some(Action::Help) => {
-                self.help = true;
+                self.overlay = Overlay::Help { scroll: 0 };
+                Ok(())
+            }
+            Some(Action::Jump) => {
+                self.overlay = Overlay::JumpPrompt {
+                    input: String::new(),
+                    error: None,
+                };
                 Ok(())
             }
             Some(Action::SwitchPane) => {
@@ -376,8 +1158,69 @@ impl App {
             Some(Action::PageUp) => self.scroll(-page),
             Some(Action::First) => self.scroll_to_start(),
             Some(Action::Last) => self.scroll_to_end(),
-            // Handled by `dispatch`, which owns the hook it needs.
-            Some(Action::RefreshSelected) => Ok(()),
+            // Handled by `dispatch`, which has the hooks and the ledger.
+            Some(Action::RefreshSelected)
+            | Some(Action::Review)
+            | Some(Action::Done)
+            | Some(Action::Snooze)
+            | Some(Action::OpenInBrowser)
+            | Some(Action::CopyUrl)
+            | Some(Action::ToggleMute)
+            | Some(Action::ToggleDefer) => Ok(()),
+        }
+    }
+
+    /// Fetch a PR the ledger has never seen, then select it if it landed on the
+    /// queue.
+    fn fetch_unknown(&mut self, number: u64, hooks: &Hooks) {
+        let outcome = (hooks.fetch)(number);
+        self.overlay = Overlay::None;
+        match outcome {
+            Ok(()) => {
+                if let Err(err) = self.reload() {
+                    self.status = Some(format!("reload failed: {err:#}"));
+                    return;
+                }
+                // Land on it if it reached the queue; say so if it didn't, since
+                // a PR nothing wants from you is a real outcome rather than a
+                // failure.
+                match self
+                    .queue
+                    .iter()
+                    .position(|item| item.item.pr.number == number)
+                {
+                    Some(index) => {
+                        self.status = Some(format!("#{number} tracked"));
+                        if let Err(err) = self.move_to(index) {
+                            self.status = Some(format!("#{number} tracked, but: {err:#}"));
+                        }
+                    }
+                    None => {
+                        self.status =
+                            Some(format!("#{number} tracked — it wants nothing right now"));
+                    }
+                }
+            }
+            Err(err) => self.status = Some(format!("#{number} could not be fetched: {err:#}")),
+        }
+    }
+
+    /// Hand `number` to the review command, then take the terminal back.
+    fn hand_off(&mut self, number: u64, channel: &Channel, hooks: &Hooks) {
+        let outcome = (hooks.review)(number);
+        self.overlay = Overlay::None;
+        // Whatever ran had the terminal, so nothing on screen can be trusted.
+        self.repaint = true;
+        match outcome {
+            Ok(()) => {
+                self.status = Some(format!("#{number} handed off"));
+                // A review is the likeliest thing to have changed the PR, so
+                // fetch it rather than making you press `r`.
+                if self.refreshing.insert(number) {
+                    (hooks.refresh)(number, channel.tx.clone());
+                }
+            }
+            Err(err) => self.status = Some(format!("#{number} review failed: {err:#}")),
         }
     }
 
@@ -482,6 +1325,7 @@ impl App {
             return Ok(());
         }
         self.selected = index.min(self.queue.len() - 1);
+        self.keep_selection_visible();
         // A new PR means a new description: keeping the old offset would open
         // it halfway down.
         self.detail_scroll = 0;
@@ -500,9 +1344,95 @@ pub(super) mod tests {
         s.parse().expect("timestamp")
     }
 
+    /// A PR snapshot with `number`, for a test building its own queue.
+    pub(super) fn pr_snapshot(number: u64) -> PrSnapshot {
+        PrSnapshot {
+            number,
+            title: format!("PR {number}"),
+            author: "potiuk".into(),
+            author_association: "MEMBER".into(),
+            head_sha: "abc1234".into(),
+            base_ref: "main".into(),
+            is_draft: false,
+            state: PrState::Open,
+            updated_at: ts("2026-08-11T09:00:00Z"),
+            labels: vec![],
+            milestone: None,
+            files: None,
+            files_truncated: false,
+        }
+    }
+
+    /// Add a queued PR to an existing ledger, as a fetch-and-track would.
+    pub(super) fn add_queued(ledger: &Ledger, repo_id: i64, number: u64) {
+        let now = ts("2026-08-11T12:00:00Z");
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr_snapshot(number),
+                Some(TrackedReason::Involved("manual".into())),
+                now,
+            )
+            .expect("upsert");
+        ledger
+            .commit_detail(
+                repo_id,
+                number,
+                &MyState::default(),
+                &[],
+                &[],
+                &[Attention {
+                    reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
+                    since: ts("2026-08-11T08:00:00Z"),
+                }],
+                None,
+                now,
+            )
+            .expect("detail");
+    }
+
+    /// Two queued PRs, so a test can move between them.
+    pub(super) fn two_queued() -> Ledger {
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let now = ts("2026-08-11T12:00:00Z");
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr_snapshot(70201),
+                Some(TrackedReason::Interest("label x".into())),
+                now,
+            )
+            .expect("upsert");
+        ledger
+            .commit_detail(
+                repo_id,
+                70201,
+                &MyState::default(),
+                &[],
+                &[],
+                &[Attention {
+                    reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
+                    since: ts("2026-08-11T08:00:00Z"),
+                }],
+                None,
+                now,
+            )
+            .expect("detail");
+        ledger
+    }
+
     /// One queued PR, enough to have something selected.
     pub(super) fn fixture() -> Ledger {
         let ledger = Ledger::open_in_memory().expect("ledger");
+        seed(&ledger);
+        ledger
+    }
+
+    /// Put the fixture's contents into an already-open ledger, returning the
+    /// repo's id. Separate from [`fixture`] so a test that needs a second
+    /// connection can seed a file-backed one.
+    pub(super) fn seed(ledger: &Ledger) -> i64 {
         let repo = reviewq_ledger::RepoKey {
             host: "github.com".into(),
             owner: "apache".into(),
@@ -548,7 +1478,7 @@ pub(super) mod tests {
                 now,
             )
             .expect("detail");
-        ledger
+        repo_id
     }
 
     pub(super) fn app() -> App {
@@ -651,43 +1581,295 @@ pub(super) mod tests {
 /// a fake refresh hook. No terminal, no forge, no sleeps — the same shape wiff
 /// uses, which is what having the channel and the hooks handed in buys.
 #[cfg(test)]
+mod scroll_tests {
+    use super::tests::pr_snapshot;
+    use super::*;
+    use reviewq_core::model::{Attention, AttentionReason, MyState};
+    use reviewq_ledger::{RepoKey, TrackedReason};
+
+    /// A queue of `count` PRs, numbered from 1.
+    fn queue_of(count: u64) -> App {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger
+            .ensure_repo(&RepoKey {
+                host: "github.com".into(),
+                owner: "apache".into(),
+                name: "airflow".into(),
+            })
+            .expect("repo");
+        let now: Timestamp = "2026-08-11T12:00:00Z".parse().unwrap();
+        for number in 1..=count {
+            ledger
+                .upsert_pr(
+                    repo_id,
+                    &pr_snapshot(number),
+                    Some(TrackedReason::Interest("label x".into())),
+                    now,
+                )
+                .expect("upsert");
+            ledger
+                .commit_detail(
+                    repo_id,
+                    number,
+                    &MyState::default(),
+                    &[],
+                    &[],
+                    &[Attention {
+                        reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
+                        // Older sorts first, so the numbering and the order agree.
+                        since: Timestamp::from_second(number as i64).expect("since"),
+                    }],
+                    None,
+                    now,
+                )
+                .expect("detail");
+        }
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        // A ten-row window, as a render would report.
+        app.set_page(10);
+        app
+    }
+
+    fn go_to(app: &mut App, index: usize) {
+        while app.selected < index {
+            app.update(Some(Action::Down)).expect("down");
+        }
+    }
+
+    #[test]
+    fn the_window_holds_still_while_the_selection_moves_inside_it() {
+        let mut app = queue_of(30);
+        // Down to row 6, which is still SCROLLOFF away from the bottom of a
+        // ten-row window, so nothing should have scrolled.
+        go_to(&mut app, 6);
+        assert_eq!(app.queue_scroll, 0, "the window should not have moved yet");
+        assert_eq!(app.selected, 6);
+    }
+
+    #[test]
+    fn it_starts_scrolling_three_rows_before_the_bottom() {
+        let mut app = queue_of(30);
+        go_to(&mut app, 7);
+        assert_eq!(
+            app.queue_scroll, 1,
+            "row 7 in a ten-row window is within 3 of the bottom, so it scrolls one"
+        );
+        go_to(&mut app, 8);
+        assert_eq!(app.queue_scroll, 2);
+    }
+
+    #[test]
+    fn moving_up_off_the_last_row_does_not_drag_the_window() {
+        // The reported bug: from the very last row, `up` moved the selection and
+        // scrolled at the same time, so two things happened for one keypress.
+        let mut app = queue_of(30);
+        go_to(&mut app, 29);
+        let bottom = app.queue_scroll;
+        assert_eq!(bottom, 20, "the last row sits at the window's bottom");
+
+        app.update(Some(Action::Up)).expect("up");
+        assert_eq!(app.selected, 28);
+        assert_eq!(
+            app.queue_scroll, bottom,
+            "the selection moved within the window, so the window stayed put"
+        );
+
+        // It keeps still until the selection reaches the margin, which with the
+        // window at rows 20..=29 is row 23.
+        for _ in 0..5 {
+            app.update(Some(Action::Up)).expect("up");
+        }
+        assert_eq!(app.selected, 23);
+        assert_eq!(app.queue_scroll, bottom, "still 3 rows clear of the top");
+
+        app.update(Some(Action::Up)).expect("up");
+        assert_eq!(app.selected, 22);
+        assert_eq!(
+            app.queue_scroll, 19,
+            "inside the margin now, so the window follows a row at a time"
+        );
+    }
+
+    #[test]
+    fn the_ends_of_the_list_win_over_the_margin() {
+        let mut app = queue_of(30);
+        // There is nothing above row zero to keep in view.
+        go_to(&mut app, 2);
+        app.update(Some(Action::First)).expect("first");
+        assert_eq!((app.selected, app.queue_scroll), (0, 0));
+
+        // Nor below the last row: the window stops with it at the bottom rather
+        // than scrolling into empty space.
+        app.update(Some(Action::Last)).expect("last");
+        assert_eq!(app.selected, 29);
+        assert_eq!(app.queue_scroll, 20);
+    }
+
+    #[test]
+    fn a_queue_shorter_than_the_window_never_scrolls() {
+        let mut app = queue_of(4);
+        app.update(Some(Action::Last)).expect("last");
+        assert_eq!(app.selected, 3);
+        assert_eq!(
+            app.queue_scroll, 0,
+            "it all fits, so there is nothing to scroll"
+        );
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_margin_still_moves() {
+        let mut app = queue_of(30);
+        app.set_page(3);
+        go_to(&mut app, 10);
+        assert_eq!(app.selected, 10);
+        assert!(
+            app.queue_scroll >= 8,
+            "the selection has to stay visible even with no room for a margin, was {}",
+            app.queue_scroll
+        );
+        assert!(app.queue_scroll <= 10);
+    }
+}
+
+/// The PR number `text` names: a bare number, or one with a `#` in front.
+///
+/// A URL is *not* handled here — which repo layout a URL uses is the forge's
+/// knowledge, not the interface's, so [`App::pr_number_in`] asks the forge.
+fn bare_pr_number(text: &str) -> Option<u64> {
+    let text = text.trim();
+    text.strip_prefix('#').unwrap_or(text).parse().ok()
+}
+
+/// A head SHA at GitHub's own abbreviation length, so it can be pasted into
+/// `git show`.
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+/// The loop and the actions, driven through the real `run` with a scripted input
+/// source and fake side effects. No terminal, no forge, no sleeps.
+#[cfg(test)]
 mod loop_tests {
-    use super::tests::{app, fixture};
+    use super::tests::{add_queued, app, fixture, seed, two_queued};
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    fn press(code: char) -> Message {
-        Message::Input(Event::Key(KeyEvent::new(
-            KeyCode::Char(code),
-            KeyModifiers::NONE,
-        )))
+    /// PRs a hook was asked about, shared with the test that reads them.
+    type Seen = Arc<Mutex<Vec<u64>>>;
+
+    fn press(code: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE))
     }
 
-    /// Hooks whose refresh records what it was asked for and answers at once,
-    /// so the loop sees a result without anything async happening.
+    fn special(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// An input source that plays `script`, then fails.
     ///
-    /// `then_quit` makes it queue a `q` behind the answer. Needed because the
-    /// loop stops the moment it reads a quit: a `q` scripted ahead of a refresh
-    /// result means the loop exits before taking that result in — correct, since
-    /// it is leaving anyway, but not what a test of the result wants.
-    fn answering_hooks(answer: Refreshed, then_quit: bool) -> (Hooks, Arc<Mutex<Vec<u64>>>) {
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&asked);
+    /// Failing rather than reporting nothing is what keeps a script that forgot
+    /// to quit from hanging the test: the loop's body is synchronous between
+    /// events, so an input source that always says "nothing yet" spins forever
+    /// and never yields to the timeout in [`drive`].
+    fn scripted(script: Vec<Event>) -> Box<dyn Fn() -> Result<Option<Event>> + Send + Sync> {
+        let queue = Arc::new(Mutex::new(VecDeque::from(script)));
+        Box::new(move || match queue.lock().expect("lock").pop_front() {
+            Some(event) => Ok(Some(event)),
+            None => bail!("the input script ran dry without quitting"),
+        })
+    }
+
+    /// What the hooks were asked to do.
+    struct Recorded {
+        refreshed: Seen,
+        marked: Seen,
+        reviewed: Seen,
+        fetched: Seen,
+        opened: Seen,
+        copied: Seen,
+    }
+
+    /// Hooks over `script`. `answer` is what a refresh reports back, if anything;
+    /// `review_fails` makes the handoff error.
+    fn fake_hooks(
+        script: Vec<Event>,
+        answer: Option<Refreshed>,
+        review_fails: bool,
+    ) -> (Hooks, Recorded) {
+        let recorded = Recorded {
+            refreshed: Arc::new(Mutex::new(Vec::new())),
+            marked: Arc::new(Mutex::new(Vec::new())),
+            reviewed: Arc::new(Mutex::new(Vec::new())),
+            fetched: Arc::new(Mutex::new(Vec::new())),
+            opened: Arc::new(Mutex::new(Vec::new())),
+            copied: Arc::new(Mutex::new(Vec::new())),
+        };
+        let refreshed = Arc::clone(&recorded.refreshed);
+        let marked = Arc::clone(&recorded.marked);
+        let reviewed = Arc::clone(&recorded.reviewed);
+        let fetched = Arc::clone(&recorded.fetched);
+        let opened = Arc::clone(&recorded.opened);
+        let copied = Arc::clone(&recorded.copied);
         let hooks = Hooks {
+            fetch: Box::new(move |number| {
+                fetched.lock().expect("lock").push(number);
+                Ok(())
+            }),
+            next_event: scripted(script),
             refresh: Box::new(move |number, tx| {
-                seen.lock().expect("lock").push(number);
-                let _ = tx.send(Message::Refreshed {
-                    number,
-                    outcome: Ok(answer.clone()),
-                });
-                if then_quit {
-                    let _ = tx.send(press('q'));
+                refreshed.lock().expect("lock").push(number);
+                if let Some(answer) = answer.clone() {
+                    let _ = tx.send(Message::Refreshed {
+                        number,
+                        outcome: Ok(answer),
+                    });
                 }
             }),
+            mark_read: Box::new(move |number| marked.lock().expect("lock").push(number)),
+            review: Box::new(move |number| {
+                reviewed.lock().expect("lock").push(number);
+                if review_fails {
+                    bail!("wiff not found");
+                }
+                Ok(())
+            }),
+            open_url: Box::new(move |_repo, number| {
+                opened.lock().expect("lock").push(number);
+                Ok(())
+            }),
+            copy_url: Box::new(move |_repo, number| {
+                copied.lock().expect("lock").push(number);
+                Ok(())
+            }),
         };
-        (hooks, asked)
+        (hooks, recorded)
+    }
+
+    /// Run the loop to completion, or fail if it doesn't finish.
+    async fn drive(app: &mut App, hooks: &Hooks) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        let mut channel = Channel::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.run(&mut terminal, &mut channel, hooks),
+        )
+        .await
+        .expect("the loop should have quit")
+        .expect("loop");
+    }
+
+    /// Hand keys straight to the dispatcher, for a sequence meant to finish with
+    /// an overlay still up and inspectable — in a prompt, `q` types a letter
+    /// rather than quitting, so such a script would never end the loop.
+    fn feed(app: &mut App, hooks: &Hooks, codes: &[KeyCode]) {
+        let channel = Channel::new();
+        for code in codes {
+            app.dispatch(KeyEvent::new(*code, KeyModifiers::NONE), &channel, hooks)
+                .expect("dispatch");
+        }
     }
 
     fn screen(terminal: &Terminal<TestBackend>) -> String {
@@ -707,11 +1889,10 @@ mod loop_tests {
 
     #[tokio::test]
     async fn a_quit_key_ends_the_loop_after_one_frame() {
-        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
         let mut app = app();
-        let mut channel = Channel::silent();
-        channel.tx.send(press('q')).expect("send");
-        let (hooks, _) = answering_hooks(Refreshed::Gone, false);
+        let (hooks, _) = fake_hooks(vec![press('q')], None, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+        let mut channel = Channel::new();
 
         app.run(&mut terminal, &mut channel, &hooks)
             .await
@@ -723,83 +1904,751 @@ mod loop_tests {
     }
 
     #[tokio::test]
-    async fn the_loop_ends_when_nothing_can_arrive_any_more() {
-        // No input reader and no task holds a sender, so the channel closes as
-        // soon as the loop's own clone is the last one. Waiting again would hang.
-        let mut terminal = Terminal::new(TestBackend::new(60, 8)).expect("terminal");
+    async fn a_refresh_result_reaches_the_state_through_the_loop() {
         let mut app = app();
-        let (hooks, _) = answering_hooks(Refreshed::Gone, false);
-        let mut channel = Channel::silent();
-        drop(std::mem::replace(
-            &mut channel.tx,
-            mpsc::unbounded_channel().0,
-        ));
-
-        app.run(&mut terminal, &mut channel, &hooks)
-            .await
-            .expect("loop");
-        assert!(
-            !app.quit,
-            "it ended because the channel did, not by quitting"
-        );
-    }
-
-    #[tokio::test]
-    async fn r_asks_the_hook_and_the_answer_reaches_the_screen() {
-        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
-        let mut app = app();
-        let mut channel = Channel::silent();
-        let (hooks, asked) = answering_hooks(
-            Refreshed::Updated {
+        let (hooks, recorded) = fake_hooks(
+            // `r` starts it; the answer lands on the channel and is taken in
+            // before the trailing `q` is read.
+            vec![press('r'), press('q')],
+            Some(Refreshed::Updated {
                 repo: "apache/airflow".into(),
                 queued: false,
                 cost: 1,
                 remaining: 4999,
-            },
-            true,
+            }),
+            false,
         );
 
-        // `r` reaches the hook, which answers and then queues the quit behind
-        // its answer, so the loop takes the result in before leaving.
-        channel.tx.send(press('r')).expect("send");
-        app.run(&mut terminal, &mut channel, &hooks)
-            .await
-            .expect("loop");
+        drive(&mut app, &hooks).await;
 
-        assert_eq!(
-            *asked.lock().expect("lock"),
-            vec![70135],
-            "the hook was asked"
-        );
-        assert!(app.refreshing.is_empty(), "and the result cleared the mark");
-        // The result was taken in and drawn, which is the whole path: key →
-        // action → hook → message → state → frame.
+        assert_eq!(*recorded.refreshed.lock().expect("lock"), vec![70135]);
+        assert!(app.refreshing.is_empty(), "the result cleared the mark");
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 refreshed"), "{status}");
-        assert!(
-            screen(&terminal).contains("wants nothing"),
-            "{}",
-            screen(&terminal)
+    }
+
+    #[tokio::test]
+    async fn the_help_overlay_toggles_through_the_loop() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let (hooks, _) = fake_hooks(vec![press('?'), press(' '), press('q')], None, false);
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.overlay, Overlay::None, "opened and closed again");
+        assert!(app.quit);
+    }
+
+    #[tokio::test]
+    async fn d_asks_first_and_a_confirmation_marks_it_done() {
+        // `d` alone only raises the question. Fed directly, because with the
+        // confirmation up a `q` is taken as "cancel" rather than "quit".
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('d')]);
+        assert_eq!(app.overlay, Overlay::ConfirmDone { number: 70135 });
+        assert!(app.status.is_none(), "asking is not doing");
+        assert_eq!(app.queue.len(), 1);
+        assert!(recorded.marked.lock().expect("lock").is_empty());
+
+        // `d` then `y` does it.
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let (hooks, recorded) = fake_hooks(vec![press('d'), press('y'), press('q')], None, false);
+        drive(&mut app, &hooks).await;
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 done"), "{status}");
+        assert!(app.queue.is_empty(), "a mention is cleared by done");
+        // And the forge was told, after the local record rather than before.
+        assert_eq!(*recorded.marked.lock().expect("lock"), vec![70135]);
+    }
+
+    #[tokio::test]
+    async fn declining_the_confirmation_changes_nothing() {
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![press('d'), press('n'), press('q')], None, false);
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.overlay, Overlay::None, "the question is dismissed");
+        assert!(app.status.is_none(), "and nothing happened");
+        assert_eq!(app.queue.len(), 1);
+        assert!(recorded.marked.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn z_then_a_preset_snoozes_it_off_the_queue() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![press('z'), press('3'), press('q')], None, false);
+
+        drive(&mut app, &hooks).await;
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 snoozed until"), "{status}");
+        assert!(app.queue.is_empty(), "snoozing takes it off the queue");
+    }
+
+    #[tokio::test]
+    async fn a_typed_duration_reaches_the_same_place() {
+        let mut app = app();
+        // `o` escapes the presets to the prompt; then type `2d` and confirm.
+        let (hooks, _) = fake_hooks(
+            vec![
+                press('z'),
+                press('o'),
+                press('2'),
+                press('d'),
+                special(KeyCode::Enter),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("snoozed until"), "{status}");
+        assert!(app.queue.is_empty());
+    }
+
+    #[test]
+    fn a_bad_duration_says_why_and_keeps_what_was_typed() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char('z'),
+                KeyCode::Char('o'),
+                KeyCode::Char('s'),
+                KeyCode::Char('o'),
+                KeyCode::Char('o'),
+                KeyCode::Char('n'),
+                KeyCode::Enter,
+            ],
+        );
+
+        match &app.overlay {
+            Overlay::SnoozePrompt { input, error, .. } => {
+                assert_eq!(input, "soon", "what was typed survives the rejection");
+                let error = error.clone().expect("a reason");
+                assert!(error.contains("invalid duration"), "{error}");
+            }
+            other => panic!("should still be prompting, was {other:?}"),
+        }
+        assert_eq!(app.queue.len(), 1, "nothing was snoozed");
+    }
+
+    #[test]
+    fn backspace_edits_the_typed_duration() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char('z'),
+                KeyCode::Char('o'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
+                KeyCode::Backspace,
+                KeyCode::Char('d'),
+            ],
+        );
+
+        match &app.overlay {
+            Overlay::SnoozePrompt { input, .. } => assert_eq!(input, "9d"),
+            other => panic!("should still be prompting, was {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn m_mutes_and_takes_it_off_the_queue() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![press('m'), press('q')], None, false);
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.status.as_deref(), Some("#70135 muted"));
+        assert!(app.queue.is_empty(), "muting clears what it holds");
+        // Which leaves nothing selected to unmute — the honest consequence of
+        // acting from a queue view, and why `list --all` exists.
+        assert!(app.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn f_defers_without_hiding_it_and_again_restores_it() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![press('f'), press('q')], None, false);
+        drive(&mut app, &hooks).await;
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("deferred to the bottom"), "{status}");
+        assert_eq!(app.queue.len(), 1, "deferred is sunk, not hidden");
+        assert!(app.queue[0].item.deferred);
+
+        let mut again = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let (hooks, _) = fake_hooks(vec![press('f'), press('f'), press('q')], None, false);
+        drive(&mut again, &hooks).await;
+        let status = again.status.clone().expect("a status");
+        assert!(status.contains("undeferred"), "{status}");
+        assert!(!again.queue[0].item.deferred);
+    }
+
+    #[tokio::test]
+    async fn an_action_on_an_empty_queue_does_nothing() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let (hooks, recorded) = fake_hooks(
+            vec![
+                special(KeyCode::Enter),
+                press('d'),
+                press('z'),
+                press('m'),
+                press('f'),
+                press('r'),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.overlay, Overlay::None, "nothing to ask about");
+        assert!(app.status.is_none());
+        assert!(recorded.marked.lock().expect("lock").is_empty());
+        assert!(recorded.reviewed.lock().expect("lock").is_empty());
+        assert!(recorded.refreshed.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn a_bare_pr_reference_is_read_from_a_number_or_a_hash() {
+        // A URL is the forge's to parse — see `GithubForge::parse_web_path` —
+        // because its shape belongs to the provider, not to this interface.
+        assert_eq!(bare_pr_number("70135"), Some(70135));
+        assert_eq!(bare_pr_number("#70135"), Some(70135));
+        assert_eq!(bare_pr_number("  70135 "), Some(70135));
+        assert_eq!(bare_pr_number(""), None);
+        assert_eq!(bare_pr_number("soon"), None);
+        assert_eq!(bare_pr_number("#nope"), None);
+        assert_eq!(
+            bare_pr_number("https://github.com/apache/airflow/pull/70135"),
+            None,
+            "not this function's job"
         );
     }
 
     #[tokio::test]
-    async fn keys_move_the_selection_through_the_real_loop() {
-        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
-        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
-        let mut channel = Channel::silent();
-        let (hooks, _) = answering_hooks(Refreshed::Gone, false);
+    async fn colon_then_a_number_selects_that_pr() {
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        assert_eq!(app.selected, 0);
+        let (hooks, _) = fake_hooks(
+            vec![
+                press(':'),
+                press('7'),
+                press('0'),
+                press('2'),
+                press('0'),
+                press('1'),
+                special(KeyCode::Enter),
+                press('q'),
+            ],
+            None,
+            false,
+        );
 
-        for key in ['?', ' ', 'q'] {
-            channel.tx.send(press(key)).expect("send");
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.overlay, Overlay::None, "the prompt closed");
+        assert_eq!(
+            app.current().map(|item| item.item.pr.number),
+            Some(70201),
+            "the selection moved to the PR named"
+        );
+    }
+
+    #[test]
+    fn going_to_a_pr_that_is_tracked_but_not_queued_says_which() {
+        // Worth distinguishing: the number is right, the PR is simply quiet, and
+        // `list --all` will show it. "Not found" would send you looking for the
+        // wrong problem.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('7'),
+                KeyCode::Char('0'),
+                KeyCode::Char('2'),
+                KeyCode::Char('0'),
+                KeyCode::Char('1'),
+                KeyCode::Enter,
+            ],
+        );
+
+        match &app.overlay {
+            Overlay::JumpPrompt { input, error } => {
+                assert_eq!(input, "70201", "what was typed survives");
+                let error = error.clone().expect("a reason");
+                assert!(error.contains("not on the queue"), "{error}");
+                assert!(error.contains("list --all"), "{error}");
+            }
+            other => panic!("should still be prompting, was {other:?}"),
         }
-        app.run(&mut terminal, &mut channel, &hooks)
-            .await
-            .expect("loop");
+    }
 
-        // `?` opened the reference and the space closed it again, so what is left
-        // on screen is the panes — proving both halves of the toggle ran.
-        assert!(!app.help);
-        assert!(app.quit);
+    #[test]
+    fn going_to_a_pr_the_ledger_never_saw_offers_to_fetch_it() {
+        // Not a refusal: a number you typed is a number you meant, and it being
+        // absent is more often "the sweep hasn't reached it" than a mistake.
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[KeyCode::Char(':'), KeyCode::Char('9'), KeyCode::Enter],
+        );
+
+        assert_eq!(app.overlay, Overlay::OfferFetch { number: 9 });
+        assert!(
+            recorded.fetched.lock().expect("lock").is_empty(),
+            "asking is not fetching"
+        );
+    }
+
+    #[test]
+    fn declining_the_fetch_offer_leaves_everything_alone() {
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('9'),
+                KeyCode::Enter,
+                KeyCode::Char('n'),
+            ],
+        );
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(recorded.fetched.lock().expect("lock").is_empty());
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn accepting_the_fetch_offer_defers_it_to_the_loop_behind_a_notice() {
+        // The same ordering the handoff needs: the notice has to be drawn before
+        // the network call blocks, so `dispatch` only records the intent.
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('9'),
+                KeyCode::Enter,
+                KeyCode::Char('y'),
+            ],
+        );
+
+        assert_eq!(app.overlay, Overlay::Fetching { number: 9 });
+        assert_eq!(app.pending_fetch, Some(9));
+        assert!(
+            recorded.fetched.lock().expect("lock").is_empty(),
+            "the loop performs it, after drawing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fetch_that_lands_on_the_queue_selects_it() {
+        // The PR has to be unknown to the ledger when the jump asks for it, and
+        // there by the time the fetch returns — so the ledger is a file, and the
+        // fake fetch writes over its own connection, which is what the real
+        // `track_one` does.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+
+        let added = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&added);
+        let write_path = path.clone();
+        let hooks = Hooks {
+            next_event: scripted(vec![
+                press(':'),
+                press('7'),
+                press('0'),
+                press('2'),
+                press('0'),
+                press('1'),
+                special(KeyCode::Enter),
+                press('y'),
+                press('q'),
+            ]),
+            fetch: Box::new(move |number| {
+                seen.lock().expect("lock").push(number);
+                let other = Ledger::open(&write_path).expect("second connection");
+                add_queued(&other, repo_id, number);
+                Ok(())
+            }),
+            refresh: Box::new(|_, _| {}),
+            mark_read: Box::new(|_| {}),
+            review: Box::new(|_| Ok(())),
+            open_url: Box::new(|_, _| Ok(())),
+            copy_url: Box::new(|_, _| Ok(())),
+        };
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(*added.lock().expect("lock"), vec![70201]);
+        assert_eq!(
+            app.current().map(|item| item.item.pr.number),
+            Some(70201),
+            "it landed on the queue, so the selection went to it"
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70201 tracked"), "{status}");
+    }
+
+    #[test]
+    fn a_non_number_in_the_go_to_field_is_refused_without_losing_it() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('a'),
+                KeyCode::Char('b'),
+                KeyCode::Enter,
+            ],
+        );
+
+        match &app.overlay {
+            Overlay::JumpPrompt { input, error } => {
+                assert_eq!(input, "ab");
+                assert!(
+                    error
+                        .as_deref()
+                        .expect("a reason")
+                        .contains("not a PR number")
+                );
+            }
+            other => panic!("should still be prompting, was {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_shows_the_notice_before_handing_over_and_refreshes_after() {
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(
+            vec![special(KeyCode::Enter), press('q')],
+            Some(Refreshed::Updated {
+                repo: "apache/airflow".into(),
+                queued: false,
+                cost: 1,
+                remaining: 4999,
+            }),
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(*recorded.reviewed.lock().expect("lock"), vec![70135]);
+        assert_eq!(
+            *recorded.refreshed.lock().expect("lock"),
+            vec![70135],
+            "a review is the likeliest thing to have changed it, so it's fetched"
+        );
+        assert_eq!(app.overlay, Overlay::None, "the notice is taken down again");
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 refreshed"), "{status}");
+    }
+
+    #[test]
+    fn the_notice_is_up_before_the_handoff_runs() {
+        // The order that matters: the review command may sit on a credential
+        // prompt, so the notice has to be on screen before it is invoked. The
+        // loop draws between the keypress and the handoff, which is why
+        // `dispatch` only records the intent.
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Enter]);
+
+        assert_eq!(app.overlay, Overlay::Launching { number: 70135 });
+        assert_eq!(app.pending_review, Some(70135));
+        assert!(
+            recorded.reviewed.lock().expect("lock").is_empty(),
+            "nothing has been handed off yet — the loop does that after drawing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_command_that_fails_says_so_and_keeps_the_queue() {
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![special(KeyCode::Enter), press('q')], None, true);
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(*recorded.reviewed.lock().expect("lock"), vec![70135]);
+        assert!(
+            recorded.refreshed.lock().expect("lock").is_empty(),
+            "a failed handoff has nothing to refresh"
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("review failed"), "{status}");
+        assert!(status.contains("wiff not found"), "{status}");
+        assert_eq!(app.queue.len(), 1, "the queue survives a failed handoff");
+        assert!(app.repaint || app.quit, "a handoff forces a full repaint");
+    }
+
+    #[tokio::test]
+    async fn o_opens_the_selected_pr() {
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![press('o'), press('q')], None, false);
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(*recorded.opened.lock().expect("lock"), vec![70135]);
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 opened"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn c_and_y_are_the_same_copy() {
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![press('c'), press('y'), press('q')], None, false);
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(
+            *recorded.copied.lock().expect("lock"),
+            vec![70135, 70135],
+            "`y` reaches the same action as `c`, not a different one"
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("URL copied"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn a_url_that_cannot_be_resolved_says_so_and_keeps_the_queue() {
+        // What fails in practice is the config the hook needs to know the host's
+        // layout. It must land in the header, not take the interface down.
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![press('o'), press('q')], None, false);
+        let hooks = Hooks {
+            open_url: Box::new(|_, _| bail!("no config")),
+            ..hooks
+        };
+
+        drive(&mut app, &hooks).await;
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("could not be opened"), "{status}");
+        assert!(status.contains("no config"), "{status}");
+        assert!(!app.queue.is_empty(), "the queue survives");
+    }
+
+    #[test]
+    fn open_and_copy_do_nothing_on_an_empty_queue() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let mut app = App::with_ledger(Theme::default(), ledger).expect("app");
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        app.open_selected(&hooks).expect("open");
+        app.copy_selected_url(&hooks).expect("copy");
+
+        assert!(recorded.opened.lock().expect("lock").is_empty());
+        assert!(recorded.copied.lock().expect("lock").is_empty());
+        assert_eq!(app.status, None, "nothing was selected, so nothing to say");
+    }
+
+    /// The two panes' contents, as the 100x20 terminal [`drive`] uses lays them
+    /// out: header, then the panes between the borders, then the footer. Named
+    /// rather than written into each test, because a column of `47` explains
+    /// nothing about which pane it is in.
+    const QUEUE_COLUMN: u16 = 4;
+    const DETAIL_COLUMN: u16 = 60;
+    const FIRST_ROW: u16 = 2;
+
+    fn click(column: u16, row: u16) -> Event {
+        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_click_selects_the_queue_row_under_the_pointer() {
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        assert_eq!(app.selected, 0);
+        let (hooks, _) = fake_hooks(
+            vec![click(QUEUE_COLUMN, FIRST_ROW + 1), press('q')],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.selected, 1, "the second row was clicked");
+        assert_eq!(
+            app.detail.as_ref().map(|show| show.pr.number),
+            app.current().map(|item| item.item.pr.number),
+            "the detail follows a click as it does a key"
+        );
+        assert_eq!(app.focus, Focus::Queue);
+    }
+
+    #[tokio::test]
+    async fn a_click_past_the_last_row_leaves_the_selection_alone() {
+        // Empty space below a two-item queue: a click there means nothing, and
+        // must not be read as "the last row".
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![click(QUEUE_COLUMN, FIRST_ROW + 9), press('q')],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn a_click_in_the_detail_pane_focuses_it_without_moving_the_selection() {
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![click(DETAIL_COLUMN, FIRST_ROW + 1), press('q')],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.focus, Focus::Detail);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn the_wheel_moves_the_queue_a_row_at_a_time() {
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![
+                mouse(MouseEventKind::ScrollDown, QUEUE_COLUMN, FIRST_ROW),
+                mouse(MouseEventKind::ScrollDown, QUEUE_COLUMN, FIRST_ROW),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(
+            app.selected, 1,
+            "one notch moved one row; the second clamped at the last of two"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_wheel_goes_back_up_the_queue_too() {
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![
+                mouse(MouseEventKind::ScrollDown, QUEUE_COLUMN, FIRST_ROW),
+                mouse(MouseEventKind::ScrollUp, QUEUE_COLUMN, FIRST_ROW),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.selected, 0, "down then up is back where it started");
+    }
+
+    #[tokio::test]
+    async fn the_wheel_over_the_detail_takes_focus_from_the_queue() {
+        // Whichever pane is under the pointer is the one that scrolls, however the
+        // keyboard's focus happens to be set.
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        assert_eq!(app.focus, Focus::Queue);
+        let (hooks, _) = fake_hooks(
+            vec![
+                mouse(MouseEventKind::ScrollDown, DETAIL_COLUMN, FIRST_ROW),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.focus, Focus::Detail);
+        assert_eq!(app.selected, 0, "the queue did not move");
+    }
+
+    #[tokio::test]
+    async fn the_mouse_is_ignored_while_an_overlay_is_up() {
+        // The rows are still drawn under a modal, so a click landing on one you
+        // cannot see would act on whatever it happens to cover.
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![
+                press('?'),
+                click(QUEUE_COLUMN, FIRST_ROW + 1),
+                press('q'),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.selected, 0, "the click did not reach the queue");
+    }
+
+    #[tokio::test]
+    async fn a_click_outside_both_panes_does_nothing() {
+        // The header and footer are not clickable, and neither are the borders.
+        let mut app = App::with_ledger(Theme::default(), two_queued()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![click(QUEUE_COLUMN, 0), click(QUEUE_COLUMN, 19), press('q')],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks).await;
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.focus, Focus::Queue);
     }
 }

@@ -10,14 +10,21 @@ login = "ashb"
 
 # A project bundles one or more repos with the interest rules that apply to
 # them. Add more [[project]] blocks for other codebases; each carries its own
-# rules, since conventions differ per project. (Multiple repos are modelled but
-# not wired up yet — configure a single repo for now.)
+# rules, since conventions differ per project. With more than one repo configured,
+# a bare PR number is resolved against the ledger; a full pull-request URL names
+# its repo outright and always works.
 [[project]]
 name  = "airflow"
 repos = [{ owner = "apache", name = "airflow" }]
 # A repo on a self-hosted instance names its host, which selects a [forge] entry
 # below; the default is "github.com":
 #   repos = [{ owner = "acme", name = "widgets", host = "github.acme.example" }]
+# A repo may also name a local checkout. reviewq never reads the working tree —
+# the queue comes from the forge — but `review` runs the handoff command there,
+# which is what lets a review tool publish back to the pull request. Without it,
+# `wiff forge pull {url}` mirrors the PR fine and then refuses to publish:
+# "publishing a forge review pulled outside its repository is not supported".
+#   repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
 # Keep surfacing a PR after it merges, so a post-merge reply or mention can flag
 # something that shipped broken. Off by default — the queue normally ends at
 # merge. Turn it on per project if you review post-merge:

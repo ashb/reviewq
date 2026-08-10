@@ -115,8 +115,10 @@ pub enum Command {
     /// Undo `defer`.
     Undefer(NumberArgs),
 
-    /// Force-track a PR that matched no interest rule.
-    Track(NumberArgs),
+    /// Start tracking a PR: force-track one a rule didn't match, or fetch one
+    /// the ledger has never seen. Accepts a full pull-request URL.
+    #[command(alias = "add")]
+    Track(TrackArgs),
 
     /// Exec `handoff.review_command` with the PR number substituted. Does not
     /// imply `done`.
@@ -127,6 +129,14 @@ pub enum Command {
 
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
+}
+
+#[derive(Debug, Args)]
+pub struct TrackArgs {
+    /// The PR number, or a full pull-request URL. A URL is the way to name a PR
+    /// in a repo other than the single configured one.
+    #[arg(value_parser = pr_number_or_url)]
+    pub target: PrTarget,
 }
 
 #[derive(Debug, Args)]

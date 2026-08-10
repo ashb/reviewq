@@ -17,24 +17,33 @@ pub mod keys;
 pub mod theme;
 
 use anyhow::Result;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
 
 pub use theme::{Mode, Theme};
 
 /// Run the interface until the user quits.
 ///
-/// Takes over the terminal — alternate screen, raw mode — and restores it on
-/// the way out, including when the body returns an error. Async because forge
-/// work runs as tasks while the interface stays responsive.
+/// Takes over the terminal — alternate screen, raw mode, mouse reporting — and
+/// restores it on the way out, including when the body returns an error. Async
+/// because forge work runs as tasks while the interface stays responsive.
 pub async fn run(theme: Theme) -> Result<()> {
     let mut terminal = ratatui::init();
+    // Not part of `ratatui::init`, so it is asked for and given back by hand.
+    // Failing to enable it is not worth refusing to start over: the keyboard can
+    // do everything the mouse can.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let outcome = match app::App::new(theme) {
         Ok(mut app) => {
-            let mut channel = app::Channel::with_input_reader();
+            let mut channel = app::Channel::new();
             app.run(&mut terminal, &mut channel, &app::Hooks::live())
                 .await
         }
         Err(err) => Err(err),
     };
+    // Before `restore`, so the sequence reaches the terminal while reviewq still
+    // owns it — a shell left reporting mouse movement is a mess to get out of.
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     outcome
 }

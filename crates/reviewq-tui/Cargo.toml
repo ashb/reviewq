@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 reviewq-app.workspace = true
 reviewq-core.workspace = true
+reviewq-forge.workspace = true
 reviewq-ledger.workspace = true
 
 anyhow.workspace = true
@@ -15,7 +16,11 @@ crossterm.workspace = true
 jiff.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 tui-markdown.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

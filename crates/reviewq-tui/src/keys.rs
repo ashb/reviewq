@@ -26,8 +26,24 @@ pub enum Action {
     First,
     /// Jump to the last row.
     Last,
+    /// Jump to a PR named by number.
+    Jump,
     /// Fetch the selected PR's detail from the forge.
     RefreshSelected,
+    /// Hand the selected PR to the configured review command.
+    Review,
+    /// Mark the selected PR handled at its current head.
+    Done,
+    /// Suppress the selected PR for a while.
+    Snooze,
+    /// Open the selected PR's page in a browser.
+    OpenInBrowser,
+    /// Put the selected PR's URL on the clipboard.
+    CopyUrl,
+    /// Mute the selected PR, or unmute it.
+    ToggleMute,
+    /// Sink the selected PR to the bottom of the queue, or restore it.
+    ToggleDefer,
     /// Show or hide the key reference.
     Help,
 }
@@ -127,12 +143,82 @@ pub const BINDINGS: &[Binding] = &[
         footer: false,
     },
     Binding {
+        action: Action::Jump,
+        chords: &[key(KeyCode::Char(':'))],
+        keys: ":",
+        // `:` rather than a letter because `:42` is already how vim says "go to
+        // 42", and because a prompt there can grow to understand commands
+        // without the key moving — which is how vim got `:w` alongside `:42`.
+        what: "go to a PR by number",
+        group: "Navigate",
+        footer: false,
+    },
+    Binding {
         action: Action::SwitchPane,
         chords: &[key(KeyCode::Tab)],
         keys: "Tab",
         what: "switch pane",
         group: "View",
+        footer: false,
+    },
+    Binding {
+        action: Action::Review,
+        chords: &[key(KeyCode::Enter)],
+        keys: "⏎",
+        what: "review it — hand off to your review command",
+        group: "Act on the PR",
         footer: true,
+    },
+    Binding {
+        action: Action::Done,
+        chords: &[key(KeyCode::Char('d'))],
+        keys: "d",
+        what: "done — handled at this head",
+        group: "Act on the PR",
+        footer: true,
+    },
+    Binding {
+        action: Action::Snooze,
+        chords: &[key(KeyCode::Char('z'))],
+        keys: "z",
+        what: "snooze for a while",
+        group: "Act on the PR",
+        footer: true,
+    },
+    Binding {
+        action: Action::OpenInBrowser,
+        chords: &[key(KeyCode::Char('o'))],
+        keys: "o",
+        what: "open it in your browser",
+        group: "Act on the PR",
+        footer: false,
+    },
+    Binding {
+        action: Action::CopyUrl,
+        // `y` as well as `c`, because yanking is what this is in vim's terms; `u`
+        // is left alone for the undo that a queue of destructive-ish actions will
+        // eventually want.
+        chords: &[key(KeyCode::Char('c')), key(KeyCode::Char('y'))],
+        keys: "c / y",
+        what: "copy its URL",
+        group: "Act on the PR",
+        footer: false,
+    },
+    Binding {
+        action: Action::ToggleMute,
+        chords: &[key(KeyCode::Char('m'))],
+        keys: "m",
+        what: "mute, or unmute",
+        group: "Act on the PR",
+        footer: false,
+    },
+    Binding {
+        action: Action::ToggleDefer,
+        chords: &[key(KeyCode::Char('f'))],
+        keys: "f",
+        what: "defer to the bottom, or restore",
+        group: "Act on the PR",
+        footer: false,
     },
     Binding {
         action: Action::RefreshSelected,
@@ -140,7 +226,7 @@ pub const BINDINGS: &[Binding] = &[
         keys: "r",
         what: "refresh from the forge",
         group: "Forge",
-        footer: true,
+        footer: false,
     },
     Binding {
         action: Action::Help,
@@ -229,13 +315,13 @@ mod tests {
 
     #[test]
     fn ctrl_is_part_of_the_match() {
-        // `ctrl-d` pages; a bare `d` is unbound and must stay that way, or a
-        // future action on `d` would fire on both.
+        // `ctrl-d` pages while a bare `d` marks done: two unrelated actions on
+        // the same letter, which only holds because Ctrl is part of the match.
         assert_eq!(
             action_for(press_ctrl(KeyCode::Char('d'))),
             Some(Action::PageDown)
         );
-        assert_eq!(action_for(press(KeyCode::Char('d'))), None);
+        assert_eq!(action_for(press(KeyCode::Char('d'))), Some(Action::Done));
         // And `ctrl-q` is not `q`.
         assert_eq!(action_for(press(KeyCode::Char('q'))), Some(Action::Quit));
         assert_eq!(action_for(press_ctrl(KeyCode::Char('q'))), None);
@@ -252,7 +338,7 @@ mod tests {
 
     #[test]
     fn an_unbound_key_asks_for_nothing() {
-        assert_eq!(action_for(press(KeyCode::Char('z'))), None);
+        assert_eq!(action_for(press(KeyCode::Char('x'))), None);
         assert_eq!(action_for(press(KeyCode::F(4))), None);
     }
 
@@ -277,7 +363,8 @@ mod tests {
         let footer: Vec<Action> = described().filter(|b| b.footer).map(|b| b.action).collect();
         assert!(footer.contains(&Action::Help), "{footer:?}");
         assert!(footer.contains(&Action::Quit), "{footer:?}");
-        // And it stays short enough to fit a narrow terminal.
-        assert!(footer.len() <= 5, "footer has grown to {footer:?}");
+        // The real constraint is width, which the renderer's own test measures;
+        // this is a nudge to reconsider rather than a hard limit.
+        assert!(footer.len() <= 6, "footer has grown to {footer:?}");
     }
 }
