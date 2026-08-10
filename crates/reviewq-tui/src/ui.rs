@@ -344,7 +344,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
             tui_markdown::from_str(body)
                 .lines
                 .into_iter()
-                .map(without_background),
+                .map(|line| themed_markdown(line, t)),
         );
     }
 
@@ -357,17 +357,39 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     (total, inner)
 }
 
-/// Drop any background a markdown line or its spans carry.
+/// Restyle a markdown line into the interface's own palette.
 ///
-/// `tui-markdown` paints code on a background of its own — inline code on the
-/// span, and a fenced block on the *line*, which is why clearing only the spans
-/// left ``` blocks black. That was invisible while reviewq left the background to
-/// the terminal; now that it paints one, an unstripped background is a hole in the
-/// middle of a description. The foreground styling still tells code apart.
-fn without_background(mut line: Line<'_>) -> Line<'_> {
-    line.style.bg = None;
+/// `tui-markdown` colours for a dark terminal and expects to own the screen:
+/// prose comes back with *no* foreground at all, which means the terminal's
+/// default — light grey on a dark terminal, and so invisible over reviewq's white
+/// background — while headings arrive cyan and code arrives white on black. None
+/// of those are the theme's, and two of them are illegible in light mode.
+///
+/// So the colours are replaced rather than adapted: every accent in the palette is
+/// already contrast-checked against the background, which is a stronger guarantee
+/// than pushing a foreign colour around until it passes. The *structure* survives —
+/// bold, italic, and which lines are headings or code.
+///
+/// It reads `tui-markdown`'s own scheme to know which is which, so a change there
+/// would need a change here; [`markdown_keeps_its_structure_in_our_colours`] fails
+/// if that scheme moves.
+fn themed_markdown<'a>(mut line: Line<'a>, t: &Theme) -> Line<'a> {
+    let heading = line.style.fg.is_some();
+    let fenced = line.style.bg.is_some();
+    let modifiers = line.style.add_modifier;
+    line.style = Style::default();
     for span in &mut line.spans {
-        span.style.bg = None;
+        let inline_code = span.style.bg.is_some();
+        let role = if heading {
+            t.focus
+        } else if fenced || inline_code {
+            t.key
+        } else {
+            t.text
+        };
+        span.style = Style::default()
+            .fg(color(role))
+            .add_modifier(span.style.add_modifier | modifiers);
     }
     line
 }
@@ -775,6 +797,7 @@ mod tests {
     use super::*;
     use crate::app::test_config;
     use crate::app::{App, Focus, Overlay};
+    use crate::theme::Mode;
     use jiff::Timestamp;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -967,6 +990,75 @@ sensor = S3KeySensor(deferrable=True)
             backgrounds(&mut app, 100, 22),
             ["Rgb(255, 255, 255)".to_string()].into_iter().collect(),
             "and the light one after toggling"
+        );
+    }
+
+    #[test]
+    fn nothing_falls_back_to_the_terminals_own_foreground() {
+        // What made light mode unreadable. `tui-markdown` returns prose with no
+        // foreground at all, which means the terminal's — light grey on a dark
+        // terminal, invisible over reviewq's white background. Every cell reviewq
+        // paints has to name its own colour.
+        for mode in [Mode::Dark, Mode::Light] {
+            let mut app =
+                App::with_ledger(Theme::new(mode), fixture(), test_config()).expect("app");
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+            terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+
+            let unstyled: Vec<String> = (0..30u16)
+                .flat_map(|y| (0..100u16).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let cell = &buffer[(x, y)];
+                    cell.symbol().trim() != "" && cell.fg == ratatui::style::Color::Reset
+                })
+                .map(|(x, y)| format!("({x},{y}) {:?}", buffer[(x, y)].symbol()))
+                .take(5)
+                .collect();
+            assert!(
+                unstyled.is_empty(),
+                "{mode:?}: cells with no colour of their own: {unstyled:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_keeps_its_structure_in_our_colours() {
+        // The mapping reads `tui-markdown`'s own scheme — a heading is a coloured
+        // line, code is a line or span with a background — so this fails if that
+        // scheme moves, rather than the description quietly going one flat colour.
+        let t = Theme::new(Mode::Light);
+        let rendered = tui_markdown::from_str("## Heading\n\nProse `code` here.\n");
+        let themed: Vec<Line<'_>> = rendered
+            .lines
+            .into_iter()
+            .map(|line| themed_markdown(line, &t))
+            .collect();
+
+        let colours: Vec<_> = themed
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| !span.content.trim().is_empty())
+            .map(|span| span.style.fg)
+            .collect();
+        assert!(
+            colours.contains(&Some(color(t.focus))),
+            "a heading should take the focus colour: {colours:?}"
+        );
+        assert!(
+            colours.contains(&Some(color(t.key))),
+            "inline code should take the key colour: {colours:?}"
+        );
+        assert!(
+            colours.contains(&Some(color(t.text))),
+            "prose should take the text colour: {colours:?}"
+        );
+        assert!(
+            themed
+                .iter()
+                .all(|line| line.style.bg.is_none()
+                    && line.spans.iter().all(|s| s.style.bg.is_none())),
+            "nothing keeps a background of its own"
         );
     }
 
