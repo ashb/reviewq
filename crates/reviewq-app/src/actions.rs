@@ -212,7 +212,8 @@ mod tests {
                 None,
                 now,
             )
-            .expect("detail");
+            .expect("detail")
+            .expect_applied();
         (ledger, repo_id, 1)
     }
 

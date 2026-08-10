@@ -6,7 +6,7 @@
 
 mod schema;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use reviewq_core::model::{
     Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
@@ -79,6 +79,37 @@ pub struct Located<T> {
     pub repo_id: i64,
     /// The item itself.
     pub item: T,
+}
+
+/// What [`Ledger::commit_detail`] did with the detail it was offered.
+///
+/// `must_use` because a caller that drops this has silently accepted that its
+/// fetch may have been discarded, which is exactly the case worth reporting.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Committed {
+    /// Stored.
+    Applied,
+    /// Dropped, because the PR already holds a detail fetched later than this
+    /// one. Applying it would have moved the PR backwards.
+    Superseded {
+        /// The watermark already stored, for a caller that wants to say so.
+        stored: String,
+    },
+}
+
+impl Committed {
+    /// Panic unless the detail was stored.
+    ///
+    /// For a caller that has just created the row itself and so cannot be racing
+    /// anybody — a test fixture, in practice. Anything reading from the forge
+    /// should handle [`Superseded`](Self::Superseded) instead, since two fetches
+    /// of one PR really can overlap.
+    pub fn expect_applied(self) {
+        if let Self::Superseded { stored } = self {
+            panic!("expected the detail to be stored, but #? already holds {stored}");
+        }
+    }
 }
 
 /// An open ledger — one handle over the whole database, every repo it knows
@@ -603,6 +634,17 @@ impl Ledger {
     /// user-set fields (`done_sha`, `snoozed_until`, `muted`, `deferred_at`,
     /// `done_at`) are never touched, so a `reviewq done`/`snooze`/`mute`/`defer`
     /// racing this call can never be lost, in either direction.
+    ///
+    /// Refuses to move a PR backwards. Two fetches of the same PR can be in
+    /// flight at once — a `sync` and the interface's refresh key, in separate
+    /// processes — and whichever commits second would otherwise win regardless of
+    /// which *fetched* second, reverting threads, attention and the description to
+    /// an older view of the PR. So the write applies only if the stored watermark
+    /// is not newer than `now`, and says which it did.
+    ///
+    /// Idempotent: committing the same pass twice applies twice and leaves the
+    /// same rows, since every part of it is a wholesale replace and `now` compares
+    /// equal to itself.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_detail(
         &self,
@@ -614,13 +656,16 @@ impl Ledger {
         attention: &[Attention],
         body: Option<&str>,
         now: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<Committed> {
         let tx = self.conn.unchecked_transaction()?;
-        write_forge_state(&tx, repo_id, number, my_state)?;
-        replace_threads(&tx, repo_id, number, threads)?;
-        replace_reviewers(&tx, repo_id, number, reviewers)?;
-        replace_attention(&tx, repo_id, number, attention)?;
-        // Stored at whole-second precision so the lexicographic comparison in
+        // The watermark first, and as one compare-and-set rather than a read
+        // followed by a write: a separate read could be answered from before a
+        // racing commit landed, and then this write would clobber it. As the
+        // opening statement it also takes the write lock up front, so the
+        // comparison and the rest of the transaction cannot be interleaved with
+        // anybody else's.
+        //
+        // Stamped at whole-second precision so the lexicographic comparison in
         // `prs_needing_detail` against GitHub's whole-second `updatedAt` is
         // correct. A sub-second stamp would sort *before* an equal-second
         // `updatedAt` (`.` < `Z`), re-fetching that PR every sync forever.
@@ -629,14 +674,39 @@ impl Ledger {
         // with everything else the detail pass saw. A `None` leaves whatever is
         // stored alone rather than blanking it — a caller with no body to offer
         // isn't asserting the PR has none.
-        tx.execute(
-            "UPDATE prs SET detail_synced_at = ?3, body = COALESCE(?4, body) \
-             WHERE repo_id = ?1 AND number = ?2",
-            params![repo_id, number as i64, whole_second(now).to_string(), body],
-        )
-        .with_context(|| format!("stamping detail_synced_at for #{number}"))?;
+        let stamp = whole_second(now).to_string();
+        let applied = tx
+            .execute(
+                "UPDATE prs SET detail_synced_at = ?3, body = COALESCE(?4, body) \
+                 WHERE repo_id = ?1 AND number = ?2 \
+                   AND (detail_synced_at IS NULL OR detail_synced_at <= ?3)",
+                params![repo_id, number as i64, stamp, body],
+            )
+            .with_context(|| format!("stamping detail_synced_at for #{number}"))?;
+        if applied == 0 {
+            // Either the row is gone — a caller bug — or somebody stored a newer
+            // detail while this one was being fetched.
+            let stored: Option<String> = tx
+                .query_row(
+                    "SELECT detail_synced_at FROM prs WHERE repo_id = ?1 AND number = ?2",
+                    params![repo_id, number as i64],
+                    |row| row.get(0),
+                )
+                .optional()
+                .with_context(|| format!("reading #{number}'s detail watermark"))?
+                .flatten();
+            let Some(stored) = stored else {
+                bail!("#{number} is not stored, so its detail cannot be committed");
+            };
+            return Ok(Committed::Superseded { stored });
+        }
+
+        write_forge_state(&tx, repo_id, number, my_state)?;
+        replace_threads(&tx, repo_id, number, threads)?;
+        replace_reviewers(&tx, repo_id, number, reviewers)?;
+        replace_attention(&tx, repo_id, number, attention)?;
         tx.commit().context("committing PR detail")?;
-        Ok(())
+        Ok(Committed::Applied)
     }
 
     /// Drop attention rows that no longer belong to a queued PR: closed-unmerged
@@ -1584,7 +1654,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         assert_eq!(
             ledger.queue(repo_id).unwrap()[0].pr.base_ref,
             "v3-1-test",
@@ -1815,7 +1886,8 @@ mod tests {
         };
         ledger
             .commit_detail(repo_id, 1, &state, &[], &[], &[], None, now())
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let stored = ledger.my_state(repo_id, 1).unwrap();
         assert_eq!(stored.last_reviewed_sha, state.last_reviewed_sha);
@@ -1826,6 +1898,114 @@ mod tests {
         assert!(!stored.muted);
         assert_eq!(stored.deferred_at, None);
         assert_eq!(stored.done_at, None);
+    }
+
+    #[test]
+    fn a_detail_fetched_earlier_cannot_overwrite_one_fetched_later() {
+        // Two fetches of one PR overlap — a `sync` and the interface's refresh
+        // key, in separate processes. The one that *fetched* later has the truer
+        // view, so commit order must not decide it: the loser is dropped whole,
+        // rather than reverting the threads, attention and description that the
+        // winner stored.
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+
+        let winner = ts("2026-08-05T12:00:05Z");
+        let loser = ts("2026-08-05T12:00:00Z");
+        ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[attn(
+                    AttentionReason::Mention { by: "kaxil".into() },
+                    "2026-08-05T11:00:00Z",
+                )],
+                Some("the newer body"),
+                winner,
+            )
+            .unwrap()
+            .expect_applied();
+
+        let outcome = ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[],
+                Some("the older body"),
+                loser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            Committed::Superseded {
+                stored: "2026-08-05T12:00:05Z".to_string()
+            },
+            "the older fetch must be told it was dropped, not silently ignored"
+        );
+        let shown = ledger.show(repo_id, 1).unwrap().expect("stored");
+        assert_eq!(
+            shown.body.as_deref(),
+            Some("the newer body"),
+            "the description the winner stored survives"
+        );
+        assert_eq!(
+            shown.attention.len(),
+            1,
+            "and so does the attention it computed"
+        );
+    }
+
+    #[test]
+    fn a_detail_committed_twice_leaves_the_same_rows() {
+        // Idempotent: the same pass applied again is the same end state, so a
+        // retried commit needs no thought about what it might duplicate.
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        let at = ts("2026-08-05T12:00:00Z");
+        let commit = || {
+            ledger
+                .commit_detail(
+                    repo_id,
+                    1,
+                    &MyState::default(),
+                    &[ThreadState {
+                        thread_id: "T1".into(),
+                        i_own: true,
+                        is_resolved: false,
+                        resolved_by: None,
+                        last_comment_author: Some("kaxil".into()),
+                        last_comment_at: Some(ts("2026-08-05T11:00:00Z")),
+                        my_last_comment_at: Some(ts("2026-08-05T10:00:00Z")),
+                    }],
+                    &[],
+                    &[attn(
+                        AttentionReason::Mention { by: "kaxil".into() },
+                        "2026-08-05T11:00:00Z",
+                    )],
+                    Some("body"),
+                    at,
+                )
+                .unwrap()
+        };
+
+        assert_eq!(commit(), Committed::Applied);
+        assert_eq!(
+            commit(),
+            Committed::Applied,
+            "the same instant is not newer than itself, so a re-run still applies"
+        );
+
+        let shown = ledger.show(repo_id, 1).unwrap().expect("stored");
+        assert_eq!(shown.threads.len(), 1, "not duplicated");
+        assert_eq!(shown.attention.len(), 1, "nor this");
+        assert_eq!(shown.body.as_deref(), Some("body"));
     }
 
     #[test]
@@ -1854,7 +2034,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let stored = ledger.my_state(repo_id, 1).unwrap();
         assert_eq!(stored.done_sha.as_deref(), Some("head0000"));
@@ -1941,7 +2122,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let show = ledger.show(repo_id, 1).unwrap().unwrap();
         assert_eq!(show.threads.len(), 1);
@@ -1955,7 +2137,8 @@ mod tests {
         // accumulating them.
         ledger
             .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], None, now())
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         let show = ledger.show(repo_id, 1).unwrap().unwrap();
         assert!(show.threads.is_empty());
         assert!(show.attention.is_empty());
@@ -1987,7 +2170,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let show = ledger.show(repo_id, 1).unwrap().unwrap();
         // Most recently submitted first.
@@ -1997,7 +2181,8 @@ mod tests {
         // rather than accumulating alongside it.
         ledger
             .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], None, now())
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         assert!(
             ledger
                 .show(repo_id, 1)
@@ -2037,7 +2222,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         // #2 only needs a first look (priority 6).
         ledger
             .commit_detail(
@@ -2053,7 +2239,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let queue = ledger.queue(repo_id).unwrap();
         assert_eq!(queue.len(), 2);
@@ -2084,7 +2271,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let waiting = ledger.waiting(repo_id).unwrap();
         assert_eq!(waiting.len(), 1);
@@ -2235,7 +2423,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
     }
 
     fn repo_named(owner: &str) -> RepoKey {
@@ -2369,7 +2558,8 @@ mod tests {
                 None,
                 ts("2026-08-06T00:00:00Z"),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let need = ledger.prs_needing_detail(repo_id, false).unwrap();
         assert_eq!(need.len(), 1);
@@ -2419,7 +2609,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         assert!(ledger.queue(repo_id).unwrap().is_empty());
         assert!(ledger.waiting(repo_id).unwrap().is_empty());
     }
@@ -2441,7 +2632,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let queue = ledger.queue(repo_id).unwrap();
         assert_eq!(queue.len(), 1);
@@ -2467,7 +2659,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         // With the opt-in, merged attention is kept.
         ledger.clear_archived_attention(repo_id, true).unwrap();
@@ -2501,7 +2694,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         ledger.set_muted(repo_id, 1, true).unwrap();
         assert!(ledger.my_state(repo_id, 1).unwrap().muted);
@@ -2527,7 +2721,8 @@ mod tests {
                     None,
                     now(),
                 )
-                .unwrap();
+                .unwrap()
+                .expect_applied();
         }
 
         ledger.clear_attention(repo_id, 1).unwrap();
@@ -2557,7 +2752,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         ledger.clear_done_attention(repo_id, 1).unwrap();
         let attention = ledger.show(repo_id, 1).unwrap().unwrap().attention;
@@ -2628,7 +2824,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         // ...but gets deferred after that mention fired.
         ledger
             .set_deferred_at(repo_id, 1, Some(ts("2026-08-05T10:00:00Z")))
@@ -2648,7 +2845,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
 
         let queue = ledger.queue(repo_id).unwrap();
         assert_eq!(queue.len(), 2);
@@ -2673,7 +2871,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         ledger
             .set_deferred_at(repo_id, 1, Some(ts("2026-08-05T10:00:00Z")))
             .unwrap();
@@ -2691,7 +2890,8 @@ mod tests {
                 None,
                 now(),
             )
-            .unwrap();
+            .unwrap()
+            .expect_applied();
         assert!(!ledger.queue(repo_id).unwrap()[0].deferred);
     }
 }

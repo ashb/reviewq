@@ -14,7 +14,7 @@ use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ClassifyCtx, PrSnapshot, classify};
 use reviewq_core::rules::{Evaluation, Interest};
 use reviewq_forge::{Forge, PrDetail};
-use reviewq_ledger::{Ledger, TrackedReason};
+use reviewq_ledger::{Committed, Ledger, TrackedReason};
 
 use crate::config::{Config, Project, RepoRef};
 use crate::{actions, paths};
@@ -590,7 +590,7 @@ pub async fn refresh_one(
     };
     let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
     let queued = !attention.is_empty();
-    ledger.commit_detail(
+    let committed = ledger.commit_detail(
         repo_id,
         number,
         &mine,
@@ -600,6 +600,22 @@ pub async fn refresh_one(
         Some(&detail.body),
         now,
     )?;
+    if let Committed::Superseded { stored } = committed {
+        // Somebody stored a newer detail while this one was in flight — a `sync`
+        // and the interface's refresh key can be fetching the same PR at once.
+        // Theirs is the fresher view of the PR, so this one is dropped rather
+        // than winning on commit order.
+        tracing::info!(
+            number,
+            stored = %stored,
+            "a newer detail was already stored, so this fetch was dropped"
+        );
+        // Report what the winning detail concluded, not what this one did.
+        let queued = ledger
+            .show(repo_id, number)?
+            .is_some_and(|show| !show.attention.is_empty());
+        return Ok(Some((detail, queued)));
+    }
     Ok(Some((detail, queued)))
 }
 

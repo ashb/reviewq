@@ -1416,7 +1416,8 @@ pub(super) mod tests {
                 None,
                 now,
             )
-            .expect("detail");
+            .expect("detail")
+            .expect_applied();
     }
 
     /// Two queued PRs, so a test can move between them.
@@ -1446,7 +1447,8 @@ pub(super) mod tests {
                 None,
                 now,
             )
-            .expect("detail");
+            .expect("detail")
+            .expect_applied();
         ledger
     }
 
@@ -1505,7 +1507,8 @@ pub(super) mod tests {
                 None,
                 now,
             )
-            .expect("detail");
+            .expect("detail")
+            .expect_applied();
         repo_id
     }
 
@@ -1626,7 +1629,8 @@ mod scroll_tests {
                     None,
                     now,
                 )
-                .expect("detail");
+                .expect("detail")
+                .expect_applied();
         }
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         // A ten-row window, as a render would report.

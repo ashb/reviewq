@@ -862,7 +862,8 @@ Adds a `deferrable` flag to `S3KeySensor`.
                     Some(BODY),
                     now,
                 )
-                .expect("detail");
+                .expect("detail")
+                .expect_applied();
         }
         ledger
     }
@@ -893,7 +894,8 @@ Adds a `deferrable` flag to `S3KeySensor`.
                 None,
                 now,
             )
-            .expect("detail");
+            .expect("detail")
+            .expect_applied();
     }
 
     /// Render at `width`x`height` and return the screen as plain text, one
@@ -1047,7 +1049,8 @@ Adds a `deferrable` flag to `S3KeySensor`.
                 None,
                 now,
             )
-            .expect("detail");
+            .expect("detail")
+            .expect_applied();
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         let screen = render(&mut app, 90, 16).join("\n");
