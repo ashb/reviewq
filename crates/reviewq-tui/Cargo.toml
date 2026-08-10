@@ -15,7 +15,6 @@ anyhow.workspace = true
 crossterm.workspace = true
 jiff.workspace = true
 ratatui.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 tui-markdown.workspace = true
 

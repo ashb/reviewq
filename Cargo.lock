@@ -2472,6 +2472,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "jiff",
  "owo-colors",
  "portable-pty",
@@ -2561,7 +2562,6 @@ dependencies = [
  "reviewq-forge",
  "reviewq-ledger",
  "tempfile",
- "tokio",
  "toml",
  "tracing",
  "tui-markdown",

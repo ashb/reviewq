@@ -23,11 +23,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
-use crossterm::execute;
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -35,8 +33,7 @@ use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
 use reviewq_app::sync::Refreshed;
 use reviewq_ledger::{Ledger, Located, PrShow, QueueItem, RepoKey};
-use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use std::sync::mpsc;
 
 #[cfg(test)]
 /// A minimal valid config naming the fixture's repo.
@@ -72,40 +69,12 @@ fn forbid_in_tests(what: &str) {
     panic!("a test reached {what}");
 }
 
-/// A PR's page on the forge.
-///
-/// The forge renders it, because the path shape is the provider's business — the
-/// same reason a pasted URL is handed to the forge to *read*. Building an adapter
-/// costs nothing and resolves no token, so showing someone where a PR is never
-/// waits on a credential helper.
-fn pr_url(config: &Config, repo: &RepoKey, number: u64) -> Result<String> {
-    let forge = config.forge_for(&repo.host)?;
-    Ok(forge.web_url(&repo.owner, &repo.name, number))
-}
-
-/// The program that opens a URL in whatever the desktop uses for one.
-///
-/// Every platform spells its own differently and none of them is worth a
-/// dependency: this is one argument and one process.
-#[cfg(target_os = "macos")]
-const URL_OPENER: &str = "open";
-#[cfg(target_os = "windows")]
-const URL_OPENER: &str = "explorer";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const URL_OPENER: &str = "xdg-open";
-
 /// Rows the wheel scrolls the detail pane per notch.
 ///
 /// More than one, because a PR description is long and a terminal sends one event
 /// per notch. The queue moves a single row instead: each step there reloads the
 /// selected PR's detail, so three at a time would read two of them for nothing.
 const WHEEL_ROWS: isize = 3;
-
-/// How long the loop waits for a keystroke before looking for finished work.
-///
-/// Short enough that a refresh landing feels immediate, long enough that an idle
-/// interface is not busy. Only reached when nothing is happening.
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 use crate::keys::{self, Action};
 use crate::theme::Theme;
@@ -189,32 +158,38 @@ pub struct App {
 ///
 /// The loop needs the receiver to wait on and the sender to hand to a task, so
 /// they travel together rather than as two arguments that must match.
-pub(crate) struct Channel {
+pub struct Channel {
     /// Cloned into each task so it can report back.
-    pub tx: mpsc::UnboundedSender<Message>,
+    pub tx: mpsc::Sender<Message>,
     /// What the loop waits on.
-    pub rx: mpsc::UnboundedReceiver<Message>,
+    pub rx: mpsc::Receiver<Message>,
+}
+
+impl Default for Channel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Channel {
     /// A fresh channel. Only tasks send on it — input is read by the loop
     /// itself, so that nothing is holding stdin when a review command wants it.
-    pub(crate) fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
         Self { tx, rx }
     }
 }
 
 /// A side effect that needs a PR's full identity — its repo as well as its
 /// number — because it has to reach the forge the PR lives on.
-type PrHook = Box<dyn Fn(&RepoKey, u64) -> Result<()> + Send + Sync>;
+pub type PrHook = Box<dyn Fn(&RepoKey, u64) -> Result<()> + Send + Sync>;
 
 /// The session's config: loaded and validated once by the caller, shared with
 /// every hook that needs it.
 ///
 /// `Arc` because the closures that reach the forge run on the blocking pool and
 /// so must own what they capture.
-pub(crate) type HeldConfig = Arc<Config>;
+pub type HeldConfig = Arc<Config>;
 
 /// The side effects the loop performs, as functions it is given.
 ///
@@ -222,7 +197,7 @@ pub(crate) type HeldConfig = Arc<Config>;
 /// without a forge, a token or a config — the same reason wiff hands its own
 /// loop a struct of hooks. It also keeps `App` unaware of how a refresh is
 /// actually run.
-pub(crate) struct Hooks {
+pub struct Hooks {
     /// Wait briefly for a terminal event, returning `None` if none arrived.
     ///
     /// Injected for the same reason the rest are: it lets a test drive the real
@@ -234,7 +209,7 @@ pub(crate) struct Hooks {
     pub next_event: Box<dyn Fn() -> Result<Option<Event>> + Send + Sync>,
     /// Begin refreshing a PR. Must not block: whatever it starts is expected to
     /// report back as [`Message::Refreshed`] eventually, or never.
-    pub refresh: Box<dyn Fn(u64, mpsc::UnboundedSender<Message>) + Send + Sync>,
+    pub refresh: Box<dyn Fn(u64, mpsc::Sender<Message>) + Send + Sync>,
     /// Tell the forge a PR's notifications are read. Fire-and-forget: `done` has
     /// already been recorded locally by the time this runs, and nothing waits on
     /// it, so a failure is logged and no more.
@@ -260,143 +235,6 @@ pub(crate) struct Hooks {
     /// loop cannot do generically: it belongs to the real backend, not to
     /// `TestBackend`.
     pub review: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
-}
-
-impl Hooks {
-    /// The real ones, working through `reviewq-app`.
-    ///
-    /// `config` is loaded once, by the caller, and shared with every hook that
-    /// needs it — behind an `Arc` because the closures that reach the forge run on
-    /// the blocking pool and so must own what they capture. Reloading it per
-    /// keystroke, which is what taking a path meant, cost a file read and a parse
-    /// each time and let one session act on two different configs.
-    pub(crate) fn live(config: HeldConfig) -> Self {
-        forbid_in_tests("the live hooks, which reach the real ledger and forge — script `Hooks`");
-        let for_refresh = Arc::clone(&config);
-        let for_fetch = Arc::clone(&config);
-        let for_review = Arc::clone(&config);
-        let for_mark_read = Arc::clone(&config);
-        let for_open = Arc::clone(&config);
-        let for_copy = Arc::clone(&config);
-        Self {
-            next_event: Box::new(|| {
-                // `block_in_place` because `poll` parks the thread: it tells the
-                // runtime to move this worker's other tasks elsewhere first.
-                let ready = tokio::task::block_in_place(|| event::poll(POLL_INTERVAL))
-                    .context("polling the terminal for input")?;
-                if !ready {
-                    return Ok(None);
-                }
-                Ok(Some(event::read().context("reading a terminal event")?))
-            }),
-            refresh: Box::new(move |number, tx| {
-                let config = Arc::clone(&for_refresh);
-                // `spawn_blocking` rather than `spawn`, because `sync_one`'s
-                // future is not `Send`: it holds a ledger handle across the forge
-                // round trip, and `rusqlite::Connection` is `Send` but not
-                // `Sync`, so a reference to one cannot cross threads. Driving the
-                // future on a single blocking-pool thread sidesteps that —
-                // nothing `!Send` ever moves.
-                //
-                // Reshaping `refresh_one` so no ledger handle is alive during the
-                // fetch would be worth doing on its own merits, but it is not
-                // what makes the interface responsive: that is this being off the
-                // UI thread at all.
-                tokio::task::spawn_blocking(move || {
-                    let outcome =
-                        Handle::current().block_on(reviewq_app::sync::sync_one(&config, number));
-                    // A closed channel means the interface has already exited, so
-                    // the result has nowhere to go and nothing awaits it.
-                    let _ = tx.send(Message::Refreshed { number, outcome });
-                });
-            }),
-            fetch: Box::new(move |number| {
-                tokio::task::block_in_place(|| {
-                    Handle::current()
-                        .block_on(reviewq_app::sync::track_one(&for_fetch, None, number))
-                        .map(|_| ())
-                })
-            }),
-            open_url: Box::new(move |repo, number| {
-                let url = pr_url(&for_open, repo, number)?;
-                // Never handed the terminal, unlike the review command: an opener
-                // returns straight away and its output (`xdg-open` has opinions
-                // about mime caches) would land on top of the queue. So its
-                // streams go nowhere and it is reaped off the UI thread — a
-                // browser that has to cold-start can take seconds, and waiting
-                // here would freeze the interface for them.
-                let mut command = std::process::Command::new(URL_OPENER);
-                command
-                    .arg(&url)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                let mut child = command
-                    .spawn()
-                    .with_context(|| format!("running {URL_OPENER}"))?;
-                tokio::task::spawn_blocking(move || {
-                    // Reaped rather than left: an unwaited child stays a zombie
-                    // for as long as the interface runs.
-                    let _ = child.wait();
-                });
-                Ok(())
-            }),
-            copy_url: Box::new(move |repo, number| {
-                let url = pr_url(&for_copy, repo, number)?;
-                // OSC 52, through the terminal that is already ours — so this
-                // works over ssh and inside tmux, where a clipboard library
-                // talking to the local display server would put the URL on the
-                // wrong machine's clipboard. The terminal may decline (or not
-                // support it) silently; there is no reply to wait for.
-                execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(&url))
-                    .context("writing the clipboard escape sequence")
-            }),
-            review: Box::new(move |number| {
-                let handoff = reviewq_app::review::handoff_for(&for_review, number)?;
-
-                // Keeps the alternate screen — see `lend_terminal`.
-                crate::lend_terminal();
-
-                let ran = handoff
-                    .command()
-                    .status()
-                    .with_context(|| format!("running {:?}", handoff.argv[0]));
-
-                // Taken back whatever happened, so a review command that dies
-                // doesn't leave the queue drawing onto a cooked terminal.
-                crate::reclaim_terminal();
-                let status = ran?;
-                if !status.success() {
-                    bail!(
-                        "{:?} exited with {}",
-                        handoff.argv[0],
-                        status
-                            .code()
-                            .map_or_else(|| "a signal".to_string(), |code| code.to_string())
-                    );
-                }
-                Ok(())
-            }),
-            mark_read: Box::new(move |number| {
-                let config = Arc::clone(&for_mark_read);
-                tokio::task::spawn_blocking(move || {
-                    let marked = Handle::current().block_on(async move {
-                        let key =
-                            reviewq_app::resolve::repo_for(&reviewq_app::resolve::open()?, number)?;
-                        let repo = config
-                            .repos()
-                            .find(|r| r.key() == key)
-                            .cloned()
-                            .context("the PR's repo is no longer configured")?;
-                        reviewq_app::actions::mark_notifications_read(&config, &repo, number).await
-                    });
-                    if let Err(err) = marked {
-                        tracing::warn!(number, %err, "could not mark GitHub notifications read");
-                    }
-                });
-            }),
-        }
-    }
 }
 
 /// What is covering the panes.
@@ -482,7 +320,7 @@ pub(crate) const SNOOZE_PRESETS: &[(char, &str, &str)] = &[
 ///
 /// Input and finished work share one channel so the loop is a single `recv`:
 /// both are just reasons to update state and redraw.
-pub(crate) enum Message {
+pub enum Message {
     /// A refresh task finished, for better or worse.
     Refreshed {
         /// The PR it was refreshing.
@@ -675,7 +513,7 @@ impl App {
     /// Generic over the backend and handed its channel and side effects rather
     /// than creating them, so a test can drive the real loop against a
     /// `TestBackend` with a scripted sequence of messages and no network.
-    pub(crate) async fn run<B>(
+    pub fn run<B>(
         &mut self,
         terminal: &mut Terminal<B>,
         channel: &mut Channel,
@@ -1857,16 +1695,14 @@ mod loop_tests {
     }
 
     /// Run the loop to completion, or fail if it doesn't finish.
-    async fn drive(app: &mut App, hooks: &Hooks) {
+    ///
+    /// No timeout: the loop's body is synchronous, so nothing could interrupt it
+    /// anyway. A script that forgets to quit is caught by [`scripted`], which
+    /// errors when it runs dry instead of returning "nothing yet" forever.
+    fn drive(app: &mut App, hooks: &Hooks) {
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
         let mut channel = Channel::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            app.run(&mut terminal, &mut channel, hooks),
-        )
-        .await
-        .expect("the loop should have quit")
-        .expect("loop");
+        app.run(&mut terminal, &mut channel, hooks).expect("loop");
     }
 
     /// Hand keys straight to the dispatcher, for a sequence meant to finish with
@@ -1895,24 +1731,22 @@ mod loop_tests {
             .join("\n")
     }
 
-    #[tokio::test]
-    async fn a_quit_key_ends_the_loop_after_one_frame() {
+    #[test]
+    fn a_quit_key_ends_the_loop_after_one_frame() {
         let mut app = app();
         let (hooks, _) = fake_hooks(vec![press('q')], None, false);
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
         let mut channel = Channel::new();
 
-        app.run(&mut terminal, &mut channel, &hooks)
-            .await
-            .expect("loop");
+        app.run(&mut terminal, &mut channel, &hooks).expect("loop");
 
         assert!(app.quit);
         // It drew before waiting, so the opening frame is on screen.
         assert!(screen(&terminal).contains("on the queue"));
     }
 
-    #[tokio::test]
-    async fn a_refresh_result_reaches_the_state_through_the_loop() {
+    #[test]
+    fn a_refresh_result_reaches_the_state_through_the_loop() {
         let mut app = app();
         let (hooks, recorded) = fake_hooks(
             // `r` starts it; the answer lands on the channel and is taken in
@@ -1927,7 +1761,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(*recorded.refreshed.lock().expect("lock"), vec![70135]);
         assert!(app.refreshing.is_empty(), "the result cleared the mark");
@@ -1935,19 +1769,19 @@ mod loop_tests {
         assert!(status.contains("#70135 refreshed"), "{status}");
     }
 
-    #[tokio::test]
-    async fn the_help_overlay_toggles_through_the_loop() {
+    #[test]
+    fn the_help_overlay_toggles_through_the_loop() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![press('?'), press(' '), press('q')], None, false);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.overlay, Overlay::None, "opened and closed again");
         assert!(app.quit);
     }
 
-    #[tokio::test]
-    async fn d_asks_first_and_a_confirmation_marks_it_done() {
+    #[test]
+    fn d_asks_first_and_a_confirmation_marks_it_done() {
         // `d` alone only raises the question. Fed directly, because with the
         // confirmation up a `q` is taken as "cancel" rather than "quit".
         let mut app = app();
@@ -1961,7 +1795,7 @@ mod loop_tests {
         // `d` then `y` does it.
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let (hooks, recorded) = fake_hooks(vec![press('d'), press('y'), press('q')], None, false);
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 done"), "{status}");
@@ -1970,12 +1804,12 @@ mod loop_tests {
         assert_eq!(*recorded.marked.lock().expect("lock"), vec![70135]);
     }
 
-    #[tokio::test]
-    async fn declining_the_confirmation_changes_nothing() {
+    #[test]
+    fn declining_the_confirmation_changes_nothing() {
         let mut app = app();
         let (hooks, recorded) = fake_hooks(vec![press('d'), press('n'), press('q')], None, false);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.overlay, Overlay::None, "the question is dismissed");
         assert!(app.status.is_none(), "and nothing happened");
@@ -1983,20 +1817,20 @@ mod loop_tests {
         assert!(recorded.marked.lock().expect("lock").is_empty());
     }
 
-    #[tokio::test]
-    async fn z_then_a_preset_snoozes_it_off_the_queue() {
+    #[test]
+    fn z_then_a_preset_snoozes_it_off_the_queue() {
         let mut app = app();
         let (hooks, _) = fake_hooks(vec![press('z'), press('3'), press('q')], None, false);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 snoozed until"), "{status}");
         assert!(app.queue.is_empty(), "snoozing takes it off the queue");
     }
 
-    #[tokio::test]
-    async fn a_typed_duration_reaches_the_same_place() {
+    #[test]
+    fn a_typed_duration_reaches_the_same_place() {
         let mut app = app();
         // `o` escapes the presets to the prompt; then type `2d` and confirm.
         let (hooks, _) = fake_hooks(
@@ -2012,7 +1846,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         let status = app.status.clone().expect("a status");
         assert!(status.contains("snoozed until"), "{status}");
@@ -2073,12 +1907,12 @@ mod loop_tests {
         }
     }
 
-    #[tokio::test]
-    async fn m_mutes_and_takes_it_off_the_queue() {
+    #[test]
+    fn m_mutes_and_takes_it_off_the_queue() {
         let mut app = app();
         let (hooks, _) = fake_hooks(vec![press('m'), press('q')], None, false);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.status.as_deref(), Some("#70135 muted"));
         assert!(app.queue.is_empty(), "muting clears what it holds");
@@ -2087,11 +1921,11 @@ mod loop_tests {
         assert!(app.current().is_none());
     }
 
-    #[tokio::test]
-    async fn f_defers_without_hiding_it_and_again_restores_it() {
+    #[test]
+    fn f_defers_without_hiding_it_and_again_restores_it() {
         let mut app = app();
         let (hooks, _) = fake_hooks(vec![press('f'), press('q')], None, false);
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         let status = app.status.clone().expect("a status");
         assert!(status.contains("deferred to the bottom"), "{status}");
@@ -2100,14 +1934,14 @@ mod loop_tests {
 
         let mut again = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![press('f'), press('f'), press('q')], None, false);
-        drive(&mut again, &hooks).await;
+        drive(&mut again, &hooks);
         let status = again.status.clone().expect("a status");
         assert!(status.contains("undeferred"), "{status}");
         assert!(!again.queue[0].item.deferred);
     }
 
-    #[tokio::test]
-    async fn an_action_on_an_empty_queue_does_nothing() {
+    #[test]
+    fn an_action_on_an_empty_queue_does_nothing() {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         let (hooks, recorded) = fake_hooks(
@@ -2124,7 +1958,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.overlay, Overlay::None, "nothing to ask about");
         assert!(app.status.is_none());
@@ -2150,8 +1984,8 @@ mod loop_tests {
         );
     }
 
-    #[tokio::test]
-    async fn colon_then_a_number_selects_that_pr() {
+    #[test]
+    fn colon_then_a_number_selects_that_pr() {
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         assert_eq!(app.selected, 0);
         let (hooks, _) = fake_hooks(
@@ -2169,7 +2003,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.overlay, Overlay::None, "the prompt closed");
         assert_eq!(
@@ -2282,8 +2116,8 @@ mod loop_tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_fetch_that_lands_on_the_queue_selects_it() {
+    #[test]
+    fn a_fetch_that_lands_on_the_queue_selects_it() {
         // The PR has to be unknown to the ledger when the jump asks for it, and
         // there by the time the fetch returns — so the ledger is a file, and the
         // fake fetch writes over its own connection, which is what the real
@@ -2322,7 +2156,7 @@ mod loop_tests {
             copy_url: Box::new(|_, _| Ok(())),
         };
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(*added.lock().expect("lock"), vec![70201]);
         assert_eq!(
@@ -2364,8 +2198,8 @@ mod loop_tests {
         }
     }
 
-    #[tokio::test]
-    async fn enter_shows_the_notice_before_handing_over_and_refreshes_after() {
+    #[test]
+    fn enter_shows_the_notice_before_handing_over_and_refreshes_after() {
         let mut app = app();
         let (hooks, recorded) = fake_hooks(
             vec![special(KeyCode::Enter), press('q')],
@@ -2378,7 +2212,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(*recorded.reviewed.lock().expect("lock"), vec![70135]);
         assert_eq!(
@@ -2410,12 +2244,12 @@ mod loop_tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_review_command_that_fails_says_so_and_keeps_the_queue() {
+    #[test]
+    fn a_review_command_that_fails_says_so_and_keeps_the_queue() {
         let mut app = app();
         let (hooks, recorded) = fake_hooks(vec![special(KeyCode::Enter), press('q')], None, true);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(*recorded.reviewed.lock().expect("lock"), vec![70135]);
         assert!(
@@ -2447,24 +2281,24 @@ mod loop_tests {
         assert_eq!(app.pr_number_in("70135"), Some(70135));
     }
 
-    #[tokio::test]
-    async fn o_opens_the_selected_pr() {
+    #[test]
+    fn o_opens_the_selected_pr() {
         let mut app = app();
         let (hooks, recorded) = fake_hooks(vec![press('o'), press('q')], None, false);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(*recorded.opened.lock().expect("lock"), vec![70135]);
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 opened"), "{status}");
     }
 
-    #[tokio::test]
-    async fn c_and_y_are_the_same_copy() {
+    #[test]
+    fn c_and_y_are_the_same_copy() {
         let mut app = app();
         let (hooks, recorded) = fake_hooks(vec![press('c'), press('y'), press('q')], None, false);
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(
             *recorded.copied.lock().expect("lock"),
@@ -2475,8 +2309,8 @@ mod loop_tests {
         assert!(status.contains("URL copied"), "{status}");
     }
 
-    #[tokio::test]
-    async fn a_url_that_cannot_be_resolved_says_so_and_keeps_the_queue() {
+    #[test]
+    fn a_url_that_cannot_be_resolved_says_so_and_keeps_the_queue() {
         // What fails in practice is the config the hook needs to know the host's
         // layout. It must land in the header, not take the interface down.
         let mut app = app();
@@ -2486,7 +2320,7 @@ mod loop_tests {
             ..hooks
         };
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         let status = app.status.clone().expect("a status");
         assert!(status.contains("could not be opened"), "{status}");
@@ -2529,8 +2363,8 @@ mod loop_tests {
         })
     }
 
-    #[tokio::test]
-    async fn a_click_selects_the_queue_row_under_the_pointer() {
+    #[test]
+    fn a_click_selects_the_queue_row_under_the_pointer() {
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         assert_eq!(app.selected, 0);
         let (hooks, _) = fake_hooks(
@@ -2539,7 +2373,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.selected, 1, "the second row was clicked");
         assert_eq!(
@@ -2550,8 +2384,8 @@ mod loop_tests {
         assert_eq!(app.focus, Focus::Queue);
     }
 
-    #[tokio::test]
-    async fn a_click_past_the_last_row_leaves_the_selection_alone() {
+    #[test]
+    fn a_click_past_the_last_row_leaves_the_selection_alone() {
         // Empty space below a two-item queue: a click there means nothing, and
         // must not be read as "the last row".
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
@@ -2561,13 +2395,13 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.selected, 0);
     }
 
-    #[tokio::test]
-    async fn a_click_in_the_detail_pane_focuses_it_without_moving_the_selection() {
+    #[test]
+    fn a_click_in_the_detail_pane_focuses_it_without_moving_the_selection() {
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![click(DETAIL_COLUMN, FIRST_ROW + 1), press('q')],
@@ -2575,14 +2409,14 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.focus, Focus::Detail);
         assert_eq!(app.selected, 0);
     }
 
-    #[tokio::test]
-    async fn the_wheel_moves_the_queue_a_row_at_a_time() {
+    #[test]
+    fn the_wheel_moves_the_queue_a_row_at_a_time() {
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![
@@ -2594,7 +2428,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(
             app.selected, 1,
@@ -2602,8 +2436,8 @@ mod loop_tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_wheel_goes_back_up_the_queue_too() {
+    #[test]
+    fn the_wheel_goes_back_up_the_queue_too() {
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
             vec![
@@ -2615,13 +2449,13 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.selected, 0, "down then up is back where it started");
     }
 
-    #[tokio::test]
-    async fn the_wheel_over_the_detail_takes_focus_from_the_queue() {
+    #[test]
+    fn the_wheel_over_the_detail_takes_focus_from_the_queue() {
         // Whichever pane is under the pointer is the one that scrolls, however the
         // keyboard's focus happens to be set.
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
@@ -2635,14 +2469,14 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.focus, Focus::Detail);
         assert_eq!(app.selected, 0, "the queue did not move");
     }
 
-    #[tokio::test]
-    async fn the_mouse_is_ignored_while_an_overlay_is_up() {
+    #[test]
+    fn the_mouse_is_ignored_while_an_overlay_is_up() {
         // The rows are still drawn under a modal, so a click landing on one you
         // cannot see would act on whatever it happens to cover.
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
@@ -2657,13 +2491,13 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.selected, 0, "the click did not reach the queue");
     }
 
-    #[tokio::test]
-    async fn a_click_outside_both_panes_does_nothing() {
+    #[test]
+    fn a_click_outside_both_panes_does_nothing() {
         // The header and footer are not clickable, and neither are the borders.
         let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
         let (hooks, _) = fake_hooks(
@@ -2672,7 +2506,7 @@ mod loop_tests {
             false,
         );
 
-        drive(&mut app, &hooks).await;
+        drive(&mut app, &hooks);
 
         assert_eq!(app.selected, 0);
         assert_eq!(app.focus, Focus::Queue);

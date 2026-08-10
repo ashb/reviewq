@@ -30,26 +30,28 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use reviewq_app::config::Config;
 
+pub use app::{Channel, Hooks, Message, PrHook};
 pub use theme::{Mode, Theme};
 
 /// Run the interface until the user quits.
+///
+/// Synchronous, and knows nothing about a runtime: the loop draws, reads a key
+/// and acts, and everything that could block for an unbounded time is a hook the
+/// caller supplies. Whoever wants forge work off the interface's thread arranges
+/// that on their side of [`Hooks`] — which is why this crate no longer depends on
+/// tokio at all.
 ///
 /// `config` is the one the caller already loaded and validated, held for the
 /// session: an interface that reloaded it per action could act on two different
 /// versions of the file in one sitting, and paid a file read and a parse per
 /// keystroke to do it.
-pub async fn run(theme: Theme, config: Arc<Config>) -> Result<()> {
+pub fn run(theme: Theme, config: Arc<Config>, hooks: &Hooks) -> Result<()> {
     // The guard drops at the end of this function, restoring the terminal — when
     // the body returns an error as much as when it quits normally.
     let mut guard = TerminalGuard::enter()?;
-    match app::App::new(theme, Arc::clone(&config)) {
-        Ok(mut app) => {
-            let mut channel = app::Channel::new();
-            app.run(&mut guard.terminal, &mut channel, &app::Hooks::live(config))
-                .await
-        }
-        Err(err) => Err(err),
-    }
+    let mut app = app::App::new(theme, config)?;
+    let mut channel = Channel::new();
+    app.run(&mut guard.terminal, &mut channel, hooks)
 }
 
 /// Ownership of the terminal, given back when this drops.
@@ -82,7 +84,7 @@ impl Drop for TerminalGuard {
 ///
 /// Also used to take it back after a review command has had it, so it installs
 /// nothing that must happen only once.
-pub(crate) fn take_over_terminal() -> Result<()> {
+pub fn take_over_terminal() -> Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     // Mouse reporting is a nicety, so failing to get it is no reason to refuse to
@@ -95,7 +97,7 @@ pub(crate) fn take_over_terminal() -> Result<()> {
 /// and the panic hook need not agree on which of them runs.
 ///
 /// Mouse reporting goes first, while reviewq still owns the screen.
-pub(crate) fn restore_terminal() {
+pub fn restore_terminal() {
     let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
@@ -116,7 +118,7 @@ pub(crate) fn restore_terminal() {
 /// next to the notice. Mouse reporting goes with raw mode: the child asks for
 /// whatever it wants and turns that off again when it exits, which would otherwise
 /// leave reviewq with no mouse for the rest of the session.
-pub(crate) fn lend_terminal() {
+pub fn lend_terminal() {
     let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = disable_raw_mode();
 }
@@ -127,7 +129,7 @@ pub(crate) fn lend_terminal() {
 /// on the way out, which drops us to the primary one; for a child that never took
 /// it over this is a no-op. `Hide` again because the command may well have shown
 /// the cursor and not put it away.
-pub(crate) fn reclaim_terminal() {
+pub fn reclaim_terminal() {
     let _ = enable_raw_mode();
     let _ = execute!(
         io::stdout(),
