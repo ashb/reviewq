@@ -23,10 +23,18 @@ pub use theme::{Mode, Theme};
 /// Run the interface until the user quits.
 ///
 /// Takes over the terminal — alternate screen, raw mode — and restores it on
-/// the way out, including when the body returns an error.
-pub fn run(theme: Theme) -> Result<()> {
+/// the way out, including when the body returns an error. Async because forge
+/// work runs as tasks while the interface stays responsive.
+pub async fn run(theme: Theme) -> Result<()> {
     let mut terminal = ratatui::init();
-    let outcome = app::App::new(theme).and_then(|mut app| app.run(&mut terminal));
+    let outcome = match app::App::new(theme) {
+        Ok(mut app) => {
+            let mut channel = app::Channel::with_input_reader();
+            app.run(&mut terminal, &mut channel, &app::Hooks::live())
+                .await
+        }
+        Err(err) => Err(err),
+    };
     ratatui::restore();
     outcome
 }

@@ -70,9 +70,19 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(color(t.dim)),
         ));
     }
-    // A status note replaces nothing — it sits after the counts, so what it's
-    // reporting on stays visible next to it.
-    if let Some(status) = &app.status {
+    // Work in flight outranks a note about work that finished: it's the thing
+    // you're waiting on, and it says the interface hasn't forgotten your key.
+    if !app.refreshing.is_empty() {
+        let numbers: Vec<String> = app
+            .refreshing
+            .iter()
+            .map(|number| format!("#{number}"))
+            .collect();
+        spans.push(Span::styled(
+            format!("  ·  refreshing {}…", numbers.join(", ")),
+            Style::default().fg(color(t.focus)),
+        ));
+    } else if let Some(status) = &app.status {
         spans.push(Span::styled(
             format!("  ·  {status}"),
             Style::default().fg(color(t.warn)),
@@ -385,7 +395,7 @@ fn footer_label(binding: &keys::Binding, focus: Focus) -> &'static str {
     match (binding.action, focus) {
         (Action::Down, Focus::Detail) => "scroll",
         (Action::SwitchPane, _) => "pane",
-        (Action::SyncSelected, _) => "sync PR",
+        (Action::RefreshSelected, _) => "refresh",
         _ => binding.what,
     }
 }
@@ -778,12 +788,31 @@ Adds a `deferrable` flag to `S3KeySensor`.
     #[test]
     fn a_status_note_appears_in_the_header_beside_the_counts() {
         let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
-        app.status = Some("syncing #70135…".to_string());
+        app.status = Some("#70135 refreshed — wants attention".to_string());
         let header = render(&mut app, 100, 20).first().expect("header").clone();
 
-        assert!(header.contains("syncing #70135"), "{header}");
+        assert!(header.contains("#70135 refreshed"), "{header}");
         // What it's reporting on is still readable next to it.
         assert!(header.contains("2 on the queue"), "{header}");
+    }
+
+    #[test]
+    fn refreshes_in_flight_are_named_and_outrank_a_finished_note() {
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        app.status = Some("an earlier result".to_string());
+        app.refreshing.insert(70135);
+        app.refreshing.insert(70201);
+
+        let header = render(&mut app, 100, 20).first().expect("header").clone();
+        // Both, so two concurrent refreshes are visibly two.
+        assert!(header.contains("refreshing #70135, #70201"), "{header}");
+        // The thing you're waiting on wins over the thing that already happened.
+        assert!(!header.contains("an earlier result"), "{header}");
+
+        // And once the last one lands, the note is what's left.
+        app.refreshing.clear();
+        let after = render(&mut app, 100, 20).first().expect("header").clone();
+        assert!(after.contains("an earlier result"), "{after}");
     }
 
     #[test]

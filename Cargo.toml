@@ -37,6 +37,7 @@ globset = "0.4.20"
 insta = "1.48.0"
 jiff = { version = "0.2.35", features = ["serde"] }
 octocrab = "0.54.1"
+portable-pty = "0.9"
 # `unstable-rendered-line-info` is `Paragraph::line_count`, which is how the
 # detail pane learns how many lines its wrapped content actually came to — the
 # unit `Paragraph::scroll` moves in. Counting `Line`s instead would under-count

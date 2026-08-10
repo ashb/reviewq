@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 
-pub fn run() -> Result<ExitCode> {
-    reviewq_tui::run(reviewq_tui::Theme::default())?;
+pub async fn run() -> Result<ExitCode> {
+    reviewq_tui::run(reviewq_tui::Theme::default()).await?;
     Ok(ExitCode::SUCCESS)
 }

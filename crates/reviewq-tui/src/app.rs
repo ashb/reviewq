@@ -1,17 +1,30 @@
 //! What's on screen and what the keys do.
 //!
-//! Ledger reads happen synchronously on this thread. They're sub-millisecond
-//! against local SQLite, so making them async would buy nothing and cost the
-//! whole app an executor: `rusqlite::Connection` is `Send` but not `Sync`, so a
-//! shared handle across await points is friction with no payoff. Only a sync,
-//! which is network-bound, will need to move off this thread.
+//! Ledger reads stay synchronous: they're sub-millisecond against local SQLite,
+//! so making them async would buy nothing and cost a shared `Connection` (which
+//! is `Send` but not `Sync`) held across await points.
+//!
+//! Anything touching the network does not. A forge round trip is unbounded — a
+//! slow response must never stop the queue scrolling or `q` working — so it runs
+//! as a task and reports back. Its own [`Ledger`] handle writes while this one
+//! reads, which is what the ledger's WAL mode is for.
+//!
+//! Input and finished work arrive on one channel, so the loop is a single
+//! `recv().await` rather than a `select!`: a keystroke and a completed refresh
+//! are both just reasons to update and redraw. A thread does the blocking
+//! `event::read`, since crossterm's own async stream would be a dependency for
+//! no gain over that.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
-use ratatui::DefaultTerminal;
+use crossterm::event::{self, Event, KeyEventKind};
+use ratatui::Terminal;
+use ratatui::backend::Backend;
 use reviewq_app::sync::Refreshed;
 use reviewq_ledger::{Ledger, Located, PrShow, QueueItem};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 
 use crate::keys::{self, Action};
 use crate::theme::Theme;
@@ -42,10 +55,10 @@ pub struct App {
     pub help: bool,
     /// A one-line note in the header: what is happening, or what just did.
     pub status: Option<String>,
-    /// A PR whose sync has been asked for but not yet run. Held rather than
-    /// acted on immediately so the loop can draw the "syncing" note *before*
-    /// blocking on the network, instead of after.
-    pending_sync: Option<u64>,
+    /// PRs with a refresh in flight. Keyed by number so pressing `r` twice on
+    /// one PR doesn't fetch it twice, while two different PRs can refresh at
+    /// once.
+    pub refreshing: BTreeSet<u64>,
     /// How many rows the focused pane last displayed, so a paging key moves by a
     /// screenful rather than a guessed constant. Written by the renderer, which
     /// is the only thing that knows the laid-out height; 1 until the first draw.
@@ -55,6 +68,105 @@ pub struct App {
     detail_lines: usize,
     ledger: Ledger,
     quit: bool,
+}
+
+/// Both ends of the loop's channel.
+///
+/// The loop needs the receiver to wait on and the sender to hand to a task, so
+/// they travel together rather than as two arguments that must match.
+pub(crate) struct Channel {
+    /// Cloned into each task so it can report back.
+    pub tx: mpsc::UnboundedSender<Message>,
+    /// What the loop waits on.
+    pub rx: mpsc::UnboundedReceiver<Message>,
+}
+
+impl Channel {
+    /// A channel with the terminal's input already flowing into it.
+    pub(crate) fn with_input_reader() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        spawn_input_reader(tx.clone());
+        Self { tx, rx }
+    }
+
+    /// A channel nothing is feeding, for a test to load by hand.
+    #[cfg(test)]
+    fn silent() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx }
+    }
+}
+
+/// The side effects the loop performs, as functions it is given.
+///
+/// Injected rather than called directly so the loop can be driven in a test
+/// without a forge, a token or a config — the same reason wiff hands its own
+/// loop a struct of hooks. It also keeps `App` unaware of how a refresh is
+/// actually run.
+pub(crate) struct Hooks {
+    /// Begin refreshing a PR. Must not block: whatever it starts is expected to
+    /// report back as [`Message::Refreshed`] eventually, or never.
+    pub refresh: Box<dyn Fn(u64, mpsc::UnboundedSender<Message>) + Send + Sync>,
+}
+
+impl Hooks {
+    /// The real ones, refreshing through `reviewq-app`.
+    pub(crate) fn live() -> Self {
+        Self {
+            refresh: Box::new(|number, tx| {
+                // `spawn_blocking` rather than `spawn`, because `sync_one`'s
+                // future is not `Send`: it holds a ledger handle across the forge
+                // round trip, and `rusqlite::Connection` is `Send` but not
+                // `Sync`, so a reference to one cannot cross threads. Driving the
+                // future on a single blocking-pool thread sidesteps that —
+                // nothing `!Send` ever moves.
+                //
+                // Reshaping `refresh_one` so no ledger handle is alive during the
+                // fetch would be worth doing on its own merits, but it is not
+                // what makes the interface responsive: that is this being off the
+                // UI thread at all.
+                tokio::task::spawn_blocking(move || {
+                    let outcome =
+                        Handle::current().block_on(reviewq_app::sync::sync_one(None, number));
+                    // A closed channel means the interface has already exited, so
+                    // the result has nowhere to go and nothing awaits it.
+                    let _ = tx.send(Message::Refreshed { number, outcome });
+                });
+            }),
+        }
+    }
+}
+
+/// Something the loop should wake up for.
+///
+/// Input and finished work share one channel so the loop is a single `recv`:
+/// both are just reasons to update state and redraw.
+pub(crate) enum Message {
+    /// A terminal event — a keystroke, or a resize.
+    Input(Event),
+    /// A refresh task finished, for better or worse.
+    Refreshed {
+        /// The PR it was refreshing.
+        number: u64,
+        /// What came back.
+        outcome: Result<Refreshed>,
+    },
+}
+
+/// Read terminal events on a thread, forwarding them to the loop.
+///
+/// `event::read` blocks, which an async task must not do. A thread can, and
+/// this one needs no shutdown path: on quit the receiver drops, the next `send`
+/// fails, and the thread ends — or the process exits first, which is the usual
+/// case since it is parked in `read` waiting for a key that never comes.
+fn spawn_input_reader(tx: mpsc::UnboundedSender<Message>) {
+    std::thread::spawn(move || {
+        while let Ok(event) = event::read() {
+            if tx.send(Message::Input(event)).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// Which pane has the keyboard.
@@ -89,7 +201,7 @@ impl App {
             detail_scroll: 0,
             help: false,
             status: None,
-            pending_sync: None,
+            refreshing: BTreeSet::new(),
             page: 1,
             detail_lines: 0,
             ledger,
@@ -173,108 +285,134 @@ impl App {
         self.detail_scroll = self.detail_scroll.min(last);
     }
 
-    /// Draw, wait for input, repeat, until the user quits.
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+    /// Draw, wait for something to happen, repeat, until the user quits.
+    ///
+    /// Generic over the backend and handed its channel and side effects rather
+    /// than creating them, so a test can drive the real loop against a
+    /// `TestBackend` with a scripted sequence of messages and no network.
+    pub(crate) async fn run<B>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        channel: &mut Channel,
+        hooks: &Hooks,
+    ) -> Result<()>
+    where
+        B: Backend,
+        // ratatui 0.30 gives each backend its own error type; `anyhow` needs it
+        // to be a sendable error before `?` will take it.
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         while !self.quit {
             terminal.draw(|frame| ui::draw(frame, self))?;
 
-            // A sync runs here rather than in `on_key`, because the draw above
-            // is what puts "syncing …" on screen before the network call
-            // blocks. Looping straight back afterwards redraws with the result.
-            if let Some(number) = self.pending_sync.take() {
-                self.sync_selected(number);
-                continue;
-            }
-
-            // Blocking read: nothing animates, so waking on a timer would only
-            // burn cycles redrawing an identical screen.
-            if let Event::Key(key) = event::read()? {
-                self.on_key(key)?;
+            // Nothing animates, so there is no tick: the loop sleeps until a key
+            // is pressed, the terminal resizes, or a task reports back.
+            match channel.rx.recv().await {
+                Some(Message::Input(Event::Key(key))) => {
+                    // Windows reports press and release; acting on both
+                    // double-fires.
+                    if key.kind == KeyEventKind::Press {
+                        self.dispatch(keys::action_for(key), channel, hooks)?;
+                    }
+                }
+                // A resize is reason enough to redraw, which the top of the loop
+                // does unconditionally.
+                Some(Message::Input(_)) => {}
+                Some(Message::Refreshed { number, outcome }) => {
+                    self.on_refreshed(number, outcome);
+                }
+                // The input reader has gone and no task holds a sender, so
+                // nothing further can arrive and waiting again would hang.
+                None => break,
             }
         }
         Ok(())
     }
 
-    /// Fetch one PR's detail from the forge, then re-read the queue.
+    /// Route an action: the ones with side effects go to a hook, the rest are
+    /// state changes [`update`](Self::update) applies.
     ///
-    /// Blocks the interface for the duration. That is the honest behaviour for
-    /// something the user explicitly asked for and is waiting on — a single
-    /// GraphQL query — and it avoids a background task, a channel and a spinner
-    /// for a round trip that is normally well under a second.
-    ///
-    /// A failure becomes the status line rather than ending the session: a bad
-    /// token or a dropped connection shouldn't throw away the queue you were
-    /// reading.
-    fn sync_selected(&mut self, number: u64) {
-        self.status = match self.fetch(number) {
-            Ok(Refreshed::Updated { queued, .. }) => Some(format!(
-                "#{number} synced — {}",
-                if queued {
-                    "wants attention"
-                } else {
-                    "wants nothing"
+    /// Splitting them is what lets `update` be tested by naming an action
+    /// directly, without synthesising key events or standing up a forge.
+    fn dispatch(&mut self, action: Option<Action>, channel: &Channel, hooks: &Hooks) -> Result<()> {
+        match action {
+            Some(Action::RefreshSelected) => {
+                if let Some(number) = self.refresh_target() {
+                    (hooks.refresh)(number, channel.tx.clone());
                 }
-            )),
-            Ok(Refreshed::Gone) => Some(format!("#{number} no longer exists on the forge")),
-            Ok(Refreshed::Untracked) => Some(format!("#{number} is not in the ledger")),
-            Err(err) => Some(format!("#{number} sync failed: {err:#}")),
-        };
-        // The fetch may have changed what is on the queue, and does change the
-        // selected PR's detail either way.
-        if let Err(err) = self.reload() {
-            self.status = Some(format!("reload failed: {err:#}"));
+                Ok(())
+            }
+            other => self.update(other),
         }
     }
 
-    /// Run the async refresh from this synchronous loop.
-    ///
-    /// `block_in_place` hands the worker thread's other tasks to a sibling
-    /// before blocking on it, which is what makes `block_on` legal inside a
-    /// runtime — the multi-threaded runtime `main` already builds.
-    fn fetch(&self, number: u64) -> Result<Refreshed> {
-        tokio::task::block_in_place(|| {
-            Handle::current().block_on(reviewq_app::sync::sync_one(None, number))
-        })
-    }
-
-    fn on_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Windows reports press and release; acting on both double-fires.
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        let action = keys::action_for(key);
-
+    /// Apply a state change. No I/O beyond the ledger reads a moved selection
+    /// needs, so a test can call it with any action and inspect the result.
+    pub(crate) fn update(&mut self, action: Option<Action>) -> Result<()> {
         // While the key reference is up it owns the keyboard: any key closes it,
         // so it can be dismissed without first remembering how.
         if self.help {
             self.help = false;
             return Ok(());
         }
-
-        // `ctrl-d`/`ctrl-u` move a whole screenful rather than the half-page vim
-        // gives them, matching PageDown/PageUp — they're synonyms because that's
-        // how they were asked for.
         let page = self.page() as isize;
         match action {
-            None => {}
-            Some(Action::Quit) => self.quit = true,
-            Some(Action::Help) => self.help = true,
-            Some(Action::SwitchPane) => self.toggle_focus(),
-            Some(Action::Down) => self.scroll(1)?,
-            Some(Action::Up) => self.scroll(-1)?,
-            Some(Action::PageDown) => self.scroll(page)?,
-            Some(Action::PageUp) => self.scroll(-page)?,
-            Some(Action::First) => self.scroll_to_start()?,
-            Some(Action::Last) => self.scroll_to_end()?,
-            Some(Action::SyncSelected) => {
-                if let Some(item) = self.current() {
-                    let number = item.item.pr.number;
-                    self.status = Some(format!("syncing #{number}…"));
-                    self.pending_sync = Some(number);
-                }
+            None => Ok(()),
+            Some(Action::Quit) => {
+                self.quit = true;
+                Ok(())
             }
+            Some(Action::Help) => {
+                self.help = true;
+                Ok(())
+            }
+            Some(Action::SwitchPane) => {
+                self.toggle_focus();
+                Ok(())
+            }
+            Some(Action::Down) => self.scroll(1),
+            Some(Action::Up) => self.scroll(-1),
+            Some(Action::PageDown) => self.scroll(page),
+            Some(Action::PageUp) => self.scroll(-page),
+            Some(Action::First) => self.scroll_to_start(),
+            Some(Action::Last) => self.scroll_to_end(),
+            // Handled by `dispatch`, which owns the hook it needs.
+            Some(Action::RefreshSelected) => Ok(()),
         }
-        Ok(())
+    }
+
+    /// The PR a refresh should fetch, marking it in flight — `None` when nothing
+    /// is selected, or when this PR is already being fetched.
+    fn refresh_target(&mut self) -> Option<u64> {
+        let number = self.current().map(|item| item.item.pr.number)?;
+        self.refreshing.insert(number).then_some(number)
+    }
+
+    /// Take in a finished refresh: report it, and re-read what it changed.
+    ///
+    /// A failure becomes the status line rather than ending the session — a bad
+    /// token or a dropped connection should not discard the queue you were
+    /// reading.
+    fn on_refreshed(&mut self, number: u64, outcome: Result<Refreshed>) {
+        self.refreshing.remove(&number);
+        self.status = Some(match outcome {
+            Ok(Refreshed::Updated { queued, .. }) => format!(
+                "#{number} refreshed — {}",
+                if queued {
+                    "wants attention"
+                } else {
+                    "wants nothing"
+                }
+            ),
+            Ok(Refreshed::Gone) => format!("#{number} no longer exists on the forge"),
+            Ok(Refreshed::Untracked) => format!("#{number} is not in the ledger"),
+            Err(err) => format!("#{number} refresh failed: {err:#}"),
+        });
+        // It may have changed what is on the queue, and changes the selected
+        // PR's detail either way.
+        if let Err(err) = self.reload() {
+            self.status = Some(format!("reload failed: {err:#}"));
+        }
     }
 
     /// Swap which pane the movement keys drive. Focusing the queue leaves the
@@ -333,6 +471,12 @@ impl App {
         self.move_to(target)
     }
 
+    /// Take in a refresh result without a runtime, for tests.
+    #[cfg(test)]
+    fn deliver(&mut self, number: u64, outcome: Result<Refreshed>) {
+        self.on_refreshed(number, outcome);
+    }
+
     fn move_to(&mut self, index: usize) -> Result<()> {
         if self.queue.is_empty() || index == self.selected {
             return Ok(());
@@ -342,5 +486,319 @@ impl App {
         // it halfway down.
         self.detail_scroll = 0;
         self.load_detail()
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use jiff::Timestamp;
+    use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot, PrState};
+    use reviewq_ledger::TrackedReason;
+
+    fn ts(s: &str) -> Timestamp {
+        s.parse().expect("timestamp")
+    }
+
+    /// One queued PR, enough to have something selected.
+    pub(super) fn fixture() -> Ledger {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo = reviewq_ledger::RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "airflow".into(),
+        };
+        let repo_id = ledger.ensure_repo(&repo).expect("repo");
+        let now = ts("2026-08-11T12:00:00Z");
+        let pr = PrSnapshot {
+            number: 70135,
+            title: "Add deferrable mode".into(),
+            author: "potiuk".into(),
+            author_association: "MEMBER".into(),
+            head_sha: "abc1234".into(),
+            is_draft: false,
+            state: PrState::Open,
+            updated_at: ts("2026-08-11T09:00:00Z"),
+            labels: vec![],
+            milestone: None,
+            files: None,
+            files_truncated: false,
+        };
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr,
+                Some(TrackedReason::Interest("label x".into())),
+                now,
+            )
+            .expect("upsert");
+        ledger
+            .commit_detail(
+                repo_id,
+                70135,
+                &MyState::default(),
+                &[],
+                &[],
+                &[Attention {
+                    reason: AttentionReason::Mention { by: "kaxil".into() },
+                    since: ts("2026-08-11T09:00:00Z"),
+                }],
+                None,
+                now,
+            )
+            .expect("detail");
+        ledger
+    }
+
+    pub(super) fn app() -> App {
+        App::with_ledger(Theme::default(), fixture()).expect("app")
+    }
+
+    #[test]
+    fn a_refresh_is_only_started_once_per_pr() {
+        let mut app = app();
+        assert_eq!(app.refresh_target(), Some(70135), "first press starts one");
+        assert_eq!(
+            app.refresh_target(),
+            None,
+            "a second press on the same PR must not fetch it twice"
+        );
+        assert_eq!(app.refreshing.len(), 1);
+    }
+
+    #[test]
+    fn nothing_selected_means_nothing_to_refresh() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let mut empty = App::with_ledger(Theme::default(), ledger).expect("app");
+        assert_eq!(empty.refresh_target(), None);
+        assert!(empty.refreshing.is_empty());
+    }
+
+    #[test]
+    fn a_finished_refresh_clears_its_in_flight_mark_and_reports() {
+        let mut app = app();
+        assert_eq!(app.refresh_target(), Some(70135));
+
+        app.deliver(
+            70135,
+            Ok(Refreshed::Updated {
+                repo: "apache/airflow".into(),
+                queued: true,
+                cost: 1,
+                remaining: 4999,
+            }),
+        );
+
+        assert!(app.refreshing.is_empty());
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 refreshed"), "{status}");
+        assert!(status.contains("wants attention"), "{status}");
+    }
+
+    #[test]
+    fn a_failed_refresh_reports_without_ending_the_session() {
+        let mut app = app();
+        assert_eq!(app.refresh_target(), Some(70135));
+
+        app.deliver(70135, Err(anyhow::anyhow!("bad credentials")));
+
+        assert!(app.refreshing.is_empty(), "a failure still clears the mark");
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("refresh failed"), "{status}");
+        assert!(status.contains("bad credentials"), "{status}");
+        // The queue survives: a bad token must not discard what you were reading.
+        assert!(!app.quit);
+        assert_eq!(app.queue.len(), 1);
+        assert!(app.detail.is_some());
+    }
+
+    #[test]
+    fn a_pr_the_forge_lost_is_reported_as_such() {
+        let mut app = app();
+        assert_eq!(app.refresh_target(), Some(70135));
+        app.deliver(70135, Ok(Refreshed::Gone));
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("no longer exists"), "{status}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_loop_wakes_for_a_task_result_as_well_as_for_input() {
+        // The point of one channel: a refresh landing is as good a reason to
+        // wake and redraw as a keystroke. Proven by driving both through it.
+        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        let sender = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = sender.send(Message::Refreshed {
+                number: 70135,
+                outcome: Ok(Refreshed::Gone),
+            });
+        })
+        .await
+        .expect("task");
+
+        match rx.recv().await {
+            Some(Message::Refreshed { number, outcome }) => {
+                assert_eq!(number, 70135);
+                assert_eq!(outcome.expect("outcome"), Refreshed::Gone);
+            }
+            other => panic!("expected a refresh result, got {:?}", other.is_some()),
+        }
+    }
+}
+
+/// Driving the real loop: scripted messages in, a `TestBackend` to draw on, and
+/// a fake refresh hook. No terminal, no forge, no sleeps — the same shape wiff
+/// uses, which is what having the channel and the hooks handed in buys.
+#[cfg(test)]
+mod loop_tests {
+    use super::tests::{app, fixture};
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use std::sync::{Arc, Mutex};
+
+    fn press(code: char) -> Message {
+        Message::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char(code),
+            KeyModifiers::NONE,
+        )))
+    }
+
+    /// Hooks whose refresh records what it was asked for and answers at once,
+    /// so the loop sees a result without anything async happening.
+    ///
+    /// `then_quit` makes it queue a `q` behind the answer. Needed because the
+    /// loop stops the moment it reads a quit: a `q` scripted ahead of a refresh
+    /// result means the loop exits before taking that result in — correct, since
+    /// it is leaving anyway, but not what a test of the result wants.
+    fn answering_hooks(answer: Refreshed, then_quit: bool) -> (Hooks, Arc<Mutex<Vec<u64>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let hooks = Hooks {
+            refresh: Box::new(move |number, tx| {
+                seen.lock().expect("lock").push(number);
+                let _ = tx.send(Message::Refreshed {
+                    number,
+                    outcome: Ok(answer.clone()),
+                });
+                if then_quit {
+                    let _ = tx.send(press('q'));
+                }
+            }),
+        };
+        (hooks, asked)
+    }
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_quit_key_ends_the_loop_after_one_frame() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+        let mut app = app();
+        let mut channel = Channel::silent();
+        channel.tx.send(press('q')).expect("send");
+        let (hooks, _) = answering_hooks(Refreshed::Gone, false);
+
+        app.run(&mut terminal, &mut channel, &hooks)
+            .await
+            .expect("loop");
+
+        assert!(app.quit);
+        // It drew before waiting, so the opening frame is on screen.
+        assert!(screen(&terminal).contains("on the queue"));
+    }
+
+    #[tokio::test]
+    async fn the_loop_ends_when_nothing_can_arrive_any_more() {
+        // No input reader and no task holds a sender, so the channel closes as
+        // soon as the loop's own clone is the last one. Waiting again would hang.
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).expect("terminal");
+        let mut app = app();
+        let (hooks, _) = answering_hooks(Refreshed::Gone, false);
+        let mut channel = Channel::silent();
+        drop(std::mem::replace(
+            &mut channel.tx,
+            mpsc::unbounded_channel().0,
+        ));
+
+        app.run(&mut terminal, &mut channel, &hooks)
+            .await
+            .expect("loop");
+        assert!(
+            !app.quit,
+            "it ended because the channel did, not by quitting"
+        );
+    }
+
+    #[tokio::test]
+    async fn r_asks_the_hook_and_the_answer_reaches_the_screen() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
+        let mut app = app();
+        let mut channel = Channel::silent();
+        let (hooks, asked) = answering_hooks(
+            Refreshed::Updated {
+                repo: "apache/airflow".into(),
+                queued: false,
+                cost: 1,
+                remaining: 4999,
+            },
+            true,
+        );
+
+        // `r` reaches the hook, which answers and then queues the quit behind
+        // its answer, so the loop takes the result in before leaving.
+        channel.tx.send(press('r')).expect("send");
+        app.run(&mut terminal, &mut channel, &hooks)
+            .await
+            .expect("loop");
+
+        assert_eq!(
+            *asked.lock().expect("lock"),
+            vec![70135],
+            "the hook was asked"
+        );
+        assert!(app.refreshing.is_empty(), "and the result cleared the mark");
+        // The result was taken in and drawn, which is the whole path: key →
+        // action → hook → message → state → frame.
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 refreshed"), "{status}");
+        assert!(
+            screen(&terminal).contains("wants nothing"),
+            "{}",
+            screen(&terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn keys_move_the_selection_through_the_real_loop() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
+        let mut app = App::with_ledger(Theme::default(), fixture()).expect("app");
+        let mut channel = Channel::silent();
+        let (hooks, _) = answering_hooks(Refreshed::Gone, false);
+
+        for key in ['?', ' ', 'q'] {
+            channel.tx.send(press(key)).expect("send");
+        }
+        app.run(&mut terminal, &mut channel, &hooks)
+            .await
+            .expect("loop");
+
+        // `?` opened the reference and the space closed it again, so what is left
+        // on screen is the panes — proving both halves of the toggle ran.
+        assert!(!app.help);
+        assert!(app.quit);
     }
 }
