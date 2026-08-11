@@ -311,6 +311,11 @@ pub enum Unqueued {
     /// Tracked, but merged or closed: it left the queue and no listing brings it
     /// back.
     Archived(PrState),
+    /// Muted: off the queue because you put it there, and the only one of these
+    /// you can undo from here.
+    Muted,
+    /// Snoozed until a moment that has not arrived.
+    Snoozed(Timestamp),
     /// Tracked and open, and simply wants nothing right now.
     Quiet,
 }
@@ -320,6 +325,16 @@ impl Unqueued {
     /// queue for a reason tracking it again would not touch.
     pub fn trackable(self) -> bool {
         matches!(self, Self::Unknown | Self::Untracked)
+    }
+
+    /// Whether unmuting it is worth offering — which is to say, whether it is
+    /// muted.
+    ///
+    /// Muting is the one way off the queue you choose, and it takes the PR out
+    /// of the list you would have selected it in to change your mind. So the
+    /// undo lives where you land when you ask for it by number.
+    pub fn unmutable(self) -> bool {
+        matches!(self, Self::Muted)
     }
 
     /// The one line explaining why it isn't on the queue.
@@ -334,6 +349,10 @@ impl Unqueued {
                     _ => "was closed",
                 }
             ),
+            Self::Muted => "Muted, so nothing on it reaches the queue.".to_string(),
+            Self::Snoozed(until) => {
+                format!("Snoozed until {}.", reviewq_app::present::stamp(until))
+            }
             Self::Quiet => "Tracked, and wants nothing right now.".to_string(),
         }
     }
@@ -1106,6 +1125,10 @@ impl App {
                         self.overlay = Overlay::Fetching { number };
                         self.pending_fetch = Some(number);
                     }
+                    KeyCode::Char('u') if why.unmutable() => {
+                        self.overlay = Overlay::None;
+                        self.unmute(number)?;
+                    }
                     _ => self.overlay = Overlay::None,
                 }
                 Ok(())
@@ -1259,7 +1282,7 @@ impl App {
 
         self.overlay = Overlay::Unqueued {
             number,
-            why: self.why_unqueued(number)?,
+            why: self.why_unqueued(number, Timestamp::now())?,
         };
         Ok(())
     }
@@ -1279,13 +1302,25 @@ impl App {
     }
 
     /// Why a PR that isn't on the queue isn't, as far as the ledger knows.
-    fn why_unqueued(&self, number: u64) -> Result<Unqueued> {
+    ///
+    /// `now` decides only whether a snooze has lapsed: one that has is not a
+    /// reason for anything, and saying so would send you looking for a
+    /// suppression that expired.
+    fn why_unqueued(&self, number: u64, now: Timestamp) -> Result<Unqueued> {
         for (repo_id, _) in self.ledger.repos()? {
             let Some(show) = self.ledger.show(repo_id, number)? else {
                 continue;
             };
+            // In the order that decides what to say: what you did to it outranks
+            // what became of it, because it is the part you can change your mind
+            // about — and "wants nothing right now" is a poor answer to "where
+            // is the PR I muted?".
             return Ok(if show.tracked_reason.is_none() {
                 Unqueued::Untracked
+            } else if show.my_state.muted {
+                Unqueued::Muted
+            } else if let Some(until) = show.my_state.snoozed_until.filter(|&until| now < until) {
+                Unqueued::Snoozed(until)
             } else if !show.pr.state.is_open() {
                 Unqueued::Archived(show.pr.state)
             } else {
@@ -1303,6 +1338,26 @@ impl App {
         };
         let until = reviewq_app::actions::snooze(&self.ledger, repo_id, number, until)?;
         self.status = Some(format!("#{number} snoozed until {until}"));
+        self.reload()
+    }
+
+    /// Unmute a PR that isn't on the queue, found by number.
+    ///
+    /// Unlike [`toggle_mute`](Self::toggle_mute) this takes a number rather than
+    /// the selection, because a muted PR is precisely one the selection cannot
+    /// reach.
+    fn unmute(&mut self, number: u64) -> Result<()> {
+        let Some((repo_id, _)) = self.ledger.repos()?.into_iter().find(|(repo_id, _)| {
+            self.ledger
+                .show(*repo_id, number)
+                .is_ok_and(|show| show.is_some())
+        }) else {
+            return Ok(());
+        };
+        reviewq_app::actions::set_muted(&self.ledger, repo_id, number, false)?;
+        self.status = Some(format!(
+            "#{number} unmuted — its reasons return on the next sync"
+        ));
         self.reload()
     }
 
@@ -2634,9 +2689,10 @@ mod loop_tests {
     }
 
     #[test]
-    fn going_to_a_tracked_pr_that_is_merely_quiet_says_so() {
-        // The number is right and the PR is tracked; it is muted, so it wants
-        // nothing. Worth telling apart from an untracked PR, which is offered.
+    fn going_to_a_muted_pr_says_it_is_muted_rather_than_quiet() {
+        // "Tracked, and wants nothing right now" is true of a muted PR and no
+        // use at all: you silenced it, and what you came to find out is where it
+        // went and how to get it back.
         let ledger = two_queued();
         let repo_id = ledger.repos().expect("repos")[0].0;
         reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
@@ -2661,8 +2717,76 @@ mod loop_tests {
             app.overlay,
             Overlay::Unqueued {
                 number: 70201,
-                why: Unqueued::Quiet
+                why: Unqueued::Muted
             }
+        );
+    }
+
+    #[test]
+    fn a_muted_pr_can_be_unmuted_from_the_offer() {
+        // The only way back: muting takes the PR out of the list you would have
+        // selected it in to press `m` again, so without this it is a one-way
+        // door from inside the interface.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('7'),
+                KeyCode::Char('0'),
+                KeyCode::Char('2'),
+                KeyCode::Char('0'),
+                KeyCode::Char('1'),
+                KeyCode::Enter,
+                KeyCode::Char('u'),
+            ],
+        );
+
+        assert_eq!(app.overlay, Overlay::None);
+        let repo_id = app.ledger.repos().expect("repos")[0].0;
+        assert!(!app.ledger.my_state(repo_id, 70201).expect("state").muted);
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("unmuted"), "{status}");
+    }
+
+    #[test]
+    fn a_snoozed_pr_says_when_it_comes_back() {
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let until = ts("2099-01-01T00:00:00Z");
+        reviewq_app::actions::snooze(&ledger, repo_id, 70201, until).expect("snooze");
+        let app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let why = app
+            .why_unqueued(70201, ts("2026-08-12T09:00:00Z"))
+            .expect("why");
+
+        assert_eq!(why, Unqueued::Snoozed(until));
+        assert!(why.reason().contains("2099-01-01"), "{}", why.reason());
+        assert!(!why.unmutable(), "a snooze is not undone from here");
+    }
+
+    #[test]
+    fn a_snooze_that_has_lapsed_is_not_a_reason_for_anything() {
+        // It is off the queue until the next sync recomputes it, which is
+        // "quiet" — pointing at a suppression that has expired would send you
+        // looking for something to undo that is already undone.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::snooze(&ledger, repo_id, 70201, ts("2026-08-12T08:00:00Z"))
+            .expect("snooze");
+        let app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        assert_eq!(
+            app.why_unqueued(70201, ts("2026-08-12T09:00:00Z"))
+                .expect("why"),
+            Unqueued::Quiet
         );
     }
 

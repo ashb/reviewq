@@ -688,6 +688,13 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
                 )));
                 hints.push(("t", "track it"));
             }
+            if why.unmutable() {
+                lines.push(Line::from(Span::styled(
+                    "Unmuting lets it back on, with whatever the next sync finds.",
+                    Style::default().fg(color(t.dim)),
+                )));
+                hints.push(("u", "unmute it"));
+            }
             hints.push(("any other key", "cancel"));
             lines.push(Line::from(""));
             lines.push(keyed_hint(&hints, t));
