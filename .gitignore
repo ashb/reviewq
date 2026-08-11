@@ -1,1 +1,7 @@
 /target
+
+# F12 saves the screen beside you, which is the working directory — so a
+# screenshot taken while working in the repo lands here and is nobody's to
+# commit. The documentation's own pictures are in docs/imgs, drawn by `just
+# docs`, and are not these.
+/reviewq-*.svg
