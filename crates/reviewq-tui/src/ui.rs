@@ -499,16 +499,19 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
             &format!(" #{number} "),
             vec![
                 Line::from(Span::styled(
-                    "Not in your ledger. Fetch it now?",
+                    "Not tracked. Track it now?",
                     Style::default().fg(color(t.text)),
                 )),
                 Line::from(""),
+                // Deliberately not "not in your ledger": most of these *are*
+                // stored, swept and left untracked because no rule matched, and
+                // tracking one of those needs no forge at all.
                 Line::from(Span::styled(
-                    "It will be tracked from then on, as `reviewq track` would.",
+                    "Fetched first if the ledger has never seen it, as `reviewq track` would.",
                     Style::default().fg(color(t.dim)),
                 )),
                 Line::from(""),
-                keyed_hint(&[("y / ⏎", "fetch"), ("any other key", "cancel")], t),
+                keyed_hint(&[("y / ⏎", "track"), ("any other key", "cancel")], t),
             ],
             t,
         ),

@@ -32,6 +32,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
 use reviewq_app::sync::Refreshed;
+use reviewq_core::model::PrState;
 use reviewq_forge::ForgeError;
 use reviewq_ledger::{Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey};
 use std::sync::mpsc;
@@ -274,6 +275,18 @@ pub struct Hooks {
     /// loop cannot do generically: it belongs to the real backend, not to
     /// `TestBackend`.
     pub review: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
+}
+
+/// What the ledger holds for a PR that isn't on the queue.
+///
+/// Stored and tracked are different things: a sweep stores every PR it sees, and
+/// tracks only the ones a rule matched or that name you. There are usually far more
+/// of the former, and they are the ones worth offering to track.
+struct Stored {
+    /// A rule matched it, or an involvement search did.
+    tracked: bool,
+    /// Open, merged or closed — a closed one has left the queue for good.
+    state: PrState,
 }
 
 /// Whether [`App::update`] dealt with an action, or handed it back.
@@ -1017,12 +1030,30 @@ impl App {
             return self.move_to(index);
         }
 
-        if self.is_stored(number)? {
-            bail!("#{number} is tracked but not on the queue — try `list --all`");
+        // Why it isn't on the queue decides what to offer, and the three reasons
+        // want different answers. "Tracked but not on the queue — try `list --all`"
+        // was one message for all of them, and wrong for two: `--all` lists only
+        // *tracked* PRs, so it cannot show an untracked one, and a merged PR left
+        // the queue for a reason no amount of listing changes.
+        match self.stored(number)? {
+            // Never seen, or seen and never tracked. Both are the same offer:
+            // tracking an already-stored PR needs no network, and `track_one`
+            // reaches the forge only if it has to.
+            None | Some(Stored { tracked: false, .. }) => {
+                self.overlay = Overlay::OfferFetch { number };
+                Ok(())
+            }
+            Some(Stored { state, .. }) if !state.is_open() => {
+                bail!(
+                    "#{number} is {} — it left the queue when it closed",
+                    state.as_str().to_lowercase()
+                )
+            }
+            Some(_) => bail!(
+                "#{number} is tracked and wants nothing right now — it may be \
+                 muted, snoozed, or simply quiet"
+            ),
         }
-        // Not a refusal: offer to go and get it.
-        self.overlay = Overlay::OfferFetch { number };
-        Ok(())
     }
 
     /// The PR number `text` names — a bare number, `#number`, or a pasted URL.
@@ -1039,14 +1070,17 @@ impl App {
             .map(|pr| pr.number)
     }
 
-    /// Whether any repo the ledger knows has this PR stored at all.
-    fn is_stored(&self, number: u64) -> Result<bool> {
+    /// What the ledger holds for this PR, if anything.
+    fn stored(&self, number: u64) -> Result<Option<Stored>> {
         for (repo_id, _) in self.ledger.repos()? {
-            if self.ledger.show(repo_id, number)?.is_some() {
-                return Ok(true);
+            if let Some(show) = self.ledger.show(repo_id, number)? {
+                return Ok(Some(Stored {
+                    tracked: show.tracked_reason.is_some(),
+                    state: show.pr.state,
+                }));
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Snooze the PR for a duration in the CLI's syntax.
@@ -1317,7 +1351,7 @@ pub(super) mod tests {
     use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot, PrState};
     use reviewq_ledger::TrackedReason;
 
-    fn ts(s: &str) -> Timestamp {
+    pub(super) fn ts(s: &str) -> Timestamp {
         s.parse().expect("timestamp")
     }
 
@@ -1779,7 +1813,7 @@ fn short(sha: &str) -> &str {
 /// source and fake side effects. No terminal, no forge, no sleeps.
 #[cfg(test)]
 mod loop_tests {
-    use super::tests::{add_queued, app, fixture, seed, two_queued};
+    use super::tests::{add_queued, app, fixture, pr_snapshot, seed, ts, two_queued};
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
@@ -2308,10 +2342,9 @@ mod loop_tests {
     }
 
     #[test]
-    fn going_to_a_pr_that_is_tracked_but_not_queued_says_which() {
-        // Worth distinguishing: the number is right, the PR is simply quiet, and
-        // `list --all` will show it. "Not found" would send you looking for the
-        // wrong problem.
+    fn going_to_a_tracked_pr_that_is_merely_quiet_says_so() {
+        // The number is right and the PR is tracked; it is muted, so it wants
+        // nothing. Worth telling apart from an untracked PR, which is offered.
         let ledger = two_queued();
         let repo_id = ledger.repos().expect("repos")[0].0;
         reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
@@ -2336,8 +2369,84 @@ mod loop_tests {
             Overlay::JumpPrompt { input, error } => {
                 assert_eq!(input, "70201", "what was typed survives");
                 let error = error.clone().expect("a reason");
-                assert!(error.contains("not on the queue"), "{error}");
-                assert!(error.contains("list --all"), "{error}");
+                assert!(error.contains("wants nothing right now"), "{error}");
+                assert!(error.contains("muted"), "{error}");
+            }
+            other => panic!("should still be prompting, was {other:?}"),
+        }
+    }
+
+    #[test]
+    fn going_to_a_stored_but_untracked_pr_offers_to_track_it() {
+        // The common case by far — a sweep stores every PR it sees and tracks only
+        // what a rule matched, so most stored PRs are untracked. This used to say
+        // "tracked but not on the queue — try `list --all`", which lists tracked
+        // PRs only, so the advice could not have worked.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut swept = pr_snapshot(70999);
+        swept.labels.clear();
+        ledger
+            .upsert_pr(repo_id, &swept, None, ts("2026-08-11T12:00:00Z"))
+            .expect("stored, untracked");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('7'),
+                KeyCode::Char('0'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(app.overlay, Overlay::OfferFetch { number: 70999 });
+    }
+
+    #[test]
+    fn going_to_a_merged_pr_says_it_left_the_queue() {
+        // Tracked, so no offer helps: it is off the queue because it merged, and
+        // nothing about listing changes that.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut merged = pr_snapshot(70777);
+        merged.state = PrState::Merged;
+        ledger
+            .upsert_pr(
+                repo_id,
+                &merged,
+                Some(reviewq_ledger::TrackedReason::Interest("label x".into())),
+                ts("2026-08-11T12:00:00Z"),
+            )
+            .expect("stored");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('7'),
+                KeyCode::Char('0'),
+                KeyCode::Char('7'),
+                KeyCode::Char('7'),
+                KeyCode::Char('7'),
+                KeyCode::Enter,
+            ],
+        );
+
+        match &app.overlay {
+            Overlay::JumpPrompt { error, .. } => {
+                let error = error.clone().expect("a reason");
+                assert!(error.contains("merged"), "{error}");
+                assert!(!error.contains("list --all"), "{error}");
             }
             other => panic!("should still be prompting, was {other:?}"),
         }
