@@ -381,6 +381,10 @@ pub struct TrackedPr {
     pub tracked_reason: String,
     /// Whether the rule that tracked it keeps it reviewable after it merges.
     pub after_merge: bool,
+    /// My history on it — carried for the same reason a queue row carries it: a
+    /// list wants to say what I have already done to each PR, and a PR that
+    /// wants nothing is very often one I have already been through.
+    pub my_state: MyState,
 }
 
 /// One stored attention reason, as read back from the `attention` table.
@@ -609,8 +613,11 @@ impl Ledger {
             r"
             SELECT number, title, author, author_association, head_sha, is_draft,
                    state, updated_at, labels, milestone, files, files_truncated,
-                   base_ref, tracked_reason, after_merge
+                   base_ref, tracked_reason, after_merge,
+                   last_reviewed_sha, last_verdict, last_action_at, done_sha,
+                   snoozed_until, muted, deferred_at, done_at
             FROM prs
+            LEFT JOIN my_state USING (repo_id, number)
             WHERE repo_id = ?1 AND tracked_reason IS NOT NULL
             ORDER BY number
             ",
@@ -699,7 +706,9 @@ impl Ledger {
         // comparison.
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge FROM prs p
+            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge, {MY_STATE_COLUMNS}
+            FROM prs p
+            LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
             WHERE p.repo_id = ?1 AND p.tracked_reason IS NOT NULL
               AND (p.state = 'OPEN'
                    OR (p.state = 'MERGED' AND (?2 OR p.after_merge = 1)))
@@ -1078,12 +1087,18 @@ impl Ledger {
 
     /// Tracked, open PRs with no attention: seen and understood, waiting on
     /// someone else. Ordered by number.
+    ///
+    /// A muted PR is not one of these however quiet it is. It is off the queue
+    /// because you put it there, not because anybody else has the ball, and
+    /// [`muted`](Self::muted) is where it belongs.
     pub fn waiting(&self, repo_id: i64) -> Result<Vec<TrackedPr>> {
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge
+            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge, {MY_STATE_COLUMNS}
             FROM prs p
+            LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
             WHERE p.repo_id = ?1 AND p.state = 'OPEN' AND p.tracked_reason IS NOT NULL
+              AND COALESCE(ms.muted, 0) = 0
               AND NOT EXISTS (
                 SELECT 1 FROM attention a
                 WHERE a.repo_id = p.repo_id AND a.pr_number = p.number
@@ -1499,6 +1514,7 @@ fn row_to_tracked(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedPr> {
         pr: snapshot_from_row(row, 0)?,
         tracked_reason: row.get(13)?,
         after_merge: row.get::<_, i64>(14)? != 0,
+        my_state: my_state_from_row(row, 15)?,
     })
 }
 

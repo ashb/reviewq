@@ -48,6 +48,8 @@ pub enum Action {
     ToggleDefer,
     /// Swap the list between the queue and what has been muted.
     ShowMuted,
+    /// Swap the list between the queue and what is waiting on somebody else.
+    ShowWaiting,
     /// Show or hide the key reference.
     Help,
     /// Save what is on screen as an SVG.
@@ -189,6 +191,15 @@ pub const BINDINGS: &[Binding] = &[
         chords: &[key(KeyCode::Char('t'))],
         keys: "t",
         what: "adapt for a light or dark terminal",
+        group: "View",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        action: Action::ShowWaiting,
+        chords: &[key(KeyCode::Char('W'))],
+        keys: "W",
+        what: "show what waits on someone else, or go back",
         group: "View",
         footer: false,
         hidden: false,

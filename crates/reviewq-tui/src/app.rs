@@ -33,9 +33,11 @@ use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
 use reviewq_app::peek::Peeked;
 use reviewq_app::sync::Refreshed;
-use reviewq_core::model::PrState;
+use reviewq_core::model::{MyState, PrSnapshot, PrState};
 use reviewq_forge::ForgeError;
-use reviewq_ledger::{Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey};
+use reviewq_ledger::{
+    AttentionRow, Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey, TrackedPr,
+};
 use std::sync::mpsc;
 
 #[cfg(test)]
@@ -119,10 +121,14 @@ pub struct App {
     /// The palette, resolved once at startup.
     pub theme: Theme,
     /// The rows on the left, most-urgent first, spanning every repo the ledger
-    /// knows — the queue, or what has been muted (see [`listing`](Self::listing)).
-    pub queue: Vec<Located<QueueItem>>,
-    /// Which of the two the rows are.
+    /// knows — which of the three lists they are is [`listing`](Self::listing).
+    pub queue: Vec<Located<Row>>,
+    /// Which of the three lists the rows are.
     pub listing: Listing,
+    /// How much is on the lists that are not showing. Held rather than counted
+    /// at render time: it takes two ledger reads, and a list you are not looking
+    /// at only changes when something you did changed it.
+    pub elsewhere: Counts,
     /// Index into [`queue`](Self::queue) of the highlighted row. Always a valid
     /// index when the queue is non-empty; meaningless when it's empty.
     pub selected: usize,
@@ -482,6 +488,92 @@ pub enum Message {
 /// and enough to see what's coming without the list moving under every keypress.
 const SCROLLOFF: usize = 3;
 
+/// Re-wrap a ledger read as rows, keeping each one's repo.
+fn located<T: Into<Row>>(items: Vec<Located<T>>) -> Vec<Located<Row>> {
+    items
+        .into_iter()
+        .map(|found| Located {
+            repo: found.repo,
+            repo_id: found.repo_id,
+            item: found.item.into(),
+        })
+        .collect()
+}
+
+/// One row of whichever list is on screen.
+///
+/// The three listings differ in one thing: a queued PR has a reason at the top
+/// of its pile and a waiting one has none — that *is* what waiting means. So the
+/// reason is the only optional part, and everything else a row shows is the same
+/// for all three.
+#[derive(Debug, Clone)]
+pub struct Row {
+    /// The stored snapshot.
+    pub pr: PrSnapshot,
+    /// The rendered `tracked_reason` — why reviewq is watching it at all.
+    pub tracked_reason: String,
+    /// The reason it wants attention, when it wants any.
+    pub top: Option<AttentionRow>,
+    /// My history on it, for the mark in front of the row.
+    pub my_state: MyState,
+    /// Sunk to the bottom by `reviewq defer`.
+    pub deferred: bool,
+}
+
+impl Row {
+    /// What the row says it is here for: the reason at the top of its pile, or —
+    /// for one that wants nothing — the rule that has reviewq watching it.
+    pub fn top_text(&self) -> String {
+        match &self.top {
+            Some(top) => top.reason.to_string(),
+            None => self.tracked_reason.clone(),
+        }
+    }
+
+    /// How urgent it is, for ordering and colour. A row with no reason sorts
+    /// after every row that has one.
+    pub fn priority(&self) -> u8 {
+        self.top.as_ref().map_or(u8::MAX, AttentionRow::priority)
+    }
+}
+
+impl From<QueueItem> for Row {
+    fn from(item: QueueItem) -> Self {
+        Self {
+            pr: item.pr,
+            tracked_reason: item.tracked_reason,
+            top: Some(item.top),
+            my_state: item.my_state,
+            deferred: item.deferred,
+        }
+    }
+}
+
+impl From<TrackedPr> for Row {
+    fn from(item: TrackedPr) -> Self {
+        Self {
+            pr: item.pr,
+            tracked_reason: item.tracked_reason,
+            top: None,
+            my_state: item.my_state,
+            deferred: false,
+        }
+    }
+}
+
+/// How much is on the lists other than the one showing.
+///
+/// A list nobody can see the size of may as well not exist: the point of
+/// counting them where the keys are is that `W` and `M` are worth pressing —
+/// or, when both are zero, that there is nothing behind them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Tracked, open, wanting nothing: waiting on somebody else.
+    pub waiting: usize,
+    /// Silenced by hand.
+    pub muted: usize,
+}
+
 /// Which list the left pane is showing.
 ///
 /// Two views of the same rows: a muted PR keeps its reasons — the mute is a
@@ -492,25 +584,40 @@ pub enum Listing {
     /// Everything that wants attention and isn't muted.
     #[default]
     Queue,
+    /// Tracked, open, and wanting nothing: seen, and waiting on somebody else.
+    /// Where a PR goes when you review it — the ball is in the author's court
+    /// until they push or reply, and then it is back on the queue by itself.
+    Waiting,
     /// Only what is muted.
     Muted,
 }
 
 impl Listing {
-    /// The other one — this is a two-way switch, so a caller that has one always
-    /// wants the other by name rather than by matching.
-    pub fn other(self) -> Self {
-        match self {
-            Self::Queue => Self::Muted,
-            Self::Muted => Self::Queue,
-        }
-    }
-
     /// What the pane is called while it shows this.
     pub fn title(self) -> &'static str {
         match self {
             Self::Queue => "Queue",
+            Self::Waiting => "Waiting",
             Self::Muted => "Muted",
+        }
+    }
+
+    /// What to say when it holds nothing.
+    pub fn empty(self) -> &'static str {
+        match self {
+            Self::Queue => "Nothing on the queue.",
+            Self::Waiting => "Nothing waiting on anyone else.",
+            Self::Muted => "Nothing muted.",
+        }
+    }
+
+    /// Toggle to `listing`, or back to the queue if that is already what is
+    /// showing — so the key that opened a list is the key that closes it.
+    pub fn toggled(self, listing: Self) -> Self {
+        if self == listing {
+            Self::Queue
+        } else {
+            listing
         }
     }
 }
@@ -542,6 +649,7 @@ impl App {
             theme,
             queue: Vec::new(),
             listing: Listing::default(),
+            elsewhere: Counts::default(),
             selected: 0,
             detail: None,
             peek: None,
@@ -594,6 +702,10 @@ impl App {
             })
             .unwrap_or(self.selected)
             .min(self.queue.len().saturating_sub(1));
+        self.elsewhere = Counts {
+            waiting: self.ledger.waiting_all()?.len(),
+            muted: self.ledger.muted_all()?.len(),
+        };
         // A list that has emptied under the keyboard takes it back. Submitting a
         // review clears the reason the PR was there for, so the refresh after a
         // handoff can empty the queue while the description pane holds the
@@ -606,29 +718,41 @@ impl App {
         self.load_detail()
     }
 
-    /// Show the muted list, for a caller arranging a screen rather than pressing
-    /// a key.
+    /// Show one of the other lists, for a caller arranging a screen rather than
+    /// pressing a key.
     #[cfg(test)]
     pub(crate) fn show_muted(&mut self) {
-        self.listing = Listing::Muted;
-        self.reload().expect("reading the muted list");
+        self.show(Listing::Muted);
+    }
+
+    /// Show what is waiting on somebody else.
+    #[cfg(test)]
+    pub(crate) fn show_waiting(&mut self) {
+        self.show(Listing::Waiting);
+    }
+
+    #[cfg(test)]
+    fn show(&mut self, listing: Listing) {
+        self.listing = listing;
+        self.reload().expect("reading the list");
     }
 
     /// The rows one of the two listings holds, straight from the ledger.
-    fn rows_for(&self, listing: Listing) -> Result<Vec<Located<QueueItem>>> {
-        Ok(match listing {
-            Listing::Queue => self.ledger.queue_all()?,
-            Listing::Muted => self.ledger.muted_all()?,
-        })
+    fn rows_for(&self, listing: Listing) -> Result<Vec<Located<Row>>> {
+        let rows = match listing {
+            Listing::Queue => located(self.ledger.queue_all()?),
+            Listing::Muted => located(self.ledger.muted_all()?),
+            Listing::Waiting => located(self.ledger.waiting_all()?),
+        };
+        Ok(rows)
     }
 
-    /// Swap between the queue and what has been muted.
+    /// Swap the list for `listing`, or back to the queue if it is already up.
     ///
-    /// Back to the top rather than keeping the row: the two lists have nothing
-    /// in common by construction — a PR is on exactly one of them — so a kept
-    /// index would land on an unrelated PR.
-    fn toggle_listing(&mut self) -> Result<()> {
-        self.listing = self.listing.other();
+    /// Back to the top rather than keeping the row: no PR is on two of these at
+    /// once, so a kept index would land on an unrelated one.
+    fn toggle_listing(&mut self, listing: Listing) -> Result<()> {
+        self.listing = self.listing.toggled(listing);
         self.selected = 0;
         self.queue_scroll = 0;
         self.detail_scroll = 0;
@@ -648,7 +772,7 @@ impl App {
     }
 
     /// The highlighted queue row, or `None` when the queue is empty.
-    pub fn current(&self) -> Option<&Located<QueueItem>> {
+    pub fn current(&self) -> Option<&Located<Row>> {
         self.queue.get(self.selected)
     }
 
@@ -920,6 +1044,7 @@ impl App {
                 | Action::ToggleTheme
                 | Action::SaveSvg
                 | Action::ShowMuted
+                | Action::ShowWaiting
                 | Action::Down
                 | Action::Up
                 | Action::PageDown
@@ -999,7 +1124,8 @@ impl App {
             }
             // Swapping lists is reading, not writing, so it works from here —
             // and the shown PR stays shown, since the list is behind it.
-            Action::ShowMuted => self.toggle_listing(),
+            Action::ShowMuted => self.toggle_listing(Listing::Muted),
+            Action::ShowWaiting => self.toggle_listing(Listing::Waiting),
             Action::Jump
             | Action::SwitchPane
             | Action::RefreshSelected
@@ -1356,20 +1482,26 @@ impl App {
             return self.move_to(index);
         }
 
-        // It may be on the list you are not looking at, which is a place to be
-        // taken rather than a reason to be refused — asking for a PR by number
-        // says nothing about which of the two views you had up.
-        let elsewhere = self.listing.other();
-        if let Some(index) = self
-            .rows_for(elsewhere)?
-            .iter()
-            .position(|item| item.item.pr.number == number)
-        {
+        // It may be on one of the lists you are not looking at, which is a place
+        // to be taken rather than a reason to be refused — asking for a PR by
+        // number says nothing about which view you happened to have up.
+        for elsewhere in [Listing::Queue, Listing::Waiting, Listing::Muted] {
+            if elsewhere == self.listing {
+                continue;
+            }
+            let Some(index) = self
+                .rows_for(elsewhere)?
+                .iter()
+                .position(|item| item.item.pr.number == number)
+            else {
+                continue;
+            };
             self.listing = elsewhere;
             self.reload()?;
             self.status = Some(match elsewhere {
-                Listing::Muted => format!("#{number} is muted — `m` unmutes it"),
                 Listing::Queue => format!("#{number} is on the queue"),
+                Listing::Waiting => format!("#{number} is waiting on someone else"),
+                Listing::Muted => format!("#{number} is muted — `m` unmutes it"),
             });
             return self.select(index);
         }
@@ -1523,7 +1655,8 @@ impl App {
                 self.pending_svg = true;
                 Ok(Update::Handled)
             }
-            Action::ShowMuted => handled(self.toggle_listing()),
+            Action::ShowMuted => handled(self.toggle_listing(Listing::Muted)),
+            Action::ShowWaiting => handled(self.toggle_listing(Listing::Waiting)),
             Action::Down => handled(self.scroll(1)),
             Action::Up => handled(self.scroll(-1)),
             Action::PageDown => handled(self.scroll(page)),
@@ -2854,6 +2987,68 @@ mod loop_tests {
             Focus::Queue,
             "so the keyboard belongs back on the list, not on a blank description"
         );
+    }
+
+    #[test]
+    fn a_reviewed_pr_is_findable_under_w_rather_than_gone() {
+        // Where a PR goes when you review it: off the queue, because the ball is
+        // in the author's court — and onto the list of what you are waiting on,
+        // which is the part that used to exist only on the CLI.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        add_queued(&ledger, repo_id, 70135);
+        add_queued(&ledger, repo_id, 70201);
+        // The shape a submitted review leaves behind: the reason it was queued
+        // for has gone, the review itself is on the record.
+        ledger.clear_attention(repo_id, 70135).expect("reviewed");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|item| item.item.pr.number)
+                .collect::<Vec<_>>(),
+            vec![70201],
+            "the queue is what still wants something"
+        );
+
+        feed(&mut app, &hooks, &[KeyCode::Char('W')]);
+
+        assert_eq!(app.listing, Listing::Waiting);
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|item| item.item.pr.number)
+                .collect::<Vec<_>>(),
+            vec![70135],
+            "and it is here, not gone"
+        );
+        assert!(
+            app.queue[0].item.top.is_none(),
+            "with no reason, which is what waiting means"
+        );
+
+        // The same key puts it away again.
+        feed(&mut app, &hooks, &[KeyCode::Char('W')]);
+        assert_eq!(app.listing, Listing::Queue);
+    }
+
+    #[test]
+    fn a_waiting_row_says_why_it_is_watched_since_it_wants_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ledger = Ledger::open(&dir.path().join("reviewq.db")).expect("ledger");
+        let repo_id = seed(&ledger);
+        add_queued(&ledger, repo_id, 70135);
+        ledger.clear_attention(repo_id, 70135).expect("reviewed");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        app.listing = Listing::Waiting;
+        app.reload().expect("reload");
+
+        assert_eq!(app.queue[0].item.top_text(), "involved: manual");
     }
 
     #[test]

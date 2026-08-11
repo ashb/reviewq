@@ -15,9 +15,9 @@ use ratatui::widgets::{
 use reviewq_app::config::Marks;
 use reviewq_app::present::{self, Handled, Mark};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
-use reviewq_ledger::{Located, QueueItem, RepoKey};
+use reviewq_ledger::{Located, RepoKey};
 
-use crate::app::{App, Focus, Listing, Overlay, SNOOZE_PRESETS};
+use crate::app::{App, Focus, Listing, Overlay, Row, SNOOZE_PRESETS};
 use crate::keys::{self, Action};
 use crate::theme::{Theme, color};
 
@@ -121,11 +121,12 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("reviewq", Style::default().fg(color(t.text)).bold()),
         Span::styled("  ", Style::default()),
         Span::styled(
+            // Named rather than all counted the same way: two of these are rows
+            // the queue is deliberately not showing, and a bare count would read
+            // as the queue being that long.
             match app.listing {
                 Listing::Queue => format!("{} on the queue", app.queue.len()),
-                // Named rather than counted the same way: these are rows the
-                // queue is deliberately not showing, and a bare count would read
-                // as the queue being that long.
+                Listing::Waiting => format!("{} waiting on someone else", app.queue.len()),
                 Listing::Muted => format!("{} muted", app.queue.len()),
             },
             Style::default().fg(color(if app.listing == Listing::Queue {
@@ -191,12 +192,9 @@ fn queue_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
     );
     if app.queue.is_empty() {
         frame.render_widget(
-            Paragraph::new(match app.listing {
-                Listing::Queue => "Nothing on the queue.",
-                Listing::Muted => "Nothing muted.",
-            })
-            .style(Style::default().fg(color(t.dim)))
-            .wrap(Wrap { trim: true }),
+            Paragraph::new(app.listing.empty())
+                .style(Style::default().fg(color(t.dim)))
+                .wrap(Wrap { trim: true }),
             inner,
         );
         return inner;
@@ -227,7 +225,7 @@ fn queue_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
 }
 
 fn queue_row(
-    item: &Located<QueueItem>,
+    item: &Located<Row>,
     selected: bool,
     multi: bool,
     marks: &Marks,
@@ -241,9 +239,11 @@ fn queue_row(
     }
     // Deferred and silenced PRs are still listed, so they need to read as
     // set-aside rather than simply less urgent.
-    let reason_colour = if q.deferred {
+    // A row with no reason at the top of its pile says why it is watched at all
+    // instead — quietly, since it is here to be seen rather than acted on.
+    let reason_colour = if q.deferred || q.top.is_none() {
         t.quiet
-    } else if q.top.priority() <= 2 {
+    } else if q.priority() <= 2 {
         t.urgent
     } else {
         t.focus
@@ -258,10 +258,7 @@ fn queue_row(
             Style::default().fg(color(t.dim)),
         ),
         Span::raw("  "),
-        Span::styled(
-            q.top.reason.to_string(),
-            Style::default().fg(color(reason_colour)),
-        ),
+        Span::styled(q.top_text(), Style::default().fg(color(reason_colour))),
     ];
     if !q.pr.state.is_open() {
         spans.push(Span::raw(" "));
@@ -636,7 +633,43 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(color(t.dim)),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let hints = Line::from(spans);
+
+    // The other lists, counted where their keys are. A list nobody can see the
+    // size of may as well not exist — and this is the corner of the screen that
+    // was empty, where the header's right-hand side is spoken for by the status.
+    let counts = elsewhere(app, t);
+    if !counts.spans.is_empty() && hints.width() + 3 + counts.width() <= area.width as usize {
+        frame.render_widget(counts.right_aligned(), area);
+    }
+    frame.render_widget(Paragraph::new(hints), area);
+}
+
+/// `W 4 waiting   M 2 muted`, for the lists that are not showing and are not
+/// empty — a nought is not news, and the one you are looking at counts itself in
+/// the header.
+fn elsewhere(app: &App, t: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (listing, key, count, what) in [
+        (Listing::Waiting, "W", app.elsewhere.waiting, "waiting"),
+        (Listing::Muted, "M", app.elsewhere.muted, "muted"),
+    ] {
+        if count == 0 || app.listing == listing {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::default().fg(color(t.key)).bold(),
+        ));
+        spans.push(Span::styled(
+            format!(" {count} {what} "),
+            Style::default().fg(color(t.quiet)),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// A binding's chord as the footer shows it — terser than the overlay's where
@@ -1711,6 +1744,54 @@ sensor = S3KeySensor(deferrable=True)
             "footer is {} cols: {footer}",
             footer.chars().count()
         );
+    }
+
+    #[test]
+    fn the_footer_counts_the_lists_you_are_not_looking_at() {
+        // A list nobody can see the size of may as well not exist. The count sits
+        // by the key that opens it, so it doubles as the reason to press it.
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let footer = render(&mut app, 100, 24).last().expect("footer").clone();
+
+        assert!(footer.contains("M 1 muted"), "{footer}");
+        assert!(footer.contains("q / Esc quit"), "the keys are still there");
+
+        // The list you are on counts itself in the header, so it is not repeated
+        // down here.
+        app.show_muted();
+        let footer = render(&mut app, 100, 24).last().expect("footer").clone();
+        assert!(!footer.contains("muted"), "{footer}");
+    }
+
+    #[test]
+    fn an_empty_list_is_not_counted_at_all() {
+        // Nought is not news, and a footer that said so for both lists would be
+        // two thirds furniture.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+
+        let footer = render(&mut app, 100, 24).last().expect("footer").clone();
+
+        assert!(!footer.contains("muted"), "{footer}");
+        assert!(!footer.contains("waiting"), "{footer}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_the_keys_and_drops_the_counts() {
+        // The keys are the part you cannot do without; the counts are the part
+        // that has somewhere else to be seen.
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let footer = render(&mut app, 72, 24).last().expect("footer").clone();
+
+        assert!(footer.contains("? / h keys"), "{footer}");
+        assert!(!footer.contains("muted"), "no room, so it goes: {footer}");
     }
 
     #[test]

@@ -66,12 +66,22 @@ Taking the offer fetches it into a scratch view that is never stored, and says s
 
 ![A PR shown read-only, fetched but not tracked](docs/imgs/showing.svg)
 
+`W` shows what you are waiting on: tracked, open, wanting nothing — where a PR
+goes the moment you review it, since the ball is then in the author's court. It
+comes back to the queue by itself when they push (as *"3 new commits since your
+review of 5e14b22"*) or answer in a thread you own.
+
+![What is waiting on someone else, each row saying why it is watched](docs/imgs/waiting.svg)
+
 `M` shows what you have muted. A mute says what you want shown rather than what
 is true of the PR, so the reasons stay computed while it is hidden — which is what
 lets this list say why each one would be on the queue, and what makes `m` put one
 straight back rather than leaving it blank until the next sync.
 
 ![The muted list, each row with the reason a mute is hiding](docs/imgs/muted.svg)
+
+Both lists are counted in the footer beside the key that opens them, so a list
+with something on it says so without being opened.
 
 The palette adapts to a light terminal with `t`, or `[output] theme = "light"`.
 

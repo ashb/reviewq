@@ -68,7 +68,9 @@ struct Fixture {
     muted: bool,
     /// The interest rule or involvement that tracked it.
     tracked: TrackedReason,
-    reason: AttentionReason,
+    /// Why it wants attention — `None` for one that wants none, which is what
+    /// a PR you have reviewed looks like until the author moves.
+    reason: Option<AttentionReason>,
     since: &'static str,
     mine: MyState,
     deferred: bool,
@@ -97,7 +99,7 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: interest("label area:task-sdk"),
-            reason: AttentionReason::Mention { by: "kaxil".into() },
+            reason: Some(AttentionReason::Mention { by: "kaxil".into() }),
             since: "2026-08-12T07:05:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("4b71e08".into()),
@@ -126,10 +128,10 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: interest("label area:Scheduler"),
-            reason: AttentionReason::ThreadReply {
+            reason: Some(AttentionReason::ThreadReply {
                 by: "potiuk".into(),
                 threads: 2,
-            },
+            }),
             since: "2026-08-12T07:55:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("c1d9a77".into()),
@@ -151,10 +153,10 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: interest("path airflow-core/src/airflow/serialization/**"),
-            reason: AttentionReason::ReReview {
+            reason: Some(AttentionReason::ReReview {
                 new_commits: 3,
                 since_sha: "5e14b22".into(),
-            },
+            }),
             since: "2026-08-12T06:30:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("5e14b22".into()),
@@ -176,10 +178,10 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: interest("label area:Scheduler"),
-            reason: AttentionReason::ResolvedUnanswered {
+            reason: Some(AttentionReason::ResolvedUnanswered {
                 by: "jedcunningham".into(),
                 threads: 1,
-            },
+            }),
             since: "2026-08-12T07:20:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("e40b1a9".into()),
@@ -203,11 +205,58 @@ fn fixtures() -> Vec<Fixture> {
             draft: true,
             muted: false,
             tracked: interest("label area:Executors-core"),
-            reason: AttentionReason::Mention {
+            reason: Some(AttentionReason::Mention {
                 by: "o-nikolas".into(),
-            },
+            }),
             since: "2026-08-12T08:55:00Z",
             mine: MyState::default(),
+            deferred: false,
+            body: None,
+            threads: vec![],
+            reviewers: vec![],
+        },
+        // Reviewed, and now the author's turn: no reason, so it is off the queue
+        // and on the waiting list — which is where a PR goes the moment you
+        // review it, rather than nowhere.
+        Fixture {
+            number: 70044,
+            title: "Teach the DAG processor to skip unchanged files",
+            author: "uranusjr",
+            head: "8ae7c31",
+            state: PrState::Open,
+            draft: false,
+            muted: false,
+            tracked: interest("label area:Scheduler"),
+            reason: None,
+            since: "2026-08-11T14:10:00Z",
+            mine: MyState {
+                last_reviewed_sha: Some("8ae7c31".into()),
+                last_verdict: Some(Verdict::ChangesRequested),
+                last_action_at: Some(ts("2026-08-11T14:10:00Z")),
+                ..MyState::default()
+            },
+            deferred: false,
+            body: None,
+            threads: vec![],
+            reviewers: vec![],
+        },
+        Fixture {
+            number: 69914,
+            title: "Drop the legacy SLA callback path",
+            author: "potiuk",
+            head: "24c9f70",
+            state: PrState::Open,
+            draft: false,
+            muted: false,
+            tracked: interest("path airflow-core/src/airflow/models/**"),
+            reason: None,
+            since: "2026-08-10T16:45:00Z",
+            mine: MyState {
+                last_reviewed_sha: Some("24c9f70".into()),
+                last_verdict: Some(Verdict::Approved),
+                last_action_at: Some(ts("2026-08-10T16:45:00Z")),
+                ..MyState::default()
+            },
             deferred: false,
             body: None,
             threads: vec![],
@@ -224,10 +273,10 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: true,
             tracked: interest("label area:Executors-core"),
-            reason: AttentionReason::ThreadReply {
+            reason: Some(AttentionReason::ThreadReply {
                 by: "eladkal".into(),
                 threads: 4,
-            },
+            }),
             since: "2026-08-12T06:05:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("6b1fa02".into()),
@@ -249,9 +298,9 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: TrackedReason::Involved("review_requested".into()),
-            reason: AttentionReason::ReviewRequested {
+            reason: Some(AttentionReason::ReviewRequested {
                 team: Some("apache/airflow-committers".into()),
-            },
+            }),
             since: "2026-08-11T18:05:00Z",
             mine: MyState::default(),
             deferred: false,
@@ -268,9 +317,9 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: interest("author FIRST_TIME_CONTRIBUTOR"),
-            reason: AttentionReason::NeedsFirstLook {
+            reason: Some(AttentionReason::NeedsFirstLook {
                 rule: "author FIRST_TIME_CONTRIBUTOR".into(),
-            },
+            }),
             since: "2026-08-11T12:00:00Z",
             mine: MyState::default(),
             deferred: false,
@@ -287,9 +336,9 @@ fn fixtures() -> Vec<Fixture> {
             draft: false,
             muted: false,
             tracked: interest("label area:Executors-core"),
-            reason: AttentionReason::NeedsFirstLook {
+            reason: Some(AttentionReason::NeedsFirstLook {
                 rule: "label area:Executors-core".into(),
-            },
+            }),
             since: "2026-08-09T10:15:00Z",
             mine: MyState {
                 deferred_at: Some(ts("2026-08-11T09:00:00Z")),
@@ -312,9 +361,9 @@ fn fixtures() -> Vec<Fixture> {
                 rule: "path airflow-core/src/airflow/jobs/**".into(),
                 after_merge: true,
             },
-            reason: AttentionReason::Mention {
+            reason: Some(AttentionReason::Mention {
                 by: "dstandish".into(),
-            },
+            }),
             since: "2026-08-12T08:05:00Z",
             mine: MyState {
                 done_sha: Some("b62ff31".into()),
@@ -396,10 +445,14 @@ fn ledger() -> Ledger {
                 &f.mine,
                 &f.threads,
                 &f.reviewers,
-                &[Attention {
-                    reason: f.reason.clone(),
-                    since: ts(f.since),
-                }],
+                &f.reason
+                    .clone()
+                    .map(|reason| Attention {
+                        reason,
+                        since: ts(f.since),
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>(),
                 f.body,
                 now(),
             )
@@ -490,6 +543,11 @@ const SHOTS: &[Shot] = &[
         name: "muted",
         height: HEIGHT,
         arrange: |app| app.show_muted(),
+    },
+    Shot {
+        name: "waiting",
+        height: HEIGHT,
+        arrange: |app| app.show_waiting(),
     },
 ];
 
@@ -613,11 +671,8 @@ mod tests {
         // What makes the picture worth taking: every urgency band, so the
         // colours and the ordering both have something to say.
         let app = app(Mode::Dark);
-        let bands: std::collections::BTreeSet<u8> = app
-            .queue
-            .iter()
-            .map(|item| item.item.top.priority())
-            .collect();
+        let bands: std::collections::BTreeSet<u8> =
+            app.queue.iter().map(|item| item.item.priority()).collect();
 
         assert_eq!(
             bands.len(),

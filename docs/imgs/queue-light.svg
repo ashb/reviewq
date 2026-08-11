@@ -211,4 +211,8 @@
 <text x="386.4" y="607.5" fill="#737373" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> keys</text>
 <text x="453.6" y="607.5" fill="#735314" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">q / Esc</text>
 <text x="512.4" y="607.5" fill="#737373" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> quit</text>
+<text x="966.0" y="607.5" fill="#735314" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">W</text>
+<text x="974.4" y="607.5" fill="#627990" textLength="92.4" lengthAdjust="spacing" xml:space="preserve"> 2 waiting </text>
+<text x="1092.0" y="607.5" fill="#735314" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">M</text>
+<text x="1100.4" y="607.5" fill="#627990" textLength="75.6" lengthAdjust="spacing" xml:space="preserve"> 1 muted </text>
 </svg>
