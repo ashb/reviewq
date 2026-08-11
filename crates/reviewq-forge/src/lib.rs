@@ -15,10 +15,9 @@ pub mod github;
 pub use host::{
     DEFAULT_HOST, ForgeHost, ForgeTable, Token, TokenSource, resolve_host, resolve_token,
 };
-pub use types::{LabelColour, PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
+pub use types::{FetchedPr, LabelColour, PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
 
 use async_trait::async_trait;
-use reviewq_core::model::PrSnapshot;
 
 /// What can go wrong reaching a forge.
 ///
@@ -97,8 +96,15 @@ pub trait Forge: Send + Sync {
         after: Option<&str>,
     ) -> Result<SweepPage>;
 
-    /// One PR by number. `None` if it no longer exists.
-    async fn fetch_pr(&self, owner: &str, name: &str, number: u64) -> Result<Option<PrSnapshot>>;
+    /// One PR by number, with the colours its repo paints its labels. `None` if
+    /// it no longer exists.
+    ///
+    /// The colours come back here and from the sweep, and from nowhere else: a
+    /// PR reaches the ledger by one of those two roads, and this is the one a
+    /// sweep may never travel — `track` exists precisely for a PR outside the
+    /// sweep's window. The per-PR *refresh* deliberately does not ask, since it
+    /// runs constantly and would relearn what a sweep already knows.
+    async fn fetch_pr(&self, owner: &str, name: &str, number: u64) -> Result<Option<FetchedPr>>;
 
     /// Tier-2 detail for one PR — threads, my review history, mentions — from
     /// the point of view of `login` (the authenticated viewer). `None` if the

@@ -76,7 +76,7 @@ async fn fetched(
     login: &str,
     forge: &dyn reviewq_forge::Forge,
 ) -> Result<Peeked> {
-    let mut pr = forge
+    let fetched = forge
         .fetch_pr(&repo.owner, &repo.name, number)
         .await?
         .with_context(|| format!("{} has no pull request #{number}", repo.slug()))?;
@@ -85,7 +85,11 @@ async fn fetched(
         .await?
         .with_context(|| format!("{} has no pull request #{number}", repo.slug()))?;
 
+    // A peek stores nothing, the colours it saw included: it is a look at a PR,
+    // and the ledger has no row for any of it to belong to.
+    //
     // The detail fetch saw the head more recently than the snapshot did.
+    let mut pr = fetched.pr;
     pr.head_sha = detail.head_sha.clone();
     let my_state = reviewq_core::model::MyState {
         last_reviewed_sha: detail.last_reviewed_sha,

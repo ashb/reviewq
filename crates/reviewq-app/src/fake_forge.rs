@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use jiff::Timestamp;
 use reviewq_core::model::{PrSnapshot, PrState};
-use reviewq_forge::{Forge, ForgeError, PrDetail, RateLimit, Result, SweepPage, Viewer};
+use reviewq_forge::{FetchedPr, Forge, ForgeError, PrDetail, RateLimit, Result, SweepPage, Viewer};
 
 /// Parse a timestamp, for the fixtures below and the tests that build on them.
 pub(crate) fn ts(s: &str) -> Timestamp {
@@ -107,6 +107,8 @@ pub(crate) struct FakeForge {
     /// Per-PR detail. A number absent from here is a PR the forge no longer
     /// has, which is the deleted-PR path.
     details: Mutex<std::collections::HashMap<u64, PrDetail>>,
+    /// The colours a direct fetch reports.
+    fetched_labels: Mutex<Vec<reviewq_forge::LabelColour>>,
     /// Numbers whose detail fetch should fail outright.
     detail_errors: Mutex<std::collections::HashSet<u64>>,
     asked: Mutex<Asked>,
@@ -117,6 +119,7 @@ impl FakeForge {
         Self {
             pages: Mutex::new(pages.into()),
             details: Mutex::new(std::collections::HashMap::new()),
+            fetched_labels: Mutex::new(Vec::new()),
             detail_errors: Mutex::new(std::collections::HashSet::new()),
             asked: Mutex::new(Asked::default()),
         }
@@ -130,7 +133,6 @@ impl FakeForge {
                 number,
                 head_sha: format!("sha{number}"),
                 body: String::new(),
-                labels: Vec::new(),
                 last_reviewed_sha: None,
                 last_verdict: None,
                 last_action_at: None,
@@ -146,17 +148,15 @@ impl FakeForge {
         self
     }
 
-    /// Paint the labels `number`'s detail reports, as the forge does.
-    pub(crate) fn with_detail_labels(self, number: u64, labels: &[(&str, &str)]) -> Self {
-        if let Some(detail) = self.details.lock().expect("lock").get_mut(&number) {
-            detail.labels = labels
-                .iter()
-                .map(|(name, color)| reviewq_forge::LabelColour {
-                    name: (*name).to_string(),
-                    color: (*color).to_string(),
-                })
-                .collect();
-        }
+    /// Paint the labels a direct fetch reports, as the forge does.
+    pub(crate) fn with_fetched_labels(self, labels: &[(&str, &str)]) -> Self {
+        *self.fetched_labels.lock().expect("lock") = labels
+            .iter()
+            .map(|(name, color)| reviewq_forge::LabelColour {
+                name: (*name).to_string(),
+                color: (*color).to_string(),
+            })
+            .collect();
         self
     }
 
@@ -224,8 +224,11 @@ impl Forge for FakeForge {
         })
     }
 
-    async fn fetch_pr(&self, _owner: &str, _name: &str, number: u64) -> Result<Option<PrSnapshot>> {
-        Ok(Some(pr(number, "2026-08-11T09:00:00Z")))
+    async fn fetch_pr(&self, _owner: &str, _name: &str, number: u64) -> Result<Option<FetchedPr>> {
+        Ok(Some(FetchedPr {
+            pr: pr(number, "2026-08-11T09:00:00Z"),
+            labels: self.fetched_labels.lock().expect("lock").clone(),
+        }))
     }
 
     async fn fetch_pr_detail(

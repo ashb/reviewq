@@ -79,6 +79,16 @@ pub struct SweepPage {
     pub remaining: u32,
 }
 
+/// One PR as a direct fetch returns it: the snapshot, and the colours its repo
+/// paints the labels it carries.
+#[derive(Debug, Clone)]
+pub struct FetchedPr {
+    /// The PR itself.
+    pub pr: PrSnapshot,
+    /// The colours for its labels — see [`SweepPage::labels`].
+    pub labels: Vec<LabelColour>,
+}
+
 /// A label as the forge paints it, in one repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelColour {
@@ -106,12 +116,6 @@ pub struct PrDetail {
     /// Fetched here rather than in the sweep because nothing classifies on it —
     /// it exists to be shown, and only a tracked PR is ever shown.
     pub body: String,
-    /// The labels it carries, with the colours this repo paints them.
-    ///
-    /// Also in [`SweepPage`], and needed in both: the sweep is where most PRs
-    /// are seen, but refreshing one PR makes only this query, and a colour it
-    /// could not learn is a label drawn in no colour at all.
-    pub labels: Vec<LabelColour>,
     /// Head SHA as of my most recent review, if I have reviewed.
     pub last_reviewed_sha: Option<String>,
     /// The verdict of that review.

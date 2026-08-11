@@ -115,13 +115,24 @@ pub async fn track(
         });
     }
 
-    let snapshot = forge
+    let fetched = forge
         .fetch_pr(&repo.owner, &repo.name, number)
         .await?
         .with_context(|| format!("{}/{} has no pull request #{number}", repo.owner, repo.name))?;
+    // The colours arrive with it, because a sweep may never come for this one:
+    // tracking is what you do for a PR outside the sweep's window, and it is one
+    // of only two roads a PR takes into the ledger.
+    ledger.set_label_colours(
+        repo_id,
+        &fetched
+            .labels
+            .into_iter()
+            .map(|label| (label.name, label.color))
+            .collect::<Vec<_>>(),
+    )?;
     ledger.upsert_pr(
         repo_id,
-        &snapshot,
+        &fetched.pr,
         Some(reviewq_ledger::TrackedReason::Involved("manual".into())),
         now,
     )?;
@@ -305,6 +316,39 @@ mod tests {
 
         set_deferred(&ledger, repo_id, number, false).unwrap();
         assert!(!ledger.queue(repo_id).unwrap()[0].deferred);
+    }
+
+    #[tokio::test]
+    async fn tracking_an_unknown_pr_learns_its_repo_s_colours() {
+        // The one road into the ledger a sweep may never travel: `track` is what
+        // you reach for when a PR is outside the sweep's window, so the colours
+        // have to arrive with the fetch or not at all.
+        let (ledger, repo_id, _) = queued(mention());
+        let repo = RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: None,
+        };
+        let forge = crate::fake_forge::FakeForge::new(vec![])
+            .with_fetched_labels(&[("area:task-sdk", "0e8a16")]);
+
+        let tracked = track(
+            &ledger,
+            repo_id,
+            &repo,
+            4242,
+            &forge,
+            ts("2026-08-11T12:00:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tracked, Tracked::Fetched);
+        assert_eq!(
+            ledger.label_colours(repo_id).unwrap()["area:task-sdk"],
+            "0e8a16"
+        );
     }
 
     #[test]

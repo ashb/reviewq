@@ -579,18 +579,6 @@ pub async fn refresh_one(
         return Ok(None);
     };
 
-    // The repo's palette, as this PR's labels show it. A refresh makes only this
-    // one query, so without this a PR refreshed rather than swept would draw its
-    // labels in no colour at all.
-    ledger.set_label_colours(
-        repo_id,
-        &detail
-            .labels
-            .iter()
-            .map(|label| (label.name.clone(), label.color.clone()))
-            .collect::<Vec<_>>(),
-    )?;
-
     // Classify against the head the detail fetch saw, not the sweep's: the
     // head can move between the two, and re-review keys on it.
     let mut pr = pr.clone();
@@ -1316,24 +1304,6 @@ mod engine_tests {
         let colours = ledger.label_colours(repo_id).expect("colours");
         assert_eq!(colours["area:task-sdk"], "0e8a16");
         assert_eq!(colours["kind:bug"], "d73a4a");
-    }
-
-    #[tokio::test]
-    async fn refreshing_one_pr_learns_the_colours_the_sweep_would_have() {
-        // A refresh makes only the tier-2 query, so a PR that reaches the ledger
-        // by `r`, `sync N` or `track` used to draw its labels in no colour at
-        // all — the colours arrived with the sweep or not until one ran.
-        let cfg = config("");
-        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
-            .with_detail(1, 4900)
-            .with_detail_labels(1, &[("area:task-sdk", "0e8a16")]);
-
-        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
-
-        assert_eq!(
-            ledger.label_colours(repo_id).expect("colours")["area:task-sdk"],
-            "0e8a16"
-        );
     }
 
     #[tokio::test]
