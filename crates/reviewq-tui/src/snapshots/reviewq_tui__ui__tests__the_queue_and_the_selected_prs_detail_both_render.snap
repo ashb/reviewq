@@ -4,9 +4,12 @@ expression: "rows.join(\"\\n\")"
 ---
 reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
-│ ▸ #70135  @kaxil mentioned you  Add defer ││ Add deferrable mode to S3KeySensor                  │
-│   #70201  matches label area:async  Tidy  ││ OPEN · @potiuk · interest: label area:async         │
+│ ▸   #70135  @kaxil mentioned you  Add def ││ Add deferrable mode to S3KeySensor                  │
+│     #70201  matches label area:async  Tid ││ OPEN · @potiuk · interest: label area:async         │
 │                                           ││ updated 2026-08-10T09:00:00Z · → main               │
+│                                           ││                                                     │
+│                                           ││ You                                                 │
+│                                           ││   you have not looked at it yet                     │
 │                                           ││                                                     │
 │                                           ││ Attention                                           │
 │                                           ││   p1  @kaxil mentioned you                          │
@@ -19,8 +22,5 @@ reviewq  2 on the queue
 │                                           ││ - [x] Tests added                                   │
 │                                           ││ - [ ] Docs updated                                  │
 │                                           ││                                                     │
-│                                           ││ ```python                                           │
-│                                           ││ sensor = S3KeySensor(deferrable=True)               │
-│                                           ││ ```                                                 │
 ╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit

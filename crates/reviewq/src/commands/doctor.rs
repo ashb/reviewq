@@ -235,8 +235,12 @@ fn stored_notes(
     };
 
     let mut lines = vec![
+        // "untracked" alone reads as a state you put a PR in. It isn't: the
+        // sweep asks the forge for every PR updated in its window and stores the
+        // lot, so these are the ones no rule of yours matched and no search of
+        // yours named — the repo's traffic, not your queue's leavings.
         format!(
-            "{} PRs: {} tracked, {} untracked",
+            "{} PRs: {} tracked, {} swept past and never tracked",
             census.total,
             census.tracked,
             census.total - census.tracked
@@ -250,7 +254,7 @@ fn stored_notes(
     // "drop the untracked" policy would take with it.
     if census.mine > 0 {
         lines.push(format!(
-            "{} carry your own done/snooze/mute/defer ({} of them untracked)",
+            "{} carry your own done/snooze/mute/defer ({} of those never tracked)",
             census.mine, census.mine_untracked
         ));
     }
@@ -457,10 +461,14 @@ mod tests {
 
         let notes = stored_notes(Some(&ledger), &key(), &mut problems);
 
-        assert_eq!(notes[0], "2 PRs: 1 tracked, 1 untracked");
+        assert_eq!(notes[0], "2 PRs: 1 tracked, 1 swept past and never tracked");
         assert_eq!(notes[1], "1 open, 1 merged, 0 closed");
         assert!(notes[2].contains("1 carry your own"), "{:?}", notes[2]);
-        assert!(notes[2].contains("1 of them untracked"), "{:?}", notes[2]);
+        assert!(
+            notes[2].contains("1 of those never tracked"),
+            "{:?}",
+            notes[2]
+        );
         assert_eq!(problems, 0, "a full ledger is not a fault");
     }
 

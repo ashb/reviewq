@@ -4,9 +4,10 @@ expression: screen
 ---
 reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
-│ ▸ #70135  @kaxil ╭ Keys ─────────────────────────────────────────────────────╮r                  │
-│   #70201  matches│ Navigate                                                  │area:async         │
-│                  │   ↑↓ / jk     move                                        │main               │
+│ ▸   #70135  @kaxil mentioned you  Add def ││ Add deferrable mode to S3KeySensor                  │
+│     #70201  match╭ Keys ─────────────────────────────────────────────────────╮area:async         │
+│                  │ Navigate                                                  │main               │
+│                  │   ↑↓ / jk     move                                        │                   │
 │                  │   PgDn / ^D   page down                                   │                   │
 │                  │   PgUp / ^U   page up                                     │                   │
 │                  │   g / Home    first                                       │                   │
@@ -14,15 +15,15 @@ reviewq  2 on the queue
 │                  │   :           go to a PR by number                        │                   │
 │                  │                                                           │                   │
 │                  │ View                                                      │                   │
-│                  │   Tab         switch pane                                 │nsor.              │
+│                  │   Tab         switch pane                                 │                   │
 │                  │   t           adapt for a light or dark terminal          │                   │
-│                  │                                                           │                   │
+│                  │                                                           │nsor.              │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
 │                  │   d           done — handled at this head                 │                   │
-│                  │   z           snooze for a while                          │rue)               │
+│                  │   z           snooze for a while                          │                   │
 │                  │   o           open it in your browser                     │                   │
-│                  │   c / y       copy its URL                                │                   │
+│                  │   c / y       copy its URL                                │rue)               │
 │                  │   m           mute, or unmute                             │                   │
 │                  │   f           defer to the bottom, or restore             │                   │
 │                  │                                                           │                   │
@@ -32,6 +33,11 @@ reviewq  2 on the queue
 │                  │ Session                                                   │                   │
 │                  │   ? / h       keys                                        │                   │
 │                  │   q / Esc     quit                                        │                   │
+│                  │                                                           │                   │
+│                  │ Marks                                                     │                   │
+│                  │   ✓           you reviewed it on the forge                │                   │
+│                  │   ·           you marked it done here                     │                   │
+│                  │   dim         at an earlier head — the PR has moved since │                   │
 │                  │                                                           │                   │
 │                  │ Mouse                                                     │                   │
 │                  │   click       select the row, or focus the pane           │                   │

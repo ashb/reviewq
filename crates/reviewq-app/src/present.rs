@@ -50,6 +50,63 @@ pub fn silenced(my: &MyState) -> Vec<String> {
     bits
 }
 
+/// What I have already done to a PR — the fact a queue wants to show in one
+/// column, so "have I been here before?" is answered by scanning rather than by
+/// selecting each row in turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handled {
+    /// I submitted a review on the forge. GitHub owns this: it survives a fresh
+    /// ledger, and everyone else can see it.
+    Reviewed,
+    /// I marked it done here, and never reviewed it. Local, and mine alone — the
+    /// answer to a mention that needed nothing, or to a PR I read and had no
+    /// comment on.
+    Done,
+}
+
+/// How far I have got with a PR: what I did, and whether it still covers the
+/// head that is there now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark {
+    /// Which of the two marks it is.
+    pub handled: Handled,
+    /// One of my marks names the PR's current head, so what I did still stands.
+    /// False once the PR has moved on, which is most of what reaches the queue
+    /// twice.
+    pub current: bool,
+}
+
+impl Mark {
+    /// The one column a list gives this. A glyph rather than a word because it
+    /// sits in front of every row, and the wording belongs in the pane that has
+    /// room for it.
+    pub fn glyph(self) -> &'static str {
+        match self.handled {
+            Handled::Reviewed => "✓",
+            Handled::Done => "·",
+        }
+    }
+}
+
+/// My standing on `pr`, or `None` if I have never touched it.
+///
+/// A review outranks a `done` when both are there: it is the stronger statement
+/// and the one other people can see. `current` still asks about both, though —
+/// a `done` at today's head means today's head is dealt with, whichever sha I
+/// happened to review.
+pub fn mark(pr: &PrSnapshot, my: &MyState) -> Option<Mark> {
+    let handled = match (&my.last_reviewed_sha, &my.done_sha) {
+        (Some(_), _) => Handled::Reviewed,
+        (None, Some(_)) => Handled::Done,
+        (None, None) => return None,
+    };
+    let at_head = |sha: &Option<String>| sha.as_deref() == Some(pr.head_sha.as_str());
+    Some(Mark {
+        handled,
+        current: at_head(&my.last_reviewed_sha) || at_head(&my.done_sha),
+    })
+}
+
 /// A local `done`, and whether the PR has moved on since.
 pub struct DoneNote {
     /// What to say.
@@ -196,6 +253,64 @@ mod tests {
     #[test]
     fn a_pr_never_acted_on_has_no_history() {
         assert!(done_note(&pr(), &MyState::default()).is_none());
+        assert_eq!(mark(&pr(), &MyState::default()), None);
+    }
+
+    #[test]
+    fn a_review_outranks_a_done_and_either_can_be_the_current_one() {
+        // The two are separate fields with separate owners — a sync writes one,
+        // `reviewq done` the other — so a PR can carry either, or both at
+        // different heads.
+        let reviewed = MyState {
+            last_reviewed_sha: Some("head0000".into()),
+            ..MyState::default()
+        };
+        assert_eq!(
+            mark(&pr(), &reviewed),
+            Some(Mark {
+                handled: Handled::Reviewed,
+                current: true
+            })
+        );
+
+        let done_only = MyState {
+            done_sha: Some("older00".into()),
+            ..MyState::default()
+        };
+        assert_eq!(
+            mark(&pr(), &done_only),
+            Some(Mark {
+                handled: Handled::Done,
+                current: false
+            })
+        );
+
+        // Reviewed an older head, then acknowledged the one that is there now:
+        // the glyph says review, and it is not stale.
+        let both = MyState {
+            last_reviewed_sha: Some("older00".into()),
+            done_sha: Some("head0000".into()),
+            ..MyState::default()
+        };
+        assert_eq!(
+            mark(&pr(), &both),
+            Some(Mark {
+                handled: Handled::Reviewed,
+                current: true
+            })
+        );
+    }
+
+    #[test]
+    fn the_two_marks_do_not_share_a_glyph() {
+        let glyph = |handled| {
+            Mark {
+                handled,
+                current: true,
+            }
+            .glyph()
+        };
+        assert_ne!(glyph(Handled::Reviewed), glyph(Handled::Done));
     }
 
     #[test]

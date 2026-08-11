@@ -10,7 +10,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 use reviewq_app::present;
-use reviewq_core::model::{PrState, Verdict};
+use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
 use reviewq_ledger::{Located, QueueItem, RepoKey};
 
 use crate::app::{App, Focus, Overlay, SNOOZE_PRESETS};
@@ -25,6 +25,16 @@ use crate::theme::{Theme, color};
 const MOUSE_GESTURES: &[(&str, &str)] = &[
     ("click", "select the row, or focus the pane"),
     ("wheel", "scroll what is under the pointer"),
+];
+
+/// What the column in front of each queue row means, for the key reference.
+///
+/// A glyph nobody can look up is a decoration, and these two are worth telling
+/// apart: one is a review everybody can see, the other is a note to yourself.
+const MARKS: &[(&str, &str)] = &[
+    ("✓", "you reviewed it on the forge"),
+    ("·", "you marked it done here"),
+    ("dim", "at an earlier head — the PR has moved since"),
 ];
 
 /// Draw the whole screen: header, the queue beside the detail, footer.
@@ -174,6 +184,7 @@ fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) 
 
     let mut spans = vec![
         Span::styled(marker, Style::default().fg(color(t.focus))),
+        handled_mark(&q.pr, &q.my_state, t),
         Span::styled(
             number_label(multi, &item.repo, q.pr.number),
             Style::default().fg(color(t.dim)),
@@ -193,6 +204,69 @@ fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) 
     }
     spans.push(Span::raw("  "));
     spans.push(Span::styled(q.pr.title.clone(), style));
+    Line::from(spans)
+}
+
+/// The one column in front of a queue row saying what I have already done to the
+/// PR: a review of mine, or my own `done` — dimmed once the PR has moved past the
+/// head that mark names, since what I did no longer covers what is there.
+///
+/// Always two cells wide, marked or not, so the numbers below it still line up.
+/// [`MARKS`] is the legend, and the wording of both lives in `present` because
+/// this is a fact about the PR rather than about this frontend.
+fn handled_mark(pr: &PrSnapshot, my: &MyState, t: &Theme) -> Span<'static> {
+    match present::mark(pr, my) {
+        None => Span::raw("  "),
+        Some(mark) => Span::styled(
+            format!("{} ", mark.glyph()),
+            Style::default().fg(color(if mark.current { t.good } else { t.dim })),
+        ),
+    }
+}
+
+/// My review of this PR, in the words `show` uses for the same line — and, when
+/// I have never touched it, that said outright rather than left as an absence.
+///
+/// The verdict is coloured, which is why the line is assembled here rather than
+/// shared as one string: flattening it would share the wording by throwing the
+/// colour away.
+fn my_standing(pr: &PrSnapshot, my: &MyState, t: &Theme) -> Line<'static> {
+    let Some(sha) = my.last_reviewed_sha.as_deref() else {
+        return Line::from(Span::styled(
+            if my.done_sha.is_some() {
+                "  not reviewed by you"
+            } else {
+                "  you have not looked at it yet"
+            },
+            Style::default().fg(color(t.dim)),
+        ));
+    };
+    let mut spans = vec![Span::styled(
+        format!("  reviewed {} → ", present::short_sha(sha)),
+        Style::default().fg(color(t.dim)),
+    )];
+    match my.last_verdict {
+        Some(verdict) => spans.push(Span::styled(
+            verdict.as_str().to_string(),
+            Style::default().fg(color(verdict_colour(verdict, t))),
+        )),
+        None => spans.push(Span::styled(
+            "no verdict".to_string(),
+            Style::default().fg(color(t.dim)),
+        )),
+    }
+    if let Some(at) = my.last_action_at {
+        spans.push(Span::styled(
+            format!(", at {}", present::stamp(at)),
+            Style::default().fg(color(t.dim)),
+        ));
+    }
+    if sha != pr.head_sha {
+        spans.push(Span::styled(
+            " — the head has moved since",
+            Style::default().fg(color(t.warn)),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -295,10 +369,17 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         )));
     }
 
+    // What I have done to it, under a label, rather than as one more dim line
+    // among the facts about the PR itself. It is the first thing you want on
+    // reaching a row you have seen before, and the queue's mark is only a glyph.
+    lines.push(Line::from(""));
+    lines.push(section("You", t));
+    lines.push(my_standing(pr, &show.my_state, t));
+
     // Wording shared with `show`; only the colour is this frontend's.
     if let Some(note) = present::done_note(pr, &show.my_state) {
         lines.push(Line::from(Span::styled(
-            note.text,
+            format!("  {}", note.text),
             Style::default().fg(color(if note.superseded { t.warn } else { t.dim })),
         )));
     }
@@ -771,6 +852,12 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, t: &Theme) -> u16 
     }
 
     rows.push(Line::from(""));
+    rows.push(heading("Marks"));
+    for (glyph, what) in MARKS {
+        rows.push(entry(glyph, what));
+    }
+
+    rows.push(Line::from(""));
     rows.push(heading("Mouse"));
     for (gesture, what) in MOUSE_GESTURES {
         rows.push(entry(gesture, what));
@@ -989,6 +1076,17 @@ sensor = S3KeySensor(deferrable=True)
             )
             .expect("detail")
             .expect_applied();
+    }
+
+    /// Just the queue pane's half of each rendered row.
+    ///
+    /// The detail pane is drawn on the same lines and carries the same PR
+    /// numbers, and its `OPEN · @potiuk` separator is the very glyph a queue mark
+    /// uses — so a whole-line search answers about the wrong pane.
+    fn queue_rows(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|line| line.chars().take(45).collect())
+            .collect()
     }
 
     /// Render at `width`x`height` and return the screen as plain text, one
@@ -1227,6 +1325,75 @@ sensor = S3KeySensor(deferrable=True)
     }
 
     #[test]
+    fn a_queue_row_marks_what_you_have_already_done_to_the_pr() {
+        // The question the list could not answer before: have I been here? The
+        // two marks differ because a review is on the forge and a `done` is a
+        // note to yourself, and either can be left behind by new commits.
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        // A `done` at a head the PR has since left — the shape of most of what
+        // reaches the queue a second time. Written through the ledger rather than
+        // `actions::done`, which would clear the attention keeping it listed.
+        ledger
+            .set_done(repo_id, 70135, "older00", ts("2026-08-10T10:00:00Z"))
+            .expect("done");
+        // And a review of mine on the forge, at the head that is there now.
+        ledger
+            .commit_detail(
+                repo_id,
+                70201,
+                &MyState {
+                    last_reviewed_sha: Some("abc1234".into()),
+                    last_verdict: Some(Verdict::Approved),
+                    ..MyState::default()
+                },
+                &[],
+                &[],
+                &[Attention {
+                    reason: AttentionReason::Mention {
+                        by: "potiuk".into(),
+                    },
+                    since: ts("2026-08-10T11:00:00Z"),
+                }],
+                Some(BODY),
+                ts("2026-08-10T12:00:01Z"),
+            )
+            .expect("detail")
+            .expect_applied();
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let rows = queue_rows(&render(&mut app, 100, 24));
+        let row = |number: &str| {
+            rows.iter()
+                .find(|line| line.contains(number))
+                .unwrap_or_else(|| panic!("no row for {number}: {rows:?}"))
+                .clone()
+        };
+
+        assert!(
+            row("#70135").contains('·'),
+            "your own done: {:?}",
+            row("#70135")
+        );
+        assert!(
+            row("#70201").contains('✓'),
+            "a review of yours: {:?}",
+            row("#70201")
+        );
+    }
+
+    #[test]
+    fn a_pr_you_have_never_touched_carries_no_mark() {
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+
+        let rows = queue_rows(&render(&mut app, 100, 24));
+
+        for row in rows.iter().filter(|line| line.contains("#70")) {
+            assert!(!row.contains('·') && !row.contains('✓'), "{row}");
+        }
+    }
+
+    #[test]
     fn a_narrow_terminal_still_renders_both_panes_without_panicking() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         for (w, h) in [(40u16, 8u16), (60, 10), (200, 40)] {
@@ -1391,7 +1558,7 @@ sensor = S3KeySensor(deferrable=True)
         // Tall enough for the whole reference — which grows as bindings are added,
         // so this has room to spare. What it does when it *doesn't* fit is the
         // next test's business.
-        let screen = render(&mut app, 100, 40).join("\n");
+        let screen = render(&mut app, 100, 46).join("\n");
 
         // Every binding the table describes reaches the reference — derived from
         // the table rather than listed here, so a new key with no entry fails
@@ -1410,6 +1577,11 @@ sensor = S3KeySensor(deferrable=True)
         // them, and neither is the hint at the bottom.
         for what in MOUSE_GESTURES.iter().map(|(_, what)| *what) {
             assert!(screen.contains(what), "missing gesture {what}:\n{screen}");
+        }
+        // Nor are the row marks, which are the one thing on screen that has no
+        // words of its own until somebody opens this.
+        for what in MARKS.iter().map(|(_, what)| *what) {
+            assert!(screen.contains(what), "missing mark {what}:\n{screen}");
         }
         assert!(screen.contains("close"), "{screen}");
 

@@ -400,6 +400,10 @@ pub struct QueueItem {
     pub tracked_reason: String,
     /// The reason setting this PR's queue position.
     pub top: AttentionRow,
+    /// My history on it. Carried by the row rather than read per selection,
+    /// because a list wants to show what I have already done to each PR — and
+    /// answering that one row at a time is what made it invisible.
+    pub my_state: MyState,
     /// `reviewq defer` was called and nothing has happened since (`top.since`
     /// predates it): sorted after every non-deferred item regardless of
     /// priority, but still shown rather than hidden.
@@ -988,8 +992,7 @@ impl Ledger {
         // (those only carry attention rows when it did). Closed-unmerged never.
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, a.since, a.payload,
-                   ms.deferred_at
+            SELECT {PR_COLUMNS}, p.tracked_reason, a.since, a.payload, {MY_STATE_COLUMNS}
             FROM prs p
             JOIN attention a ON a.repo_id = p.repo_id AND a.pr_number = p.number
             LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
@@ -1001,19 +1004,13 @@ impl Ledger {
                 let pr = snapshot_from_row(row, 0)?;
                 let tracked_reason: String = row.get(13)?;
                 let attention = attention_from_row(row, 14)?;
-                let deferred_at: Option<String> = row.get(16)?;
-                let deferred_at = deferred_at.as_deref().map(parse_ts).transpose()?;
-                Ok((pr, tracked_reason, attention, deferred_at))
+                let my_state = my_state_from_row(row, 16)?;
+                Ok((pr, tracked_reason, attention, my_state))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut items: Vec<QueueItem> = Vec::new();
-        let mut deferred_since: std::collections::HashMap<u64, Timestamp> =
-            std::collections::HashMap::new();
-        for (pr, tracked_reason, attention, deferred_at) in rows {
-            if let Some(deferred_at) = deferred_at {
-                deferred_since.insert(pr.number, deferred_at);
-            }
+        for (pr, tracked_reason, attention, my_state) in rows {
             match items.iter_mut().find(|i| i.pr.number == pr.number) {
                 Some(existing) => {
                     if attention_is_more_urgent(&attention, &existing.top) {
@@ -1024,6 +1021,7 @@ impl Ledger {
                     pr,
                     tracked_reason,
                     top: attention,
+                    my_state,
                     deferred: false,
                 }),
             }
@@ -1031,9 +1029,10 @@ impl Ledger {
         // A defer only survives if nothing has happened since: the top reason's
         // `since` must not be newer than the moment it was deferred.
         for item in &mut items {
-            item.deferred = deferred_since
-                .get(&item.pr.number)
-                .is_some_and(|&deferred_at| item.top.since <= deferred_at);
+            item.deferred = item
+                .my_state
+                .deferred_at
+                .is_some_and(|deferred_at| item.top.since <= deferred_at);
         }
         items.sort_by(|a, b| {
             (a.deferred, a.top.priority(), a.top.since, a.pr.number).cmp(&(
@@ -1396,6 +1395,13 @@ const PR_COLUMNS: &str = "p.number, p.title, p.author, p.author_association, \
      p.head_sha, p.is_draft, p.state, p.updated_at, p.labels, p.milestone, \
      p.files, p.files_truncated, p.base_ref";
 
+/// The `my_state` columns, `ms.`-qualified and in the order
+/// [`my_state_from_row`] reads them — the same single-source arrangement as
+/// [`PR_COLUMNS`], for the queries that outer-join my history onto a PR.
+const MY_STATE_COLUMNS: &str = "ms.last_reviewed_sha, ms.last_verdict, \
+     ms.last_action_at, ms.done_sha, ms.snoozed_until, ms.muted, \
+     ms.deferred_at, ms.done_at";
+
 /// Turn a text-decode failure into the rusqlite error a `query_map` closure
 /// must return.
 fn decode_err(e: Box<dyn std::error::Error + Send + Sync>) -> rusqlite::Error {
@@ -1453,18 +1459,26 @@ fn row_to_tracked(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedPr> {
 }
 
 fn row_to_my_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyState> {
-    let verdict: Option<String> = row.get(1)?;
-    let last_action_at: Option<String> = row.get(2)?;
-    let snoozed_until: Option<String> = row.get(4)?;
-    let deferred_at: Option<String> = row.get(6)?;
-    let done_at: Option<String> = row.get(7)?;
+    my_state_from_row(row, 0)
+}
+
+/// Read a [`MyState`] from the [`MY_STATE_COLUMNS`] starting at `base`.
+///
+/// Tolerates every column being null, which is what an outer join against a PR
+/// nobody has ever acted on returns — the all-default state, not an error.
+fn my_state_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<MyState> {
+    let verdict: Option<String> = row.get(base + 1)?;
+    let last_action_at: Option<String> = row.get(base + 2)?;
+    let snoozed_until: Option<String> = row.get(base + 4)?;
+    let deferred_at: Option<String> = row.get(base + 6)?;
+    let done_at: Option<String> = row.get(base + 7)?;
     Ok(MyState {
-        last_reviewed_sha: row.get(0)?,
+        last_reviewed_sha: row.get(base)?,
         last_verdict: verdict.as_deref().and_then(Verdict::from_wire),
         last_action_at: last_action_at.as_deref().map(parse_ts).transpose()?,
-        done_sha: row.get(3)?,
+        done_sha: row.get(base + 3)?,
         snoozed_until: snoozed_until.as_deref().map(parse_ts).transpose()?,
-        muted: row.get::<_, i64>(5)? != 0,
+        muted: row.get::<_, Option<i64>>(base + 5)?.unwrap_or(0) != 0,
         deferred_at: deferred_at.as_deref().map(parse_ts).transpose()?,
         done_at: done_at.as_deref().map(parse_ts).transpose()?,
     })
@@ -2983,6 +2997,59 @@ mod tests {
             .expect_applied();
         assert!(ledger.queue(repo_id).unwrap().is_empty());
         assert!(ledger.waiting(repo_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_queue_row_carries_my_own_history_on_the_pr() {
+        // So a list can show what I have already done to it without reading each
+        // row in turn — which is what kept `done` invisible outside the detail.
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        track(&ledger, repo_id, &pr(2));
+        ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                None,
+                now(),
+            )
+            .unwrap()
+            .expect_applied();
+        ledger
+            .commit_detail(
+                repo_id,
+                2,
+                &MyState::default(),
+                &[],
+                &[],
+                &[mention("kaxil", "2026-08-05T09:00:00Z")],
+                None,
+                now(),
+            )
+            .unwrap()
+            .expect_applied();
+        ledger
+            .set_done(repo_id, 1, "abc123", ts("2026-08-05T11:00:00Z"))
+            .unwrap();
+
+        let queue = ledger.queue(repo_id).unwrap();
+
+        let row = |number: u64| {
+            queue
+                .iter()
+                .find(|item| item.pr.number == number)
+                .expect("queued")
+        };
+        assert_eq!(row(1).my_state.done_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            row(2).my_state,
+            MyState::default(),
+            "a PR nobody has acted on reads as the default, not as an error"
+        );
     }
 
     #[test]
