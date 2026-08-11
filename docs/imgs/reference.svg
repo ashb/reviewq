@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1176" height="756" viewBox="0 0 1176 756" font-family="&quot;JetBrains Mono&quot;, &quot;Symbols Nerd Font&quot;, monospace" font-size="14">
+<svg xmlns="http://www.w3.org/2000/svg" width="1176" height="612" viewBox="0 0 1176 612" font-family="&quot;JetBrains Mono&quot;, &quot;Symbols Nerd Font&quot;, monospace" font-size="14">
 <style>
 @import url("https://fonts.bunny.net/css?family=jetbrains-mono:400,700");
 </style>
@@ -161,26 +161,26 @@
 <text x="327.6" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="445.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  d           </text>
 <text x="462.0" y="445.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">done — handled at this head                 </text>
-<text x="831.6" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="840.0" y="445.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve"> holding it for the whole poke         </text>
 <text x="1167.6" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="463.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  z           </text>
 <text x="462.0" y="463.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">snooze for a while                          </text>
-<text x="831.6" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="1167.6" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="481.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  o           </text>
 <text x="462.0" y="481.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">open it in your browser                     </text>
-<text x="831.6" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="481.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="1167.6" y="481.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="499.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  c / y       </text>
 <text x="462.0" y="499.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">copy its URL                                </text>
-<text x="831.6" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="840.0" y="499.5" fill="#ebcb8b" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">poke</text>
 <text x="873.6" y="499.5" fill="#ffffff" textLength="294.0" lengthAdjust="spacing" xml:space="preserve"> implementation                    </text>
 <text x="1167.6" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -188,81 +188,40 @@
 <text x="327.6" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="517.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  m           </text>
 <text x="462.0" y="517.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">mute, or unmute                             </text>
-<text x="831.6" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="1167.6" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="535.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  f           </text>
 <text x="462.0" y="535.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">defer to the bottom, or restore             </text>
-<text x="831.6" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="840.0" y="535.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve">344                                    </text>
 <text x="1167.6" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="831.6" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="1167.6" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="571.5" fill="#96b5b4" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Forge</text>
-<text x="831.6" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="327.6" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">╰</text>
+<text x="336.0" y="571.5" fill="#ebcb8b" textLength="33.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold"> ↑↓ </text>
+<text x="369.6" y="571.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve">scroll   </text>
+<text x="445.2" y="571.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">any other key </text>
+<text x="562.8" y="571.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">close </text>
+<text x="613.2" y="571.5" fill="#96b5b4" textLength="226.8" lengthAdjust="spacing" xml:space="preserve">──────────────────────────╯</text>
 <text x="840.0" y="571.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve">69982.                                 </text>
 <text x="1167.6" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="589.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="589.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="589.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  r           </text>
-<text x="462.0" y="589.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">refresh from the forge                      </text>
-<text x="831.6" y="589.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="1167.6" y="589.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="607.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="607.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="831.6" y="607.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="1167.6" y="607.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="625.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="625.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="625.5" fill="#96b5b4" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Session</text>
-<text x="831.6" y="625.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="1167.6" y="625.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="643.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="643.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="643.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ? / h       </text>
-<text x="462.0" y="643.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">keys                                        </text>
-<text x="831.6" y="643.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="1167.6" y="643.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="661.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="661.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="661.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  q / Esc     </text>
-<text x="462.0" y="661.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">quit                                        </text>
-<text x="831.6" y="661.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="1167.6" y="661.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="679.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="679.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="831.6" y="679.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
-<text x="1167.6" y="679.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="697.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="697.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="697.5" fill="#96b5b4" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Mouse</text>
-<text x="831.6" y="697.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
-<text x="1167.6" y="697.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="715.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="327.6" y="715.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">╰</text>
-<text x="336.0" y="715.5" fill="#ebcb8b" textLength="33.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold"> ↑↓ </text>
-<text x="369.6" y="715.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve">scroll   </text>
-<text x="445.2" y="715.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">any other key </text>
-<text x="562.8" y="715.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">close </text>
-<text x="613.2" y="715.5" fill="#96b5b4" textLength="226.8" lengthAdjust="spacing" xml:space="preserve">──────────────────────────╯</text>
-<text x="1167.6" y="715.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="0.0" y="733.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────╯</text>
-<text x="529.2" y="733.5" fill="#606a74" textLength="646.8" lengthAdjust="spacing" xml:space="preserve">╰───────────────────────────────────────────────────────────────────────────╯</text>
-<text x="0.0" y="751.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">jk</text>
-<text x="16.8" y="751.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> move</text>
-<text x="84.0" y="751.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">⏎</text>
-<text x="92.4" y="751.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> review</text>
-<text x="176.4" y="751.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">d</text>
-<text x="184.8" y="751.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> done</text>
-<text x="252.0" y="751.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">z</text>
-<text x="260.4" y="751.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> snooze</text>
-<text x="344.4" y="751.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">? / h</text>
-<text x="386.4" y="751.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> keys</text>
-<text x="453.6" y="751.5" fill="#ebcb8b" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">q / Esc</text>
-<text x="512.4" y="751.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> quit</text>
+<text x="0.0" y="589.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────╯</text>
+<text x="529.2" y="589.5" fill="#606a74" textLength="646.8" lengthAdjust="spacing" xml:space="preserve">╰───────────────────────────────────────────────────────────────────────────╯</text>
+<text x="0.0" y="607.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">jk</text>
+<text x="16.8" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> move</text>
+<text x="84.0" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">⏎</text>
+<text x="92.4" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> review</text>
+<text x="176.4" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">d</text>
+<text x="184.8" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> done</text>
+<text x="252.0" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">z</text>
+<text x="260.4" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> snooze</text>
+<text x="344.4" y="607.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">? / h</text>
+<text x="386.4" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> keys</text>
+<text x="453.6" y="607.5" fill="#ebcb8b" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">q / Esc</text>
+<text x="512.4" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> quit</text>
 </svg>

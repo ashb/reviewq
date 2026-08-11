@@ -402,11 +402,10 @@ struct Shot {
 /// Every picture is this size. Wide enough that a row has room for its title
 /// beside the reason that put it there, which is the pair worth reading.
 const WIDTH: u16 = 140;
-/// Rows for a picture of the queue: the whole fixture, and the selected PR's
-/// description read to its end.
+/// Rows. One size for every picture, so a page of them has no odd one out — the
+/// reference included: it is taller than this and says so with a scrollbar,
+/// which is what a reader on an ordinary terminal sees anyway.
 const HEIGHT: u16 = 34;
-/// Rows for the reference, which runs from the marks to the mouse.
-const REFERENCE_HEIGHT: u16 = 42;
 
 /// The pictures the documentation references. Adding one here is all it takes;
 /// the test writes it and then holds it to account.
@@ -423,7 +422,7 @@ const SHOTS: &[Shot] = &[
     },
     Shot {
         name: "reference",
-        height: REFERENCE_HEIGHT,
+        height: HEIGHT,
         arrange: |app| app.overlay = Overlay::Help { scroll: 0 },
     },
     Shot {
