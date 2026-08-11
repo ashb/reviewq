@@ -6,6 +6,8 @@
 
 mod schema;
 
+use std::collections::BTreeMap;
+
 use jiff::Timestamp;
 use reviewq_core::model::{
     Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
@@ -641,6 +643,38 @@ impl Ledger {
             |row| row.get::<_, i64>(0),
         )?;
         Ok((tracked as u64, total as u64))
+    }
+
+    /// Record the colours a repo paints its labels, replacing any it has moved
+    /// on from.
+    ///
+    /// Per repo, because a colour is the repo's rather than the label's: the
+    /// same name is painted differently in another project, and a table keyed by
+    /// name alone would answer for whichever repo was swept last.
+    pub fn set_label_colours(&self, repo_id: i64, labels: &[(String, String)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (name, color) in labels {
+            tx.execute(
+                "INSERT INTO labels (repo_id, name, color) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(repo_id, name) DO UPDATE SET color = excluded.color",
+                params![repo_id, name, color],
+            )
+            .doing(format!("storing the colour of {name}"))?;
+        }
+        tx.commit().doing("committing label colours")?;
+        Ok(())
+    }
+
+    /// One repo's label colours, by name — what a frontend needs to paint a row
+    /// the way the forge does.
+    pub fn label_colours(&self, repo_id: i64) -> Result<BTreeMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, color FROM labels WHERE repo_id = ?1")?;
+        let rows = stmt
+            .query_map(params![repo_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<BTreeMap<String, String>>>()?;
+        Ok(rows)
     }
 
     /// One repo's stored PR rows, counted the ways that say what the ledger is
@@ -2201,6 +2235,49 @@ mod tests {
     fn an_empty_repo_has_an_empty_census() {
         let (ledger, repo_id) = ledger_with_repo();
         assert_eq!(ledger.census(repo_id).unwrap(), Census::default());
+    }
+
+    #[test]
+    fn label_colours_belong_to_the_repo_that_painted_them() {
+        // The same name in two projects is two colours, which is the whole
+        // reason this is keyed by repo.
+        let (ledger, airflow) = ledger_with_repo();
+        let other = ledger
+            .ensure_repo(&RepoKey {
+                host: "github.com".into(),
+                owner: "apache".into(),
+                name: "airflow-site".into(),
+            })
+            .unwrap();
+
+        ledger
+            .set_label_colours(airflow, &[("area:docs".into(), "0e8a16".into())])
+            .unwrap();
+        ledger
+            .set_label_colours(other, &[("area:docs".into(), "d73a4a".into())])
+            .unwrap();
+
+        assert_eq!(
+            ledger.label_colours(airflow).unwrap()["area:docs"],
+            "0e8a16"
+        );
+        assert_eq!(ledger.label_colours(other).unwrap()["area:docs"], "d73a4a");
+    }
+
+    #[test]
+    fn a_recoloured_label_is_replaced_rather_than_doubled() {
+        let (ledger, repo_id) = ledger_with_repo();
+
+        ledger
+            .set_label_colours(repo_id, &[("backport".into(), "fbca04".into())])
+            .unwrap();
+        ledger
+            .set_label_colours(repo_id, &[("backport".into(), "000000".into())])
+            .unwrap();
+
+        let colours = ledger.label_colours(repo_id).unwrap();
+        assert_eq!(colours.len(), 1);
+        assert_eq!(colours["backport"], "000000");
     }
 
     #[test]

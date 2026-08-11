@@ -36,36 +36,37 @@
 <text x="0.0" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="103.5" fill="#d40206" textLength="151.2" lengthAdjust="spacing" xml:space="preserve">area:serialization</text>
 <text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="121.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
 <text x="1167.6" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="139.5" fill="#9a9a9a" textLength="176.4" lengthAdjust="spacing" xml:space="preserve">  reviewed 24c9f70 → </text>
-<text x="722.4" y="139.5" fill="#a3be8c" textLength="67.2" lengthAdjust="spacing" xml:space="preserve">APPROVED</text>
-<text x="789.6" y="139.5" fill="#9a9a9a" textLength="210.0" lengthAdjust="spacing" xml:space="preserve">, at 2026-08-10T16:45:00Z</text>
+<text x="546.0" y="139.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
 <text x="1167.6" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="157.5" fill="#9a9a9a" textLength="176.4" lengthAdjust="spacing" xml:space="preserve">  reviewed 24c9f70 → </text>
+<text x="722.4" y="157.5" fill="#a3be8c" textLength="67.2" lengthAdjust="spacing" xml:space="preserve">APPROVED</text>
+<text x="789.6" y="157.5" fill="#9a9a9a" textLength="210.0" lengthAdjust="spacing" xml:space="preserve">, at 2026-08-10T16:45:00Z</text>
 <text x="1167.6" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="175.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Attention</text>
 <text x="1167.6" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="193.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  none</text>
+<text x="546.0" y="193.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Attention</text>
 <text x="1167.6" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="211.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  none</text>
 <text x="1167.6" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>

@@ -14,7 +14,7 @@
 <text x="33.6" y="49.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="49.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70255</text>
 <text x="117.6" y="49.5" fill="#c36b73" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">@eladkal replied in 4 threads you own</text>
-<text x="445.2" y="49.5" fill="#ffffff" textLength="67.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Rename t</text>
+<text x="436.8" y="49.5" fill="#7648ec" textLength="75.6" lengthAdjust="spacing" xml:space="preserve">area:Exec</text>
 <text x="520.8" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="49.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Rename the KubernetesExecutor config section</text>
@@ -33,40 +33,41 @@
 <text x="0.0" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="103.5" fill="#8fa1b3" textLength="42.0" lengthAdjust="spacing" xml:space="preserve">muted</text>
+<text x="546.0" y="103.5" fill="#7648ec" textLength="159.6" lengthAdjust="spacing" xml:space="preserve">area:Executors-core</text>
 <text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="121.5" fill="#8fa1b3" textLength="42.0" lengthAdjust="spacing" xml:space="preserve">muted</text>
 <text x="1167.6" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="139.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
 <text x="1167.6" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="157.5" fill="#9a9a9a" textLength="462.0" lengthAdjust="spacing" xml:space="preserve">  reviewed 6b1fa02 → COMMENTED, at 2026-08-10T09:30:00Z</text>
+<text x="546.0" y="157.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
 <text x="1167.6" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="175.5" fill="#9a9a9a" textLength="462.0" lengthAdjust="spacing" xml:space="preserve">  reviewed 6b1fa02 → COMMENTED, at 2026-08-10T09:30:00Z</text>
 <text x="1167.6" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="193.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Attention</text>
 <text x="1167.6" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="546.0" y="211.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  p2  </text>
-<text x="596.4" y="211.5" fill="#c36b73" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">@eladkal replied in 4 threads you own</text>
+<text x="546.0" y="211.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Attention</text>
 <text x="1167.6" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="229.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="229.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  p2  </text>
+<text x="596.4" y="229.5" fill="#c36b73" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">@eladkal replied in 4 threads you own</text>
 <text x="1167.6" y="229.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="247.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="247.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>

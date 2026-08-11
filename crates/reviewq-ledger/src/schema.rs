@@ -14,7 +14,7 @@ use rusqlite_migration::{M, MigrationDefinitionError, Migrations};
 use crate::{LedgerError, Result};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 8;
+pub const SCHEMA_VERSION: usize = 9;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -297,6 +297,24 @@ const MIGRATION_8: &str = r"
 ALTER TABLE prs ADD COLUMN after_merge INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// The colour a repo paints each of its labels, six hex digits and no `#`.
+///
+/// Per repo because that is what a label colour is: the same `area:Scheduler`
+/// is a different colour in another project, so a table keyed by name alone
+/// would be wrong the moment a second repo used the name.
+///
+/// Only the labels a sweep has actually seen are here, which is exactly the set
+/// anything asks to draw. A row is replaced when the colour changes upstream,
+/// so nothing accumulates but the repo's own palette.
+const MIGRATION_9: &str = r"
+CREATE TABLE labels (
+  repo_id INTEGER NOT NULL REFERENCES repos(id),
+  name    TEXT NOT NULL,
+  color   TEXT NOT NULL,
+  PRIMARY KEY (repo_id, name)
+);
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -307,6 +325,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(MIGRATION_6),
         M::up(MIGRATION_7),
         M::up(MIGRATION_8),
+        M::up(MIGRATION_9),
     ])
 });
 

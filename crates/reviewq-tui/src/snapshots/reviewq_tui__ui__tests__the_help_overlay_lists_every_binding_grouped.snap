@@ -17,14 +17,14 @@ reviewq  2 on the queue
 │                  │   PgDn / ^D   page down                                   │                   │
 │                  │   PgUp / ^U   page up                                     │                   │
 │                  │   g / Home    first                                       │                   │
-│                  │   G / End     last                                        │nsor.              │
-│                  │   :           go to a PR by number                        │                   │
+│                  │   G / End     last                                        │                   │
+│                  │   :           go to a PR by number                        │nsor.              │
 │                  │                                                           │                   │
 │                  │ View                                                      │                   │
 │                  │   Tab         switch pane                                 │                   │
 │                  │   t           adapt for a light or dark terminal          │                   │
-│                  │   W           show what waits on someone else, or go back │rue)               │
-│                  │   M           show what you have muted, or go back        │                   │
+│                  │   W           show what waits on someone else, or go back │                   │
+│                  │   M           show what you have muted, or go back        │rue)               │
 │                  │                                                           │                   │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │

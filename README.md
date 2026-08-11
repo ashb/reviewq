@@ -12,8 +12,9 @@ changed since I looked?" answerable.
 
 ![The queue, with the selected PR's detail beside it](docs/imgs/queue.svg)
 
-Every row says why it is there, most urgent first, and carries a mark for what you
-have already done to it: `✓` a review you submitted on the forge, `·` a `done` of
+Every row says why it is there, most urgent first, carries the labels your project
+asked to see — in the colours the repo paints them — and a mark for what you have
+already done to it: `✓` a review you submitted on the forge, `·` a `done` of
 your own — dimmed once the PR has moved past the head that mark names — and `󰒲`
 for one you deferred. The pictures on this page are generated from a fixture by
 the interface itself, so they cannot drift from what it draws.

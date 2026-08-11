@@ -15,7 +15,7 @@ pub mod github;
 pub use host::{
     DEFAULT_HOST, ForgeHost, ForgeTable, Token, TokenSource, resolve_host, resolve_token,
 };
-pub use types::{PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
+pub use types::{LabelColour, PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
 
 use async_trait::async_trait;
 use reviewq_core::model::PrSnapshot;

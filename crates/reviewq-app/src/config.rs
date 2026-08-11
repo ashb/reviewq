@@ -77,6 +77,15 @@ pub struct Project {
     /// `[involvement].reasons` when set; inherits it when omitted.
     #[serde(default)]
     pub involvement: Option<Vec<String>>,
+    /// Which labels are worth showing on a row: exact names, or a prefix ending
+    /// in the separator the project uses (`area:` matches `area:Scheduler`).
+    ///
+    /// Empty by default, which shows none. A repo like apache/airflow puts a
+    /// dozen labels on a PR and a queue row has space for two or three, so
+    /// showing everything would cost the title — the part you actually read —
+    /// for a wall of chips. Naming the handful you steer by is the point.
+    #[serde(default)]
+    pub show_labels: Vec<String>,
     /// Keep surfacing every one of this project's PRs after it merges, so
     /// post-merge activity (a reply, a mention) can flag something that shipped
     /// broken. Off by default — most people want the queue to end at merge, and
@@ -620,6 +629,21 @@ impl Config {
 }
 
 impl Project {
+    /// Whether a label is one this project asked to see.
+    ///
+    /// A pattern ending in a non-alphanumeric character is a prefix — `area:`
+    /// takes every `area:*` — and anything else is the label's whole name. That
+    /// rule needs no second config key to say which kind you meant, and it reads
+    /// the way the labels themselves are written.
+    pub fn shows_label(&self, label: &str) -> bool {
+        self.show_labels
+            .iter()
+            .any(|pattern| match pattern.chars().last() {
+                Some(last) if !last.is_alphanumeric() => label.starts_with(pattern.as_str()),
+                _ => label == pattern,
+            })
+    }
+
     /// A name for messages: the configured name, else the first repo's slug.
     pub fn label(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
@@ -856,6 +880,48 @@ mod tests {
             !rules.keeps_after_merge(&labelled),
             "the project's other rule said nothing about merges"
         );
+    }
+
+    #[test]
+    fn a_project_names_the_labels_worth_showing_by_name_or_by_prefix() {
+        // Which of the two you meant comes from how the pattern ends rather than
+        // from a second key: `area:` is a family, `backport` is a label.
+        // Spelled out rather than through `minimal`, which appends to the
+        // interest table — and this key belongs to the project.
+        let config: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            show_labels = ["area:", "backport"]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            "#,
+        )
+        .expect("parses");
+        let project = &config.projects[0];
+
+        assert!(project.shows_label("area:Scheduler"));
+        assert!(project.shows_label("area:task-sdk"));
+        assert!(project.shows_label("backport"));
+        assert!(
+            !project.shows_label("area"),
+            "the prefix needs its separator"
+        );
+        assert!(
+            !project.shows_label("backported"),
+            "an exact pattern is exact"
+        );
+        assert!(!project.shows_label("provider:amazon"));
+    }
+
+    #[test]
+    fn a_project_shows_no_labels_until_it_says_which() {
+        // A dozen labels on a PR and three columns to spare: silence is the only
+        // default that cannot cost somebody their titles.
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        assert!(!config.projects[0].shows_label("area:Scheduler"));
     }
 
     #[test]

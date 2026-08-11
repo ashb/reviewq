@@ -27,6 +27,20 @@ use crate::app::{App, Overlay, Unqueued, test_config};
 use crate::theme::{Mode, Theme};
 use crate::{svg, ui};
 
+/// The colours apache/airflow paints the labels the fixture uses. Real ones, so
+/// the pictures show what the interface does with a forge's palette rather than
+/// with something invented to look tidy.
+const PALETTE: &[(&str, &str)] = &[
+    ("area:task-sdk", "0e8a16"),
+    ("area:Scheduler", "1d76db"),
+    ("area:Executors-core", "5319e7"),
+    ("area:serialization", "b60205"),
+    ("kind:feature", "c2e0c6"),
+    ("kind:bug", "d73a4a"),
+    ("backport", "fbca04"),
+    ("needs-review", "000000"),
+];
+
 /// Where the committed pictures live, relative to this crate.
 const IMAGES: &str = "../../docs/imgs";
 
@@ -66,6 +80,8 @@ struct Fixture {
     draft: bool,
     /// Silenced by hand: off the queue, on the muted list, reason and all.
     muted: bool,
+    /// The labels the PR carries, as the repo paints them.
+    labels: &'static [&'static str],
     /// The interest rule or involvement that tracked it.
     tracked: TrackedReason,
     /// Why it wants attention — `None` for one that wants none, which is what
@@ -98,6 +114,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:task-sdk", "kind:feature", "needs-review"],
             tracked: interest("label area:task-sdk"),
             reason: Some(AttentionReason::Mention { by: "kaxil".into() }),
             since: "2026-08-12T07:05:00Z",
@@ -127,6 +144,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:Scheduler", "kind:bug"],
             tracked: interest("label area:Scheduler"),
             reason: Some(AttentionReason::ThreadReply {
                 by: "potiuk".into(),
@@ -152,6 +170,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:serialization", "kind:bug", "backport"],
             tracked: interest("path airflow-core/src/airflow/serialization/**"),
             reason: Some(AttentionReason::ReReview {
                 new_commits: 3,
@@ -177,6 +196,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:Scheduler"],
             tracked: interest("label area:Scheduler"),
             reason: Some(AttentionReason::ResolvedUnanswered {
                 by: "jedcunningham".into(),
@@ -204,6 +224,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: true,
             muted: false,
+            labels: &["area:Executors-core", "kind:feature"],
             tracked: interest("label area:Executors-core"),
             reason: Some(AttentionReason::Mention {
                 by: "o-nikolas".into(),
@@ -226,6 +247,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:Scheduler", "kind:feature"],
             tracked: interest("label area:Scheduler"),
             reason: None,
             since: "2026-08-11T14:10:00Z",
@@ -248,6 +270,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:serialization"],
             tracked: interest("path airflow-core/src/airflow/models/**"),
             reason: None,
             since: "2026-08-10T16:45:00Z",
@@ -272,6 +295,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: true,
+            labels: &["area:Executors-core"],
             tracked: interest("label area:Executors-core"),
             reason: Some(AttentionReason::ThreadReply {
                 by: "eladkal".into(),
@@ -297,6 +321,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:task-sdk"],
             tracked: TrackedReason::Involved("review_requested".into()),
             reason: Some(AttentionReason::ReviewRequested {
                 team: Some("apache/airflow-committers".into()),
@@ -316,6 +341,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["kind:feature"],
             tracked: interest("author FIRST_TIME_CONTRIBUTOR"),
             reason: Some(AttentionReason::NeedsFirstLook {
                 rule: "author FIRST_TIME_CONTRIBUTOR".into(),
@@ -335,6 +361,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Open,
             draft: false,
             muted: false,
+            labels: &["area:Executors-core", "backport"],
             tracked: interest("label area:Executors-core"),
             reason: Some(AttentionReason::NeedsFirstLook {
                 rule: "label area:Executors-core".into(),
@@ -357,6 +384,7 @@ fn fixtures() -> Vec<Fixture> {
             state: PrState::Merged,
             draft: false,
             muted: false,
+            labels: &["area:Scheduler", "kind:bug"],
             tracked: TrackedReason::Interest {
                 rule: "path airflow-core/src/airflow/jobs/**".into(),
                 after_merge: true,
@@ -419,6 +447,13 @@ fn reviewer(login: &str, verdict: Verdict, at: &str) -> ReviewerVerdict {
 fn ledger() -> Ledger {
     let ledger = Ledger::open_in_memory().expect("ledger");
     let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+    let palette: Vec<(String, String)> = PALETTE
+        .iter()
+        .map(|(name, color)| ((*name).to_string(), (*color).to_string()))
+        .collect();
+    ledger
+        .set_label_colours(repo_id, &palette)
+        .expect("label colours");
     for f in fixtures() {
         let pr = PrSnapshot {
             number: f.number,
@@ -430,7 +465,7 @@ fn ledger() -> Ledger {
             is_draft: f.draft,
             state: f.state,
             updated_at: ts(f.since),
-            labels: vec![],
+            labels: f.labels.iter().map(|l| (*l).to_string()).collect(),
             milestone: None,
             files: None,
             files_truncated: false,

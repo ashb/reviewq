@@ -14,7 +14,7 @@
 <text x="33.6" y="49.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="49.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70135</text>
 <text x="117.6" y="49.5" fill="#c36b73" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">@kaxil mentioned you</text>
-<text x="302.4" y="49.5" fill="#ffffff" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Def</text>
+<text x="294.0" y="49.5" fill="#0e8a16" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">area</text>
 <text x="327.6" y="49.5" fill="#96b5b4" textLength="512.4" lengthAdjust="spacing" xml:space="preserve">╭ Reference ────────────────────────────────────────────────╮</text>
 <text x="1167.6" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -43,6 +43,7 @@
 <text x="344.4" y="103.5" fill="#9a9a9a" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ✓           </text>
 <text x="462.0" y="103.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">…and the PR has moved on since              </text>
 <text x="831.6" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="840.0" y="103.5" fill="#6c6c6c" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">view</text>
 <text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="121.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
@@ -59,9 +60,6 @@
 <text x="344.4" y="139.5" fill="#9a9a9a" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ·           </text>
 <text x="462.0" y="139.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">…and the PR has moved on since              </text>
 <text x="831.6" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="840.0" y="139.5" fill="#c36b73" textLength="25.2" lengthAdjust="spacing" xml:space="preserve">TED</text>
-<text x="865.2" y="139.5" fill="#9a9a9a" textLength="210.0" lengthAdjust="spacing" xml:space="preserve">, at 2026-08-11T16:20:00Z</text>
-<text x="1075.2" y="139.5" fill="#d08770" textLength="50.4" lengthAdjust="spacing" xml:space="preserve"> — the</text>
 <text x="1167.6" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="50.4" y="157.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70311</text>
@@ -69,6 +67,9 @@
 <text x="344.4" y="157.5" fill="#8fa1b3" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  󰒲           </text>
 <text x="462.0" y="157.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">you deferred it to the bottom               </text>
 <text x="831.6" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="840.0" y="157.5" fill="#c36b73" textLength="25.2" lengthAdjust="spacing" xml:space="preserve">TED</text>
+<text x="865.2" y="157.5" fill="#9a9a9a" textLength="210.0" lengthAdjust="spacing" xml:space="preserve">, at 2026-08-11T16:20:00Z</text>
+<text x="1075.2" y="157.5" fill="#d08770" textLength="50.4" lengthAdjust="spacing" xml:space="preserve"> — the</text>
 <text x="1167.6" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="50.4" y="175.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70344</text>
@@ -155,20 +156,20 @@
 <text x="0.0" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="831.6" y="427.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
-<text x="840.0" y="427.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve">or</text>
-<text x="856.8" y="427.5" fill="#ffffff" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">, so a sensor waiting on a key       </text>
 <text x="1167.6" y="427.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="445.5" fill="#96b5b4" textLength="109.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Act on the PR</text>
 <text x="831.6" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
-<text x="840.0" y="445.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve"> holding it for the whole poke         </text>
+<text x="840.0" y="445.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve">or</text>
+<text x="856.8" y="445.5" fill="#ffffff" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">, so a sensor waiting on a key       </text>
 <text x="1167.6" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="463.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ⏎           </text>
 <text x="462.0" y="463.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">review it — hand off to your review command </text>
 <text x="831.6" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
+<text x="840.0" y="463.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve"> holding it for the whole poke         </text>
 <text x="1167.6" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -181,27 +182,27 @@
 <text x="344.4" y="499.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  z           </text>
 <text x="462.0" y="499.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">snooze for a while                          </text>
 <text x="831.6" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
-<text x="840.0" y="499.5" fill="#ebcb8b" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">poke</text>
-<text x="873.6" y="499.5" fill="#ffffff" textLength="294.0" lengthAdjust="spacing" xml:space="preserve"> implementation                    </text>
 <text x="1167.6" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="517.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  o           </text>
 <text x="462.0" y="517.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">open it in your browser                     </text>
 <text x="831.6" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
+<text x="840.0" y="517.5" fill="#ebcb8b" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">poke</text>
+<text x="873.6" y="517.5" fill="#ffffff" textLength="294.0" lengthAdjust="spacing" xml:space="preserve"> implementation                    </text>
 <text x="1167.6" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="535.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  c / y       </text>
 <text x="462.0" y="535.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">copy its URL                                </text>
 <text x="831.6" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
-<text x="840.0" y="535.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve">344                                    </text>
 <text x="1167.6" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="553.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  m           </text>
 <text x="462.0" y="553.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">mute, or unmute                             </text>
 <text x="831.6" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
+<text x="840.0" y="553.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve">344                                    </text>
 <text x="1167.6" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">╰</text>
@@ -210,7 +211,6 @@
 <text x="445.2" y="571.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">any other key </text>
 <text x="562.8" y="571.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">close </text>
 <text x="613.2" y="571.5" fill="#96b5b4" textLength="226.8" lengthAdjust="spacing" xml:space="preserve">──────────────────────────╯</text>
-<text x="840.0" y="571.5" fill="#ffffff" textLength="327.6" lengthAdjust="spacing" xml:space="preserve">69982.                                 </text>
 <text x="1167.6" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="589.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────╯</text>
 <text x="529.2" y="589.5" fill="#606a74" textLength="646.8" lengthAdjust="spacing" xml:space="preserve">╰───────────────────────────────────────────────────────────────────────────╯</text>

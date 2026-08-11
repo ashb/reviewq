@@ -50,6 +50,7 @@ fn rate_limit(remaining: u32) -> RateLimit {
 #[derive(Clone)]
 pub(crate) struct Page {
     prs: Vec<PrSnapshot>,
+    labels: Vec<reviewq_forge::LabelColour>,
     next: Option<String>,
     total_count: u32,
     remaining: u32,
@@ -60,6 +61,7 @@ impl Page {
         let total_count = prs.len() as u32;
         Self {
             prs,
+            labels: Vec::new(),
             next: None,
             total_count,
             remaining: 4900,
@@ -68,6 +70,18 @@ impl Page {
 
     pub(crate) fn then(mut self, cursor: &str) -> Self {
         self.next = Some(cursor.to_string());
+        self
+    }
+
+    /// Paint the labels this page's PRs carry, as the forge does.
+    pub(crate) fn painted(mut self, labels: &[(&str, &str)]) -> Self {
+        self.labels = labels
+            .iter()
+            .map(|(name, color)| reviewq_forge::LabelColour {
+                name: (*name).to_string(),
+                color: (*color).to_string(),
+            })
+            .collect();
         self
     }
 
@@ -187,6 +201,7 @@ impl Forge for FakeForge {
         };
         Ok(SweepPage {
             prs: page.prs,
+            labels: page.labels,
             next: page.next,
             total_count: page.total_count,
             cost: 1,

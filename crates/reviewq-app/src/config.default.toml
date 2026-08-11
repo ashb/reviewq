@@ -25,6 +25,14 @@ repos = [{ owner = "apache", name = "airflow" }]
 # `wiff forge pull {url}` mirrors the PR fine and then refuses to publish:
 # "publishing a forge review pulled outside its repository is not supported".
 #   repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
+# Labels worth showing on a queue row, in the colours the repo paints them —
+# per repo, since the same name is a different colour in another project. A row
+# has space for two or three beside the title, so name the families you steer by
+# rather than everything: a pattern ending in a separator is a prefix
+# (`area:` takes every `area:*`), anything else is a whole label name. The detail
+# pane shows every label a PR carries regardless.
+#   show_labels = ["area:", "backport"]
+
 # Keep surfacing every one of this project's PRs after it merges, so a post-merge
 # reply or mention can flag something that shipped broken. Off by default — the
 # queue normally ends at merge. Turn it on per project if you review post-merge:

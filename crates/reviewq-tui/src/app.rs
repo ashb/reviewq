@@ -35,6 +35,8 @@ use reviewq_app::peek::Peeked;
 use reviewq_app::sync::Refreshed;
 use reviewq_core::model::{MyState, PrSnapshot, PrState};
 use reviewq_forge::ForgeError;
+use std::collections::BTreeMap;
+
 use reviewq_ledger::{
     AttentionRow, Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey, TrackedPr,
 };
@@ -53,6 +55,7 @@ pub(crate) fn test_config() -> HeldConfig {
             login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
+            show_labels = ["area:", "backport"]
             [[project.interest]]
             labels = ["area:async"]
             "#,
@@ -113,7 +116,7 @@ const WHEEL_ROWS: isize = 3;
 
 use crate::keys::{self, Action};
 use crate::svg;
-use crate::theme::Theme;
+use crate::theme::{Rgb, Theme};
 use crate::ui;
 
 /// Everything on screen, plus the ledger handle it was read from.
@@ -129,6 +132,9 @@ pub struct App {
     /// at render time: it takes two ledger reads, and a list you are not looking
     /// at only changes when something you did changed it.
     pub elsewhere: Counts,
+    /// Each repo's label colours, by repo id. Read once per reload rather than
+    /// per row: a repo's palette is small, and every row on screen wants it.
+    pub label_colours: std::collections::HashMap<i64, BTreeMap<String, String>>,
     /// Index into [`queue`](Self::queue) of the highlighted row. Always a valid
     /// index when the queue is non-empty; meaningless when it's empty.
     pub selected: usize,
@@ -650,6 +656,7 @@ impl App {
             queue: Vec::new(),
             listing: Listing::default(),
             elsewhere: Counts::default(),
+            label_colours: std::collections::HashMap::new(),
             selected: 0,
             detail: None,
             peek: None,
@@ -702,6 +709,12 @@ impl App {
             })
             .unwrap_or(self.selected)
             .min(self.queue.len().saturating_sub(1));
+        self.label_colours = self
+            .ledger
+            .repos()?
+            .into_iter()
+            .map(|(repo_id, _)| Ok((repo_id, self.ledger.label_colours(repo_id)?)))
+            .collect::<Result<_>>()?;
         self.elsewhere = Counts {
             waiting: self.ledger.waiting_all()?.len(),
             muted: self.ledger.muted_all()?.len(),
@@ -815,6 +828,37 @@ impl App {
     /// Rows a paging key moves by — whatever the last render measured.
     pub(crate) fn page(&self) -> usize {
         self.page
+    }
+
+    /// The labels a row should show, in the order the PR carries them, each with
+    /// the colour its own repo paints it.
+    ///
+    /// Filtered by the project the repo belongs to: a PR in a busy repo carries
+    /// a dozen labels and a row has space for two, so a project names the few it
+    /// steers by. A repo no project claims shows none — there is nobody to have
+    /// said which.
+    pub(crate) fn labels_for(&self, row: &Located<Row>) -> Vec<(String, Option<Rgb>)> {
+        let Some(project) = self.config.projects.iter().find(|project| {
+            project
+                .repos
+                .iter()
+                .any(|configured| configured.key() == row.repo)
+        }) else {
+            return Vec::new();
+        };
+        let colours = self.label_colours.get(&row.repo_id);
+        row.item
+            .pr
+            .labels
+            .iter()
+            .filter(|label| project.shows_label(label))
+            .map(|label| {
+                let colour = colours
+                    .and_then(|colours| colours.get(label))
+                    .and_then(|hex| crate::theme::from_hex(hex));
+                (label.clone(), colour)
+            })
+            .collect()
     }
 
     /// The glyphs to mark queue rows with, as configured.

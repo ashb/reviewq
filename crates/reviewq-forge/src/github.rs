@@ -18,7 +18,7 @@ use reviewq_core::model::{
 use serde::Deserialize;
 
 use crate::host::GITHUB_TOKEN_ENV;
-use crate::types::{PrDetail, RateLimit, SweepPage, Viewer};
+use crate::types::{LabelColour, PrDetail, RateLimit, SweepPage, Viewer};
 use crate::{Forge, ForgeError, ForgeHost, Result, Token, resolve_token};
 
 /// Classify what octocrab reported.
@@ -212,9 +212,18 @@ impl Forge for GithubForge {
         data.rate_limit.trace("sync:search");
 
         let mut prs = Vec::with_capacity(data.search.nodes.len());
+        // One entry per distinct label across the page, not per PR carrying it:
+        // the colour is the repo's, so the hundredth `area:Scheduler` says
+        // nothing the first did not.
+        let mut labels: BTreeMap<String, String> = BTreeMap::new();
         for node in data.search.nodes {
+            labels.extend(node.label_colours().map(|label| (label.name, label.color)));
             prs.push(node.into_snapshot()?);
         }
+        let labels = labels
+            .into_iter()
+            .map(|(name, color)| LabelColour { name, color })
+            .collect();
         let next = data
             .search
             .page_info
@@ -224,6 +233,7 @@ impl Forge for GithubForge {
 
         Ok(SweepPage {
             prs,
+            labels,
             next,
             total_count: data.search.issue_count,
             cost: data.rate_limit.cost,
@@ -473,6 +483,10 @@ struct LabelConn {
 #[derive(Debug, Deserialize)]
 struct Label {
     name: String,
+    /// Six hex digits, no `#`. Absent from the tier-2 query, which has no use
+    /// for it.
+    #[serde(default)]
+    color: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,6 +507,19 @@ struct PathNode {
 }
 
 impl PrNode {
+    /// The labels this PR carries, with the colours the repo paints them.
+    ///
+    /// Taken before the snapshot swallows the node, since the snapshot keeps
+    /// only the names.
+    fn label_colours(&self) -> impl Iterator<Item = LabelColour> + '_ {
+        self.labels.nodes.iter().filter_map(|label| {
+            Some(LabelColour {
+                name: label.name.clone(),
+                color: label.color.clone()?,
+            })
+        })
+    }
+
     fn into_snapshot(self) -> Result<PrSnapshot> {
         let state = PrState::from_wire(&self.state).ok_or_else(|| ForgeError::Unreachable {
             doing: format!("PR #{}: unknown state {:?}", self.number, self.state),
@@ -545,7 +572,7 @@ query($q: String!, $size: Int!, $after: String) {
       headRefOid
       baseRefName
       updatedAt
-      labels(first: 30) { nodes { name } }
+      labels(first: 30) { nodes { name color } }
       milestone { title }
       files(first: 100) { totalCount nodes { path } }
     } }
@@ -564,7 +591,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       headRefOid
       baseRefName
       updatedAt
-      labels(first: 30) { nodes { name } }
+      labels(first: 30) { nodes { name color } }
       milestone { title }
       files(first: 100) { totalCount nodes { path } }
     }

@@ -103,6 +103,7 @@ async fn sync_repo(
 
         // Files arrive with the sweep, so classification is pure — no per-PR
         // round trip that could fail mid-page.
+        let page_labels = page.labels;
         let mut batch = Vec::with_capacity(page.prs.len());
         let mut watermark: Option<Timestamp> = None;
         for pr in page.prs {
@@ -127,6 +128,16 @@ async fn sync_repo(
             batch.push((pr, reason));
         }
         stats.swept += batch.len();
+        // The repo's palette, as this page saw it. Cheap and idempotent: a page
+        // carries one entry per distinct label, and a colour that has not moved
+        // rewrites itself to the same thing.
+        ledger.set_label_colours(
+            repo_id,
+            &page_labels
+                .into_iter()
+                .map(|label| (label.name, label.color))
+                .collect::<Vec<_>>(),
+        )?;
 
         // Persist the page and advance the cursor to the newest updatedAt in
         // it, atomically. A ^C leaves the cursor at the last committed page, so
@@ -1277,6 +1288,22 @@ mod engine_tests {
         let queue = ledger.queue(repo_id).expect("queue");
         assert_eq!(queue.len(), 1, "the rule still keeps it");
         assert_eq!(queue[0].tracked_reason, "involved: review_requested");
+    }
+
+    #[tokio::test]
+    async fn the_sweep_records_the_colours_the_repo_paints_its_labels() {
+        let cfg = config("");
+        let forge = FakeForge::new(vec![
+            Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])
+                .painted(&[("area:task-sdk", "0e8a16"), ("kind:bug", "d73a4a")]),
+        ])
+        .with_detail(1, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        let colours = ledger.label_colours(repo_id).expect("colours");
+        assert_eq!(colours["area:task-sdk"], "0e8a16");
+        assert_eq!(colours["kind:bug"], "d73a4a");
     }
 
     #[tokio::test]

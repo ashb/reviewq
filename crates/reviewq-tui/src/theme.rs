@@ -246,6 +246,41 @@ fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
 /// its lightness moves. A colour already clearing `min` is returned untouched,
 /// so on a dark terminal most accents come through exactly as base16-ocean
 /// specifies them.
+impl Theme {
+    /// A colour from somewhere else, made legible here without losing its hue.
+    ///
+    /// For the labels: GitHub picks those to sit on its own chips, so plenty of
+    /// them are unreadable as text on this background — `000000` is a real label
+    /// colour. Lightness moves until it clears the same threshold the palette's
+    /// own accents do, which keeps `area:Scheduler` recognisably the green the
+    /// forge shows while keeping it readable.
+    pub fn adapt(&self, colour: Rgb) -> Rgb {
+        let min = match self.mode {
+            Mode::Dark => DIM_CONTRAST,
+            Mode::Light => LIGHT_DIM_CONTRAST,
+        };
+        readable(colour, self.bg, min)
+    }
+}
+
+/// Parse a forge's six hex digits, with or without a leading `#`.
+///
+/// `None` for anything else, which a caller draws in its own colour rather than
+/// guessing — the forge could hand us any string, and a label is not worth an
+/// error.
+pub fn from_hex(hex: &str) -> Option<Rgb> {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+    Some(Rgb {
+        r: channel(0)?,
+        g: channel(2)?,
+        b: channel(4)?,
+    })
+}
+
 fn readable(fg: Rgb, bg: Rgb, min: f64) -> Rgb {
     if contrast(fg, bg) >= min {
         return fg;
@@ -430,6 +465,49 @@ mod tests {
                 "{name} is {got:.2}:1, barely over the dark floor"
             );
         }
+    }
+
+    #[test]
+    fn a_forge_colour_is_read_with_or_without_its_hash() {
+        assert_eq!(from_hex("0e8a16"), Some(rgb(0x0e, 0x8a, 0x16)));
+        assert_eq!(from_hex("#0e8a16"), Some(rgb(0x0e, 0x8a, 0x16)));
+        // Anything else is drawn in our own colour rather than guessed at.
+        assert_eq!(from_hex("green"), None);
+        assert_eq!(from_hex("0e8a1"), None);
+        assert_eq!(from_hex(""), None);
+    }
+
+    #[test]
+    fn a_label_colour_is_made_legible_without_losing_its_hue() {
+        // GitHub picks these to sit on its own chips: `000000` is a real label
+        // colour, and unreadable as text on a dark background.
+        for mode in [Mode::Dark, Mode::Light] {
+            let theme = Theme::new(mode);
+            let black = from_hex("000000").expect("parses");
+            let adapted = theme.adapt(black);
+
+            assert!(
+                contrast(adapted, theme.bg) >= 3.0,
+                "{mode:?}: {} on {}",
+                hex(adapted),
+                hex(theme.bg)
+            );
+        }
+
+        // One that already reads is left exactly as the forge chose it.
+        let dark = Theme::new(Mode::Dark);
+        let green = from_hex("0e8a16").expect("parses");
+        assert_eq!(dark.adapt(green), dark.adapt(dark.adapt(green)));
+
+        // And a hue survives being made legible: airflow's blue stays blue.
+        let blue = from_hex("1d76db").expect("parses");
+        let adapted = Theme::new(Mode::Light).adapt(blue);
+        assert!(
+            (to_hsl(adapted).h - to_hsl(blue).h).abs() < 1.0,
+            "hue moved from {} to {}",
+            to_hsl(blue).h,
+            to_hsl(adapted).h
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use reviewq_ledger::{Located, RepoKey};
 
 use crate::app::{App, Focus, Listing, Overlay, Row, SNOOZE_PRESETS};
 use crate::keys::{self, Action};
-use crate::theme::{Theme, color};
+use crate::theme::{Rgb, Theme, color};
 
 /// What the mouse does, for the key reference.
 ///
@@ -216,6 +216,7 @@ fn queue_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
                 index == app.selected,
                 app.repo_count > 1,
                 app.marks(),
+                &app.labels_for(item),
                 t,
             )
         })
@@ -229,6 +230,7 @@ fn queue_row(
     selected: bool,
     multi: bool,
     marks: &Marks,
+    labels: &[(String, Option<Rgb>)],
     t: &Theme,
 ) -> Line<'static> {
     let q = &item.item;
@@ -249,6 +251,7 @@ fn queue_row(
         t.focus
     };
 
+    let reason = q.top_text();
     let mut spans = vec![
         Span::styled(marker, Style::default().fg(color(t.focus))),
         row_mark(present::mark(&q.pr, &q.my_state, q.deferred), marks, t),
@@ -258,13 +261,33 @@ fn queue_row(
             Style::default().fg(color(t.dim)),
         ),
         Span::raw("  "),
-        Span::styled(q.top_text(), Style::default().fg(color(reason_colour))),
+        Span::styled(reason.clone(), Style::default().fg(color(reason_colour))),
     ];
     if !q.pr.state.is_open() {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             format!("[{}]", q.pr.state.as_str()),
             Style::default().fg(color(state_colour(q.pr.state, t))),
+        ));
+    }
+    // Before the title, because after it they are the first thing a narrow pane
+    // cuts — and a label nobody can see is the one thing this feature cannot be.
+    // The title is what gives way instead; the project's shortlist is what keeps
+    // that affordable.
+    for (label, colour) in labels {
+        // Not one the reason has already said. `needs-first-look` renders as
+        // "matches label area:Scheduler", and printing the label again beside it
+        // is the same string twice on a row with no room for one.
+        if reason.contains(label.as_str()) {
+            continue;
+        }
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            label.clone(),
+            // The forge's own colour where it has told us one, adapted only as
+            // far as legibility here needs — a label you recognise by its colour
+            // is no use in a colour you cannot read.
+            Style::default().fg(color(colour.map_or(t.dim, |c| t.adapt(c)))),
         ));
     }
     spans.push(Span::raw("  "));
@@ -417,6 +440,29 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
             ),
         ]),
     ];
+
+    // Every label here, not the project's shortlist: the shortlist exists
+    // because a row has three columns to spare, and this pane has the width to
+    // show what the PR actually carries.
+    if !pr.labels.is_empty() {
+        let colours = app
+            .current()
+            .and_then(|row| app.label_colours.get(&row.repo_id));
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for label in &pr.labels {
+            if !spans.is_empty() {
+                spans.push(Span::raw(" "));
+            }
+            let colour = colours
+                .and_then(|colours| colours.get(label))
+                .and_then(|hex| crate::theme::from_hex(hex));
+            spans.push(Span::styled(
+                label.clone(),
+                Style::default().fg(color(colour.map_or(t.dim, |c| t.adapt(c)))),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
 
     if pr.is_draft {
         lines.push(Line::from(Span::styled(
@@ -1268,8 +1314,18 @@ sensor = S3KeySensor(deferrable=True)
     /// numbers, and its `OPEN · @potiuk` separator is the very glyph a queue mark
     /// uses — so a whole-line search answers about the wrong pane.
     fn queue_rows(rows: &[String]) -> Vec<String> {
+        // Split at the seam between the panes rather than at a column count, so
+        // this reads the right half of the screen whatever width it was drawn at.
         rows.iter()
-            .map(|line| line.chars().take(45).collect())
+            .map(|line| {
+                // The seam is `││` between two content rows and `╮╭` or `╯╰`
+                // where the borders meet.
+                let at = ["││", "╮╭", "╯╰"]
+                    .iter()
+                    .filter_map(|seam| line.find(seam))
+                    .min();
+                at.map_or_else(|| line.clone(), |at| line[..at].to_string())
+            })
             .collect()
     }
 
@@ -1605,6 +1661,58 @@ sensor = S3KeySensor(deferrable=True)
 
         let glyph = Marks::default().deferred.clone();
         assert!(row.contains(&format!("{glyph} #70135")), "{row}");
+    }
+
+    #[test]
+    fn a_row_shows_the_labels_the_project_asked_for_and_no_others() {
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut labelled = pr(70301, "Rework the executor loader");
+        labelled.labels = vec![
+            "area:Executors-core".into(),
+            "kind:bug".into(),
+            "backport".into(),
+        ];
+        queue_only(&ledger, repo_id, &labelled);
+        ledger
+            .set_label_colours(repo_id, &[("area:Executors-core".into(), "5319e7".into())])
+            .expect("colours");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        // Wide enough that both labels fit beside the title — the point here is
+        // which labels are chosen, not what a narrow pane cuts.
+        let rows = queue_rows(&render(&mut app, 200, 24));
+        let row = rows
+            .iter()
+            .find(|line| line.contains("#70301"))
+            .expect("the row");
+
+        // `show_labels = ["area:", "backport"]` in the test config.
+        assert!(row.contains("area:Executors-core"), "{row}");
+        assert!(row.contains("backport"), "{row}");
+        assert!(
+            !row.contains("kind:bug"),
+            "a label the project did not ask for: {row}"
+        );
+    }
+
+    #[test]
+    fn a_label_the_reason_already_names_is_not_printed_twice() {
+        // `needs-first-look` renders as "matches label area:async", and the row
+        // has no room to say the same thing beside it.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+
+        let rows = queue_rows(&render(&mut app, 200, 24));
+        let row = rows
+            .iter()
+            .find(|line| line.contains("#70201"))
+            .expect("the needs-first-look row");
+
+        assert_eq!(
+            row.matches("area:async").count(),
+            1,
+            "said once, by the reason: {row}"
+        );
     }
 
     #[test]
