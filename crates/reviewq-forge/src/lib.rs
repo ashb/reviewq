@@ -118,6 +118,15 @@ pub trait Forge: Send + Sync {
         login: &str,
     ) -> Result<Option<PrDetail>>;
 
+    /// Every label the repo defines, with its colour.
+    ///
+    /// One query for the whole palette, rather than learning colours from
+    /// whichever labels happen to be on the PRs a sweep touched. Label *names*
+    /// in the ledger go back to whenever each PR was last swept, so a label that
+    /// has not been on a recently-updated PR would otherwise never get a colour
+    /// — which is exactly how `stale` came to be the one label drawn in grey.
+    async fn fetch_labels(&self, owner: &str, name: &str) -> Result<Vec<LabelColour>>;
+
     /// Mark every unread notification thread for this PR read. The one write
     /// operation reviewq performs; `reviewq done` calls it best-effort — a
     /// failure here should not stop `done` from recording locally.

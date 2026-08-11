@@ -212,18 +212,9 @@ impl Forge for GithubForge {
         data.rate_limit.trace("sync:search");
 
         let mut prs = Vec::with_capacity(data.search.nodes.len());
-        // One entry per distinct label across the page, not per PR carrying it:
-        // the colour is the repo's, so the hundredth `area:Scheduler` says
-        // nothing the first did not.
-        let mut labels: BTreeMap<String, String> = BTreeMap::new();
         for node in data.search.nodes {
-            labels.extend(node.label_colours().map(|label| (label.name, label.color)));
             prs.push(node.into_snapshot()?);
         }
-        let labels = labels
-            .into_iter()
-            .map(|(name, color)| LabelColour { name, color })
-            .collect();
         let next = data
             .search
             .page_info
@@ -233,7 +224,6 @@ impl Forge for GithubForge {
 
         Ok(SweepPage {
             prs,
-            labels,
             next,
             total_count: data.search.issue_count,
             cost: data.rate_limit.cost,
@@ -331,6 +321,40 @@ impl Forge for GithubForge {
             .repository
             .and_then(|r| r.pull_request)
             .map(|pr| pr.into_detail(login, cost, remaining)))
+    }
+
+    async fn fetch_labels(&self, owner: &str, name: &str) -> Result<Vec<LabelColour>> {
+        let mut labels = Vec::new();
+        let mut after: Option<String> = None;
+        // Paginated because a big project has hundreds: apache/airflow alone
+        // carries a `provider:*` label per provider.
+        loop {
+            let mut vars = serde_json::Map::new();
+            vars.insert("owner".into(), owner.into());
+            vars.insert("name".into(), name.into());
+            vars.insert("after".into(), after.clone().into());
+
+            let data: LabelsQuery = self
+                .graphql(&format!("labels for {owner}/{name}"), LABELS_QUERY, vars)
+                .await?;
+            let Some(page) = data.repository.map(|repo| repo.labels) else {
+                return Ok(labels);
+            };
+            labels.extend(page.nodes.iter().filter_map(|label| {
+                Some(LabelColour {
+                    name: label.name.clone(),
+                    color: label.color.clone()?,
+                })
+            }));
+            match page
+                .page_info
+                .has_next_page
+                .then_some(page.page_info.end_cursor)
+            {
+                Some(Some(cursor)) => after = Some(cursor),
+                _ => return Ok(labels),
+            }
+        }
     }
 
     async fn mark_pr_notifications_read(&self, owner: &str, name: &str, number: u64) -> Result<()> {
@@ -553,6 +577,23 @@ impl PrNode {
 }
 
 #[derive(Debug, Deserialize)]
+struct LabelsQuery {
+    repository: Option<RepoLabels>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoLabels {
+    labels: LabelPage,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LabelPage {
+    page_info: PageInfo,
+    nodes: Vec<Label>,
+}
+
+#[derive(Debug, Deserialize)]
 struct FetchQuery {
     repository: Option<RepoPr>,
 }
@@ -578,7 +619,7 @@ query($q: String!, $size: Int!, $after: String) {
       headRefOid
       baseRefName
       updatedAt
-      labels(first: 30) { nodes { name color } }
+      labels(first: 30) { nodes { name } }
       milestone { title }
       files(first: 100) { totalCount nodes { path } }
     } }
@@ -973,6 +1014,18 @@ impl ThreadNode {
         }
     }
 }
+
+const LABELS_QUERY: &str = r"
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    labels(first: 100, after: $after) {
+      pageInfo { endCursor hasNextPage }
+      nodes { name color }
+    }
+  }
+  rateLimit { limit cost remaining resetAt }
+}
+";
 
 const DETAIL_QUERY: &str = r"
 query($owner: String!, $name: String!, $number: Int!) {

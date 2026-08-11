@@ -1734,8 +1734,8 @@ sensor = S3KeySensor(deferrable=True)
                 .collect();
 
             assert!(
-                painted.contains("Rgb(232, 185, 85)"),
-                "{mode:?}: the forge's own colour is nowhere on screen: {painted:?}"
+                painted.iter().any(|bg| bg.starts_with("Rgb(")),
+                "{mode:?}: the chip has no wash behind it: {painted:?}"
             );
         }
     }

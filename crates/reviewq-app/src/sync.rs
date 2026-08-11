@@ -30,7 +30,7 @@ pub const TRUNCATED_KEY: &str = "last_sweep_truncated";
 /// writing through one ledger handle. A failure on any repo aborts the run —
 /// but everything committed before it stays committed, and the cursor means the
 /// next sync resumes rather than starts over.
-pub async fn run(cfg: &Config, progress: &mut dyn SyncProgress) -> Result<ExitCode> {
+pub async fn run(cfg: &Config, labels: bool, progress: &mut dyn SyncProgress) -> Result<ExitCode> {
     let now = Timestamp::now();
     // One handle for the whole run: every configured repo's sync writes
     // through it, each scoped by its own `repo_id`.
@@ -51,6 +51,7 @@ pub async fn run(cfg: &Config, progress: &mut dyn SyncProgress) -> Result<ExitCo
                 project,
                 repo,
                 &rules,
+                labels,
                 now,
                 progress,
             )
@@ -73,9 +74,28 @@ async fn sync_repo(
     project: &Project,
     repo: &RepoRef,
     rules: &Interest,
+    labels: bool,
     now: Timestamp,
     progress: &mut dyn SyncProgress,
 ) -> Result<()> {
+    // The repo's whole palette, when asked for. Not on every sync: a colour
+    // changes about never, and this is a query per repo to learn what is almost
+    // always what we already knew. What it is *for* is the hole an incidental
+    // approach leaves — label names in the ledger go back to whenever each PR
+    // was last swept, so a label not on a recently-updated PR would otherwise
+    // have no colour indefinitely.
+    if labels {
+        let palette = forge.fetch_labels(&repo.owner, &repo.name).await?;
+        progress.page("labels", palette.len(), palette.len() as u32);
+        ledger.set_label_colours(
+            repo_id,
+            &palette
+                .into_iter()
+                .map(|label| (label.name, label.color))
+                .collect::<Vec<_>>(),
+        )?;
+    }
+
     let since = sweep_since(ledger, repo_id, cfg, now)?;
 
     // Oldest-updated first, so the cursor watermark advances monotonically and
@@ -103,7 +123,6 @@ async fn sync_repo(
 
         // Files arrive with the sweep, so classification is pure — no per-PR
         // round trip that could fail mid-page.
-        let page_labels = page.labels;
         let mut batch = Vec::with_capacity(page.prs.len());
         let mut watermark: Option<Timestamp> = None;
         for pr in page.prs {
@@ -128,17 +147,6 @@ async fn sync_repo(
             batch.push((pr, reason));
         }
         stats.swept += batch.len();
-        // The repo's palette, as this page saw it. Cheap and idempotent: a page
-        // carries one entry per distinct label, and a colour that has not moved
-        // rewrites itself to the same thing.
-        ledger.set_label_colours(
-            repo_id,
-            &page_labels
-                .into_iter()
-                .map(|label| (label.name, label.color))
-                .collect::<Vec<_>>(),
-        )?;
-
         // Persist the page and advance the cursor to the newest updatedAt in
         // it, atomically. A ^C leaves the cursor at the last committed page, so
         // the next sync resumes rather than re-sweeps.
@@ -907,6 +915,15 @@ mod engine_tests {
 
     /// Run one repo's whole sync against `forge`, returning the ledger it wrote.
     async fn sync(cfg: &Config, forge: &dyn Forge) -> (Ledger, i64, RecordingProgress) {
+        synced(cfg, forge, false).await
+    }
+
+    /// A sync that also asks for the repo's palette, as `--labels` does.
+    async fn synced(
+        cfg: &Config,
+        forge: &dyn Forge,
+        labels: bool,
+    ) -> (Ledger, i64, RecordingProgress) {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
         let mut progress = RecordingProgress::default();
@@ -920,12 +937,48 @@ mod engine_tests {
             project,
             &project.repos[0],
             &rules,
+            labels,
             now(),
             &mut progress,
         )
         .await
         .expect("sync");
         (ledger, repo_id, progress)
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_sync_does_not_ask_for_the_palette() {
+        // A colour changes about never, so this is a query per repo to learn
+        // what we already knew. `--labels` is how you ask.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
+            .with_repo_labels(&[("stale", "e8b955")])
+            .with_detail(1, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        assert!(ledger.label_colours(repo_id).expect("colours").is_empty());
+    }
+
+    #[tokio::test]
+    async fn asking_for_labels_records_every_one_the_repo_defines() {
+        // Every label, not only those on PRs this sweep touched: a label's name
+        // reaches the ledger whenever the PR carrying it was last swept, which
+        // may be long before colours were ever asked for — which is how `stale`
+        // came to be the one label drawn in grey.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
+            .with_repo_labels(&[("area:task-sdk", "0e8a16"), ("stale", "e8b955")])
+            .with_detail(1, 4900);
+
+        let (ledger, repo_id, _) = synced(&cfg, &forge, true).await;
+
+        let colours = ledger.label_colours(repo_id).expect("colours");
+        assert_eq!(colours["area:task-sdk"], "0e8a16");
+        assert_eq!(
+            colours["stale"], "e8b955",
+            "including one no PR on this page carries"
+        );
     }
 
     #[tokio::test]
@@ -1010,6 +1063,7 @@ mod engine_tests {
             project,
             &project.repos[0],
             &rules,
+            false,
             now(),
             &mut RecordingProgress::default(),
         )
@@ -1123,6 +1177,7 @@ mod engine_tests {
             project,
             &project.repos[0],
             &rules,
+            false,
             now(),
             &mut RecordingProgress::default(),
         )
@@ -1288,22 +1343,6 @@ mod engine_tests {
         let queue = ledger.queue(repo_id).expect("queue");
         assert_eq!(queue.len(), 1, "the rule still keeps it");
         assert_eq!(queue[0].tracked_reason, "involved: review_requested");
-    }
-
-    #[tokio::test]
-    async fn the_sweep_records_the_colours_the_repo_paints_its_labels() {
-        let cfg = config("");
-        let forge = FakeForge::new(vec![
-            Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])
-                .painted(&[("area:task-sdk", "0e8a16"), ("kind:bug", "d73a4a")]),
-        ])
-        .with_detail(1, 4900);
-
-        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
-
-        let colours = ledger.label_colours(repo_id).expect("colours");
-        assert_eq!(colours["area:task-sdk"], "0e8a16");
-        assert_eq!(colours["kind:bug"], "d73a4a");
     }
 
     #[tokio::test]

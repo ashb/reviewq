@@ -87,11 +87,12 @@ const LIGHT_TEXT_CONTRAST: f64 = 7.0;
 /// See [`LIGHT_TEXT_CONTRAST`].
 const LIGHT_DIM_CONTRAST: f64 = 4.5;
 
-/// The two inks a chip can carry. Which one a label gets is whichever reads
-/// better on the colour the forge chose — the same choice GitHub makes.
-const BLACK: Rgb = rgb(0x00, 0x00, 0x00);
-/// See [`BLACK`].
-const WHITE: Rgb = rgb(0xff, 0xff, 0xff);
+/// How much of a label's colour goes into the wash behind it.
+///
+/// GitHub uses about a fifth on a dark page, and the reason to stay near that is
+/// the same as the reason to use its colours at all: the point is recognising a
+/// label without reading it.
+const CHIP_TINT: f64 = 0.2;
 
 /// The dark palette's background: painted, and the reference every accent in that
 /// palette is made legible against.
@@ -253,25 +254,28 @@ fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
 /// so on a dark terminal most accents come through exactly as base16-ocean
 /// specifies them.
 impl Theme {
-    /// A label drawn the way the forge draws it: its colour behind, and text in
-    /// front picked to be legible on it.
+    /// A label drawn as the forge draws it: the colour tinted behind, and the
+    /// colour itself in front.
     ///
     /// Returns `(background, foreground)`.
     ///
-    /// The colour is used *exactly*, which is the whole point — GitHub picks
-    /// these to be a chip's background, and reading one as text instead means
-    /// bending it until it is legible on ours. That was the first attempt, and
-    /// on a light background it dragged `e8b955` to `996e15`: still gold by the
-    /// numbers, nothing like the label on the forge. Contrast has to come from
-    /// somewhere, and the only thing here that can give it up without losing
-    /// information is the text on top.
+    /// This is GitHub's own arrangement, not a solid fill of the label colour —
+    /// look at `stale` on a dark page and it is gold text on a faint gold wash,
+    /// with a gold rim. A terminal cannot round the corners, but it can do the
+    /// two colours, and they are what makes a label recognisable at a glance.
+    ///
+    /// Reading the colour as plain *text* was the first attempt and the wrong
+    /// one: legibility then has to come out of the colour itself, which on a
+    /// light background dragged `e8b955` to `996e15` — gold by the numbers and
+    /// nothing like the label on the forge. Here the wash gives the text
+    /// something close to its own hue to sit on, so it barely has to move.
     pub fn chip(&self, colour: Rgb) -> (Rgb, Rgb) {
-        let ink = if contrast(BLACK, colour) >= contrast(WHITE, colour) {
-            BLACK
-        } else {
-            WHITE
+        let bg = mix(self.bg, colour, CHIP_TINT);
+        let min = match self.mode {
+            Mode::Dark => DIM_CONTRAST,
+            Mode::Light => LIGHT_DIM_CONTRAST,
         };
-        (colour, ink)
+        (bg, readable(colour, bg, min))
     }
 }
 
@@ -490,39 +494,54 @@ mod tests {
     }
 
     #[test]
-    fn a_chip_keeps_the_forge_s_colour_exactly() {
-        // The reason for a chip at all. Read as text, `e8b955` had to become
-        // `996e15` to be legible on white — gold by the numbers and nothing like
-        // the label GitHub shows.
+    fn a_chip_keeps_the_hue_the_forge_chose() {
+        // What "looks like the label on GitHub" comes down to: `stale` is gold
+        // there and has to be gold here, in both palettes.
         for mode in [Mode::Dark, Mode::Light] {
             let theme = Theme::new(mode);
-            for label in ["e8b955", "0e8a16", "000000", "ffffff", "d73a4a"] {
+            for label in ["e8b955", "0e8a16", "1d76db", "d73a4a", "5319e7"] {
                 let colour = from_hex(label).expect("parses");
-                let (bg, _) = theme.chip(colour);
-                assert_eq!(hex(bg), format!("#{label}"), "{mode:?} moved {label}");
+                let (bg, ink) = theme.chip(colour);
+
+                for (part, drawn) in [("wash", bg), ("ink", ink)] {
+                    let moved = (to_hsl(drawn).h - to_hsl(colour).h).abs();
+                    assert!(
+                        !(2.0..=358.0).contains(&moved),
+                        "{mode:?} {part}: {label} became {} — hue moved {moved:.1}°",
+                        hex(drawn)
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn a_chip_picks_ink_that_can_be_read_on_it() {
-        let theme = Theme::default();
-        for label in ["e8b955", "0e8a16", "000000", "ffffff", "d73a4a", "5319e7"] {
-            let colour = from_hex(label).expect("parses");
-            let (bg, ink) = theme.chip(colour);
+    fn a_chip_is_legible_on_its_own_wash() {
+        // The wash is what lets the text keep its colour: it barely has to move,
+        // because it is sitting on its own hue rather than on the page.
+        for mode in [Mode::Dark, Mode::Light] {
+            let theme = Theme::new(mode);
+            for label in ["e8b955", "0e8a16", "000000", "ffffff", "d73a4a", "5319e7"] {
+                let colour = from_hex(label).expect("parses");
+                let (bg, ink) = theme.chip(colour);
 
-            assert!(
-                contrast(ink, bg) >= 4.5,
-                "{label}: {} on {} is {:.2}",
-                hex(ink),
-                hex(bg),
-                contrast(ink, bg)
-            );
+                assert!(
+                    contrast(ink, bg) >= 3.0,
+                    "{mode:?} {label}: {} on {} is {:.2}",
+                    hex(ink),
+                    hex(bg),
+                    contrast(ink, bg)
+                );
+            }
         }
+    }
 
-        // Light labels take dark ink and vice versa, as they do on the forge.
-        assert_eq!(hex(theme.chip(from_hex("e8b955").unwrap()).1), "#000000");
-        assert_eq!(hex(theme.chip(from_hex("5319e7").unwrap()).1), "#ffffff");
+    #[test]
+    fn a_dark_page_leaves_a_gold_label_gold() {
+        // The bug this replaced: read as text on a light background, `e8b955`
+        // came out `996e15`. On its own wash it stays where the forge put it.
+        let (_, ink) = Theme::new(Mode::Dark).chip(from_hex("e8b955").unwrap());
+        assert_eq!(hex(ink), "#e8b955");
     }
 
     #[test]

@@ -30,7 +30,9 @@ repos = [{ owner = "apache", name = "airflow" }]
 # has space for two or three beside the title, so name the families you steer by
 # rather than everything: a pattern ending in a separator is a prefix
 # (`area:` takes every `area:*`), anything else is a whole label name. The detail
-# pane shows every label a PR carries regardless.
+# pane shows every label a PR carries regardless. Colours come from
+# `reviewq sync --labels`, which an ordinary sync does not ask for: they change
+# about never, and a label with no colour yet is drawn as plain text.
 #   show_labels = ["area:", "backport"]
 
 # Keep surfacing every one of this project's PRs after it merges, so a post-merge

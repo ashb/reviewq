@@ -59,15 +59,6 @@ pub struct Viewer {
 pub struct SweepPage {
     /// PRs on this page, in the query's order.
     pub prs: Vec<PrSnapshot>,
-    /// Every distinct label seen on this page, with the colour the repo gives
-    /// it.
-    ///
-    /// Carried beside the PRs rather than on them: a [`PrSnapshot`] holds the
-    /// label *names*, which is what a rule matches on and what the ledger stores
-    /// per PR, while a colour belongs to the repo — the same name is a different
-    /// colour in another one, and repeating it on every PR would be storing one
-    /// fact a thousand times.
-    pub labels: Vec<LabelColour>,
     /// Opaque cursor for the next page, or `None` if this was the last.
     pub next: Option<String>,
     /// How many PRs match the query in total (`issueCount`); may exceed the

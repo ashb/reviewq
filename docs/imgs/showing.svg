@@ -14,8 +14,8 @@
 <text x="33.6" y="49.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="49.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70135</text>
 <text x="117.6" y="49.5" fill="#c36b73" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">@kaxil mentioned you</text>
-<rect x="294.0" y="36.0" width="126.0" height="18" fill="#0e8a16"/>
-<text x="294.0" y="49.5" fill="#000000" textLength="126.0" lengthAdjust="spacing" xml:space="preserve"> area:task-sdk </text>
+<rect x="294.0" y="36.0" width="126.0" height="18" fill="#1b341c"/>
+<text x="294.0" y="49.5" fill="#0e8a16" textLength="126.0" lengthAdjust="spacing" xml:space="preserve"> area:task-sdk </text>
 <text x="436.8" y="49.5" fill="#ffffff" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Deferrabl</text>
 <text x="520.8" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -26,8 +26,8 @@
 <text x="50.4" y="67.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69757</text>
 <text x="117.6" y="67.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@dstandish mentioned you</text>
 <text x="327.6" y="67.5" fill="#b48ead" textLength="67.2" lengthAdjust="spacing" xml:space="preserve">[MERGED]</text>
-<rect x="403.2" y="54.0" width="109.2" height="18" fill="#1d76db"/>
-<text x="403.2" y="67.5" fill="#000000" textLength="109.2" lengthAdjust="spacing" xml:space="preserve"> area:Schedul</text>
+<rect x="403.2" y="54.0" width="109.2" height="18" fill="#1e3044"/>
+<text x="403.2" y="67.5" fill="#1d78df" textLength="109.2" lengthAdjust="spacing" xml:space="preserve"> area:Schedul</text>
 <text x="520.8" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="67.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="67.5" fill="#b48ead" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">MERGED</text>
@@ -36,8 +36,8 @@
 <text x="0.0" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="50.4" y="85.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70390</text>
 <text x="117.6" y="85.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@o-nikolas mentioned you</text>
-<rect x="327.6" y="72.0" width="176.4" height="18" fill="#5319e7"/>
-<text x="327.6" y="85.5" fill="#ffffff" textLength="176.4" lengthAdjust="spacing" xml:space="preserve"> area:Executors-core </text>
+<rect x="327.6" y="72.0" width="176.4" height="18" fill="#291d46"/>
+<text x="327.6" y="85.5" fill="#7b4fed" textLength="176.4" lengthAdjust="spacing" xml:space="preserve"> area:Executors-core </text>
 <text x="520.8" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="85.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="85.5" fill="#9a9a9a" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">updated 2026-08-04T15:30:00Z · → main</text>
@@ -46,8 +46,8 @@
 <text x="33.6" y="103.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="103.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70208</text>
 <text x="117.6" y="103.5" fill="#c36b73" textLength="302.4" lengthAdjust="spacing" xml:space="preserve">@potiuk replied in 2 threads you own</text>
-<rect x="428.4" y="90.0" width="84.0" height="18" fill="#1d76db"/>
-<text x="428.4" y="103.5" fill="#000000" textLength="84.0" lengthAdjust="spacing" xml:space="preserve"> area:Sche</text>
+<rect x="428.4" y="90.0" width="84.0" height="18" fill="#1e3044"/>
+<text x="428.4" y="103.5" fill="#1d78df" textLength="84.0" lengthAdjust="spacing" xml:space="preserve"> area:Sche</text>
 <text x="520.8" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="103.5" fill="#8fa1b3" textLength="361.2" lengthAdjust="spacing" xml:space="preserve">fetched for this look only — nothing stored</text>
@@ -63,8 +63,8 @@
 <text x="33.6" y="139.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="139.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69982</text>
 <text x="117.6" y="139.5" fill="#96b5b4" textLength="352.8" lengthAdjust="spacing" xml:space="preserve">3 new commits since your review of 5e14b22</text>
-<rect x="478.8" y="126.0" width="33.6" height="18" fill="#b60205"/>
-<text x="478.8" y="139.5" fill="#ffffff" textLength="33.6" lengthAdjust="spacing" xml:space="preserve"> are</text>
+<rect x="478.8" y="126.0" width="33.6" height="18" fill="#3c1819"/>
+<text x="478.8" y="139.5" fill="#de0206" textLength="33.6" lengthAdjust="spacing" xml:space="preserve"> are</text>
 <text x="520.8" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="139.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
@@ -87,8 +87,8 @@
 <text x="33.6" y="193.5" fill="#8fa1b3" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">󰒲</text>
 <text x="50.4" y="193.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70102</text>
 <text x="117.6" y="193.5" fill="#8fa1b3" textLength="277.2" lengthAdjust="spacing" xml:space="preserve">matches label area:Executors-core</text>
-<rect x="403.2" y="180.0" width="84.0" height="18" fill="#fbca04"/>
-<text x="403.2" y="193.5" fill="#000000" textLength="84.0" lengthAdjust="spacing" xml:space="preserve"> backport </text>
+<rect x="403.2" y="180.0" width="84.0" height="18" fill="#4a4019"/>
+<text x="403.2" y="193.5" fill="#fbca04" textLength="84.0" lengthAdjust="spacing" xml:space="preserve"> backport </text>
 <text x="487.2" y="193.5" fill="#ffffff" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">  B </text>
 <text x="520.8" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>

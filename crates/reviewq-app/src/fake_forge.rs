@@ -50,7 +50,6 @@ fn rate_limit(remaining: u32) -> RateLimit {
 #[derive(Clone)]
 pub(crate) struct Page {
     prs: Vec<PrSnapshot>,
-    labels: Vec<reviewq_forge::LabelColour>,
     next: Option<String>,
     total_count: u32,
     remaining: u32,
@@ -61,7 +60,6 @@ impl Page {
         let total_count = prs.len() as u32;
         Self {
             prs,
-            labels: Vec::new(),
             next: None,
             total_count,
             remaining: 4900,
@@ -70,18 +68,6 @@ impl Page {
 
     pub(crate) fn then(mut self, cursor: &str) -> Self {
         self.next = Some(cursor.to_string());
-        self
-    }
-
-    /// Paint the labels this page's PRs carry, as the forge does.
-    pub(crate) fn painted(mut self, labels: &[(&str, &str)]) -> Self {
-        self.labels = labels
-            .iter()
-            .map(|(name, color)| reviewq_forge::LabelColour {
-                name: (*name).to_string(),
-                color: (*color).to_string(),
-            })
-            .collect();
         self
     }
 
@@ -109,6 +95,8 @@ pub(crate) struct FakeForge {
     details: Mutex<std::collections::HashMap<u64, PrDetail>>,
     /// The colours a direct fetch reports.
     fetched_labels: Mutex<Vec<reviewq_forge::LabelColour>>,
+    /// The repo's whole palette, as `fetch_labels` reports it.
+    repo_labels: Mutex<Vec<reviewq_forge::LabelColour>>,
     /// Numbers whose detail fetch should fail outright.
     detail_errors: Mutex<std::collections::HashSet<u64>>,
     asked: Mutex<Asked>,
@@ -120,6 +108,7 @@ impl FakeForge {
             pages: Mutex::new(pages.into()),
             details: Mutex::new(std::collections::HashMap::new()),
             fetched_labels: Mutex::new(Vec::new()),
+            repo_labels: Mutex::new(Vec::new()),
             detail_errors: Mutex::new(std::collections::HashSet::new()),
             asked: Mutex::new(Asked::default()),
         }
@@ -145,6 +134,18 @@ impl FakeForge {
                 remaining,
             },
         );
+        self
+    }
+
+    /// The palette the repo defines, as `fetch_labels` reports it.
+    pub(crate) fn with_repo_labels(self, labels: &[(&str, &str)]) -> Self {
+        *self.repo_labels.lock().expect("lock") = labels
+            .iter()
+            .map(|(name, color)| reviewq_forge::LabelColour {
+                name: (*name).to_string(),
+                color: (*color).to_string(),
+            })
+            .collect();
         self
     }
 
@@ -216,7 +217,6 @@ impl Forge for FakeForge {
         };
         Ok(SweepPage {
             prs: page.prs,
-            labels: page.labels,
             next: page.next,
             total_count: page.total_count,
             cost: 1,
@@ -246,6 +246,14 @@ impl Forge for FakeForge {
             });
         }
         Ok(self.details.lock().expect("lock").get(&number).cloned())
+    }
+
+    async fn fetch_labels(
+        &self,
+        _owner: &str,
+        _name: &str,
+    ) -> Result<Vec<reviewq_forge::LabelColour>> {
+        Ok(self.repo_labels.lock().expect("lock").clone())
     }
 
     async fn mark_pr_notifications_read(

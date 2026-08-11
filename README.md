@@ -13,8 +13,8 @@ changed since I looked?" answerable.
 ![The queue, with the selected PR's detail beside it](docs/imgs/queue.svg)
 
 Every row says why it is there, most urgent first, carries the labels your project
-asked to see — in the colours the repo paints them — and a mark for what you have
-already done to it: `✓` a review you submitted on the forge, `·` a `done` of
+asked to see — as chips, in the colours the repo paints them, which `reviewq sync
+--labels` brings in — and a mark for what you have already done to it: `✓` a review you submitted on the forge, `·` a `done` of
 your own — dimmed once the PR has moved past the head that mark names — and `󰒲`
 for one you deferred. The pictures on this page are generated from a fixture by
 the interface itself, so they cannot drift from what it draws.
@@ -37,7 +37,7 @@ everything it needs to be true before a sync can work, and says which of it isn'
 
 | | |
 |---|---|
-| `sync [N]` | Fetch from the forge and rebuild the ledger, or refresh one PR |
+| `sync [N] [--labels]` | Fetch from the forge and rebuild the ledger, refresh one PR, or bring in each repo's label palette |
 | `list [--all\|--waiting\|--muted] [--json]` | The queue, everything tracked, what waits on someone else, or what you have silenced |
 | `next [--json]` | Just the most urgent one |
 | `show <N\|url> [--json]` | Everything known about one PR and why it is on the queue |

@@ -146,6 +146,15 @@ pub struct SyncArgs {
     /// hasn't seen, nor a review requested of a team you're in.
     #[arg(value_parser = pr_number)]
     pub number: Option<u64>,
+
+    /// Also fetch every label each repo defines, with its colour.
+    ///
+    /// A label's colour changes about never, so an ordinary sync does not ask:
+    /// this is one extra query per repo to bring the whole palette in. Run it
+    /// once to colour what you already have, and again if a label is added or
+    /// recoloured and you would rather not wait.
+    #[arg(long, conflicts_with = "number")]
+    pub labels: bool,
 }
 
 #[derive(Debug, Args)]
