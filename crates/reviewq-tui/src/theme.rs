@@ -544,7 +544,6 @@ mod tests {
         let hsl = to_hsl(grey);
         assert_eq!(hsl.s, 0.0);
         assert_eq!(from_hsl(hsl), grey);
-        // Darkened for white it stays a grey rather than acquiring a tint.
         let darkened = readable(grey, LIGHT_BG, LIGHT_DIM_CONTRAST);
         assert_eq!(darkened.r, darkened.g, "{}", hex(darkened));
         assert_eq!(darkened.g, darkened.b, "{}", hex(darkened));

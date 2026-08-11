@@ -7,6 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use reviewq_core::model::PrSnapshot;
+use reviewq_ledger::Ledger;
+
 /// Cargo builds the binary before running integration tests and hands us its
 /// path, so no dependency on `assert_cmd` is needed.
 const BIN: &str = env!("CARGO_BIN_EXE_reviewq");
@@ -238,9 +241,6 @@ fn show_disambiguates_a_shared_pr_number_by_url() {
     ));
     let _ = std::fs::remove_file(&db);
     {
-        use reviewq_core::model::PrSnapshot;
-        use reviewq_ledger::Ledger;
-
         let pr = |title: &str| PrSnapshot {
             number: 42,
             title: title.to_string(),
