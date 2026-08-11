@@ -10,6 +10,14 @@ not keep for you — which head SHA you last reviewed, what you have acknowledge
 what you have snoozed — lives in a local ledger, which is what makes "has this
 changed since I looked?" answerable.
 
+![The queue, with the selected PR's detail beside it](docs/imgs/queue.svg)
+
+Every row says why it is there, most urgent first, and carries a mark for what you
+have already done to it: `✓` a review you submitted on the forge, `·` a `done` of
+your own — dimmed once the PR has moved past the head that mark names — and `󰒲`
+for one you deferred. The pictures on this page are generated from a fixture by
+the interface itself, so they cannot drift from what it draws.
+
 ## Getting started
 
 ```sh
@@ -40,6 +48,28 @@ everything it needs to be true before a sync can work, and says which of it isn'
 | `tui` | The interactive queue; `?` lists the keys |
 | `doctor` | What is wrong, and where things live |
 
+## The interface
+
+`?` opens the reference: what the marks mean, every key, and the mouse.
+
+![The key and mark reference](docs/imgs/reference.svg)
+
+`:` goes to a PR by number. One that isn't on the queue — merged, closed, never
+tracked, or never even swept — is not a refusal: showing a PR is read-only and
+always possible, so that is offered, with tracking alongside it where that would
+mean anything.
+
+![Going to a PR the queue does not have](docs/imgs/show-anyway.svg)
+
+Taking the offer fetches it into a scratch view that is never stored, and says so.
+`Esc` returns to the queue.
+
+![A PR shown read-only, fetched but not tracked](docs/imgs/showing.svg)
+
+The palette adapts to a light terminal with `t`, or `[output] theme = "light"`.
+
+![The same queue on a light background](docs/imgs/queue-light.svg)
+
 ## How it fits together
 
 Six crates, split at what each is allowed to know:
@@ -64,7 +94,13 @@ Six crates, split at what each is allowed to know:
 make all      # fmt, lint, test, purity — what CI runs
 make test
 make cov      # coverage for reviewq-core, a tool rather than a gate
+make docs     # redraw the screenshots on this page
 ```
+
+The screenshots are drawn from a fixture by the interface itself, and the
+committed files are checked on every test run — a change to the layout, the
+palette or the marks fails the suite until `make docs` redraws them. That is what
+keeps them from quietly becoming pictures of a version nobody runs.
 
 Tests never touch a real config or ledger: the paths that would reach them panic
 in a test build, and the integration tests spawn the binary only through a helper

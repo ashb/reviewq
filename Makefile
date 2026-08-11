@@ -1,4 +1,4 @@
-.PHONY: check fmt fmt-check lint test purity cov all
+.PHONY: check fmt fmt-check lint test purity cov docs all
 
 all: fmt lint test purity
 
@@ -17,6 +17,12 @@ lint:
 
 test:
 	cargo test --workspace
+
+# Redraw the README's screenshots from the fixture. `make test` asserts they
+# match what the interface currently draws, so this is what to run when it says
+# they don't — and then to look at what changed before committing it.
+docs:
+	REVIEWQ_WRITE_DOCS=1 cargo test --package reviewq-tui docs
 
 # reviewq-core must stay IO-free. The manifest is the intent; this is the
 # enforcement, because a transitive dependency can reintroduce async or SQLite

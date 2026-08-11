@@ -10,6 +10,8 @@
 //! choice is informed.
 
 mod app;
+#[cfg(test)]
+mod docs;
 mod svg;
 mod ui;
 

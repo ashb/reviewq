@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1176" height="612" viewBox="0 0 1176 612" font-family="&quot;JetBrains Mono&quot;, &quot;Symbols Nerd Font&quot;, monospace" font-size="14">
+<style>
+@import url("https://fonts.bunny.net/css?family=jetbrains-mono:400,700");
+</style>
+<rect width="100%" height="100%" fill="#1e1e1e"/>
+<text x="0.0" y="13.5" fill="#ffffff" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">reviewq</text>
+<text x="75.6" y="13.5" fill="#9a9a9a" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">9 on the queue</text>
+<text x="0.0" y="31.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╭ Queue ──────────────────────────────────────────────────────╮</text>
+<text x="529.2" y="31.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">╭</text>
+<text x="537.6" y="31.5" fill="#9a9a9a" textLength="268.8" lengthAdjust="spacing" xml:space="preserve"> apache/airflow#69401 · showing </text>
+<text x="806.4" y="31.5" fill="#606a74" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">───────────────────────────────────────────╮</text>
+<text x="0.0" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="16.8" y="49.5" fill="#96b5b4" textLength="16.8" lengthAdjust="spacing" xml:space="preserve">▸ </text>
+<text x="33.6" y="49.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="50.4" y="49.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70135</text>
+<text x="117.6" y="49.5" fill="#c36b73" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">@kaxil mentioned you</text>
+<text x="302.4" y="49.5" fill="#ffffff" textLength="210.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Deferrable mode for S3Key</text>
+<text x="520.8" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="49.5" fill="#ffffff" textLength="285.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Drop the deprecated SubDagOperator</text>
+<text x="1167.6" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="33.6" y="67.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">·</text>
+<text x="50.4" y="67.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69757</text>
+<text x="117.6" y="67.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@dstandish mentioned you</text>
+<text x="327.6" y="67.5" fill="#b48ead" textLength="67.2" lengthAdjust="spacing" xml:space="preserve">[MERGED]</text>
+<text x="394.8" y="67.5" fill="#ffffff" textLength="126.0" lengthAdjust="spacing" xml:space="preserve">  Rework the s </text>
+<text x="520.8" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="67.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="67.5" fill="#b48ead" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">MERGED</text>
+<text x="596.4" y="67.5" fill="#9a9a9a" textLength="193.2" lengthAdjust="spacing" xml:space="preserve"> · @eladkal · untracked</text>
+<text x="1167.6" y="67.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="50.4" y="85.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70390</text>
+<text x="117.6" y="85.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@o-nikolas mentioned you</text>
+<text x="319.2" y="85.5" fill="#ffffff" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">  WIP: replace the exec </text>
+<text x="520.8" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="85.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="85.5" fill="#9a9a9a" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">updated 2026-08-04T15:30:00Z · → main</text>
+<text x="1167.6" y="85.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="33.6" y="103.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="50.4" y="103.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70208</text>
+<text x="117.6" y="103.5" fill="#c36b73" textLength="302.4" lengthAdjust="spacing" xml:space="preserve">@potiuk replied in 2 threads you own</text>
+<text x="420.0" y="103.5" fill="#ffffff" textLength="100.8" lengthAdjust="spacing" xml:space="preserve">  Fix sched </text>
+<text x="520.8" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="103.5" fill="#8fa1b3" textLength="361.2" lengthAdjust="spacing" xml:space="preserve">fetched for this look only — nothing stored</text>
+<text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="33.6" y="121.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="50.4" y="121.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70061</text>
+<text x="117.6" y="121.5" fill="#96b5b4" textLength="394.8" lengthAdjust="spacing" xml:space="preserve">@jedcunningham resolved your thread without rep</text>
+<text x="520.8" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="33.6" y="139.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="50.4" y="139.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69982</text>
+<text x="117.6" y="139.5" fill="#96b5b4" textLength="352.8" lengthAdjust="spacing" xml:space="preserve">3 new commits since your review of 5e14b22</text>
+<text x="470.4" y="139.5" fill="#ffffff" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  Ser </text>
+<text x="520.8" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="139.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
+<text x="1167.6" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="50.4" y="157.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70311</text>
+<text x="117.6" y="157.5" fill="#96b5b4" textLength="394.8" lengthAdjust="spacing" xml:space="preserve">review requested via @apache/airflow-committers</text>
+<text x="520.8" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="157.5" fill="#9a9a9a" textLength="260.4" lengthAdjust="spacing" xml:space="preserve">  you have not looked at it yet</text>
+<text x="1167.6" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="50.4" y="175.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70344</text>
+<text x="117.6" y="175.5" fill="#96b5b4" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">matches author FIRST_TIME_CONTRIBUTOR</text>
+<text x="428.4" y="175.5" fill="#ffffff" textLength="92.4" lengthAdjust="spacing" xml:space="preserve">  Docs: de </text>
+<text x="520.8" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="33.6" y="193.5" fill="#8fa1b3" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">󰒲</text>
+<text x="50.4" y="193.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70102</text>
+<text x="117.6" y="193.5" fill="#8fa1b3" textLength="277.2" lengthAdjust="spacing" xml:space="preserve">matches label area:Executors-core</text>
+<text x="394.8" y="193.5" fill="#ffffff" textLength="126.0" lengthAdjust="spacing" xml:space="preserve">  Bump the min </text>
+<text x="520.8" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="193.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Attention</text>
+<text x="1167.6" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="211.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  none</text>
+<text x="1167.6" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="229.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="229.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="247.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="247.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="247.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="247.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Reviewers</text>
+<text x="1167.6" y="247.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="265.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="265.5" fill="#a3be8c" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">  APPROVED          </text>
+<text x="714.0" y="265.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve">@potiuk</text>
+<text x="1167.6" y="265.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="283.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="283.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="301.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="301.5" fill="#9a9a9a" textLength="92.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Description</text>
+<text x="1167.6" y="301.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="319.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="537.6" y="319.5" fill="#ffffff" textLength="75.6" lengthAdjust="spacing" xml:space="preserve"> Removes </text>
+<text x="613.2" y="319.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">SubDagOperator</text>
+<text x="730.8" y="319.5" fill="#ffffff" textLength="436.8" lengthAdjust="spacing" xml:space="preserve"> and its scheduler special-casing. Anything still   </text>
+<text x="1167.6" y="319.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="337.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="337.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="337.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="537.6" y="337.5" fill="#ffffff" textLength="630.0" lengthAdjust="spacing" xml:space="preserve"> importing it should move to a task group.                                 </text>
+<text x="1167.6" y="337.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="355.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="355.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="355.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="355.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="373.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="373.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="373.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="373.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="391.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="391.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="409.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="409.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="427.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="427.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="481.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="481.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="520.8" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="529.2" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="0.0" y="589.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────╯</text>
+<text x="529.2" y="589.5" fill="#606a74" textLength="646.8" lengthAdjust="spacing" xml:space="preserve">╰───────────────────────────────────────────────────────────────────────────╯</text>
+<text x="16.8" y="607.5" fill="#ebcb8b" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Esc</text>
+<text x="42.0" y="607.5" fill="#9a9a9a" textLength="151.2" lengthAdjust="spacing" xml:space="preserve"> back to the queue</text>
+<text x="218.4" y="607.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">jk</text>
+<text x="235.2" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> scroll</text>
+<text x="319.2" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">o</text>
+<text x="327.6" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> open</text>
+<text x="394.8" y="607.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">c / y</text>
+<text x="436.8" y="607.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve"> copy URL</text>
+</svg>
