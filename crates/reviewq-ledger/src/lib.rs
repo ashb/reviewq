@@ -894,6 +894,27 @@ impl Ledger {
         Ok(())
     }
 
+    /// Record the state a detail fetch found the PR in — open, merged, or
+    /// closed.
+    ///
+    /// The sweep writes this as part of the whole snapshot, so this exists for
+    /// the one path that never sweeps: refreshing a single PR. Without it, a PR
+    /// closed on the forge stayed `OPEN` in the ledger however many times you
+    /// refreshed it, and went on being listed as waiting on somebody.
+    ///
+    /// Only the state: everything else a detail fetch knows is committed by
+    /// [`commit_detail`](Self::commit_detail), and the rest of the snapshot
+    /// (title, labels, milestone) is the sweep's to own.
+    pub fn set_state(&self, repo_id: i64, number: u64, state: PrState) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE prs SET state = ?3 WHERE repo_id = ?1 AND number = ?2",
+                params![repo_id, number as i64, state.as_str()],
+            )
+            .doing(format!("recording #{number}'s state"))?;
+        Ok(())
+    }
+
     /// The instant-hide half of `reviewq done`: every reason `done` is allowed
     /// to clear per the reason table, but not `review_requested` — only my
     /// review or the request being withdrawn clears that one.
@@ -921,7 +942,11 @@ impl Ledger {
         }
         self.conn
             .execute(
-                "UPDATE prs SET tracked_reason = ?3 WHERE repo_id = ?1 AND number = ?2",
+                // `untracked_at` cleared as well: `track` is what undoes an
+                // untrack, and leaving the stamp would let the next sweep drop
+                // the reason this just wrote.
+                "UPDATE prs SET tracked_reason = ?3, untracked_at = NULL \
+                 WHERE repo_id = ?1 AND number = ?2",
                 params![
                     repo_id,
                     number as i64,
@@ -929,6 +954,40 @@ impl Ledger {
                 ],
             )
             .doing(format!("force-tracking #{number}"))?;
+        Ok(true)
+    }
+
+    /// Stop watching a PR: drop the reason it was tracked for, and the attention
+    /// it was holding.
+    ///
+    /// `false`, changing nothing, if the ledger has no such PR.
+    ///
+    /// The PR stays stored and keeps being swept, so `show` still answers and a
+    /// later [`track`](Self::track) has something to put back. What it loses is
+    /// its standing on every list — the queue, waiting and muted all ask for a
+    /// tracked reason — and, through `untracked_at`, its eligibility to be
+    /// tracked again by a rule that still matches it.
+    ///
+    /// [`MyState`] survives: what you reviewed and when you were done with it
+    /// stays true whether or not you are still watching.
+    pub fn untrack(&self, repo_id: i64, number: u64, now: Timestamp) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx
+            .execute(
+                "UPDATE prs SET tracked_reason = NULL, untracked_at = ?3 \
+                 WHERE repo_id = ?1 AND number = ?2",
+                params![repo_id, number as i64, now.to_string()],
+            )
+            .doing(format!("untracking #{number}"))?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
+            params![repo_id, number as i64],
+        )
+        .doing(format!("clearing attention for untracked #{number}"))?;
+        tx.commit()?;
         Ok(true)
     }
 
@@ -1408,12 +1467,14 @@ fn tracked_reason(conn: &Connection, repo_id: i64, number: u64) -> Result<Option
 /// there is no row yet.
 fn stored_tracking(conn: &Connection, repo_id: i64, number: u64) -> Result<Tracking> {
     conn.query_row(
-        "SELECT tracked_reason, after_merge FROM prs WHERE repo_id = ?1 AND number = ?2",
+        "SELECT tracked_reason, after_merge, untracked_at FROM prs \
+         WHERE repo_id = ?1 AND number = ?2",
         params![repo_id, number as i64],
         |row| {
             Ok(Tracking {
                 reason: row.get(0)?,
                 after_merge: row.get::<_, i64>(1)? != 0,
+                untracked: row.get::<_, Option<String>>(2)?.is_some(),
             })
         },
     )
@@ -1439,6 +1500,9 @@ fn existing_row(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<u
 struct Tracking {
     reason: Option<String>,
     after_merge: bool,
+    /// `reviewq untrack` said to stop watching this one, so no rule may track
+    /// it again until `reviewq track` says otherwise.
+    untracked: bool,
 }
 
 /// Merge stored tracking with an incoming reason by precedence: keep the
@@ -1452,6 +1516,17 @@ struct Tracking {
 /// on the way past would drop a PR a post-merge rule matched at merge, purely
 /// because somebody had also asked you to review it.
 fn merge_tracking(stored: Tracking, incoming: Option<&TrackedReason>) -> Tracking {
+    // An untracked PR keeps being swept — its title, labels and state stay
+    // current, so `show` and a later `track` have something to work with — but
+    // nothing a sweep or an involvement search finds may track it again. That
+    // is the difference between this and `done`: one says "not now", this says
+    // "not until I say so".
+    if stored.untracked {
+        return Tracking {
+            reason: None,
+            ..stored
+        };
+    }
     let after_merge = match incoming {
         Some(TrackedReason::Interest { after_merge, .. }) => *after_merge,
         Some(TrackedReason::Involved(_)) | None => stored.after_merge,
@@ -1468,6 +1543,7 @@ fn merge_tracking(stored: Tracking, incoming: Option<&TrackedReason>) -> Trackin
     Tracking {
         reason,
         after_merge,
+        untracked: false,
     }
 }
 
@@ -2297,6 +2373,7 @@ mod tests {
         let stored = |reason: &str| Tracking {
             reason: Some(reason.to_string()),
             after_merge: false,
+            untracked: false,
         };
         let merged = |stored, incoming| merge_tracking(stored, incoming).reason;
 
@@ -2317,6 +2394,12 @@ mod tests {
             merged(stored("involved: old"), None).as_deref(),
             Some("involved: old")
         );
+        // Whatever the incoming reason, a PR you untracked stays untracked.
+        let untracked = Tracking {
+            untracked: true,
+            ..stored("interest: label x")
+        };
+        assert_eq!(merged(untracked, Some(&matched)), None);
     }
 
     #[test]
@@ -3400,6 +3483,87 @@ mod tests {
             ledger.list_tracked(repo_id).unwrap()[0].tracked_reason,
             "involved: manual"
         );
+    }
+
+    #[test]
+    fn untrack_drops_a_pr_from_every_list_and_keeps_a_rule_from_taking_it_back() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        let committed = ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[attn(
+                    AttentionReason::Mention { by: "kaxil".into() },
+                    "2026-08-11T10:00:00Z",
+                )],
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(committed, Committed::Applied);
+        assert_eq!(ledger.queue(repo_id).unwrap().len(), 1);
+
+        assert!(ledger.untrack(repo_id, 1, now()).unwrap());
+
+        assert!(ledger.list_tracked(repo_id).unwrap().is_empty());
+        assert!(ledger.queue(repo_id).unwrap().is_empty());
+        assert!(ledger.waiting(repo_id).unwrap().is_empty());
+        assert!(
+            ledger.show(repo_id, 1).unwrap().is_some(),
+            "still stored — untracking is a decision about watching it, not a delete"
+        );
+
+        // The rule that tracked it still matches, and the next sweep says so.
+        // Without the stamp this is where the untrack would quietly undo itself.
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(1),
+                Some(interest("label area:task-sdk")),
+                now(),
+            )
+            .unwrap();
+        assert!(
+            ledger.list_tracked(repo_id).unwrap().is_empty(),
+            "a sweep must not take back a PR you said you were finished with"
+        );
+        let show = ledger.show(repo_id, 1).unwrap().unwrap();
+        assert_eq!(show.tracked_reason, None);
+    }
+
+    #[test]
+    fn track_is_how_an_untracked_pr_comes_back() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        ledger.untrack(repo_id, 1, now()).unwrap();
+
+        assert!(ledger.track(repo_id, 1).unwrap());
+        assert_eq!(
+            ledger.list_tracked(repo_id).unwrap()[0].tracked_reason,
+            "involved: manual"
+        );
+
+        // And the stamp is gone with it, so a sweep may write a real reason
+        // over the manual one again.
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(1),
+                Some(interest("label area:task-sdk")),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(ledger.list_tracked(repo_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn untracking_a_pr_the_ledger_never_had_changes_nothing() {
+        let (ledger, repo_id) = ledger_with_repo();
+        assert!(!ledger.untrack(repo_id, 404, now()).unwrap());
     }
 
     #[test]

@@ -2,6 +2,7 @@
   "repository": {
     "pullRequest": {
       "number": 44870,
+      "state": "OPEN",
       "headRefOid": "d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a291",
       "reviewRequests": {
         "nodes": [

@@ -710,6 +710,11 @@ struct DetailRepo {
 #[serde(rename_all = "camelCase")]
 struct DetailPr {
     number: u64,
+    /// `OPEN`, `CLOSED` or `MERGED`. Asked for here as well as in the sweep,
+    /// because a refresh of one PR is the whole of what some runs do — and a
+    /// PR closed since the last sweep is exactly the kind of thing somebody
+    /// presses `r` to find out about.
+    state: String,
     head_ref_oid: String,
     /// The PR's description. GraphQL types it non-null, but an empty
     /// description is the common case, so it's defaulted rather than required.
@@ -937,6 +942,10 @@ impl DetailPr {
 
         PrDetail {
             number: self.number,
+            // An unknown spelling is treated as still open: the states that
+            // silence a PR are the ones worth being sure about, and guessing
+            // `Closed` from a value we don't recognise would hide it.
+            state: PrState::from_wire(&self.state).unwrap_or(PrState::Open),
             head_sha: self.head_ref_oid,
             body: self.body,
             last_reviewed_sha,
@@ -1032,6 +1041,7 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       number
+      state
       headRefOid
       body
       reviewRequests(first: 20) {
@@ -1335,6 +1345,9 @@ mod tests {
         assert_eq!(detail.new_commits, 2);
         // A direct request to me fires; the team request does not.
         assert_eq!(detail.review_request, Some(ReviewRequest { team: None }));
+        // The state comes back with the detail, which is the only way a refresh
+        // of one PR can learn it has been closed since the last sweep.
+        assert_eq!(detail.state, PrState::Open);
         // uranusjr @mentioned me in a comment after I last acted.
         assert_eq!(detail.mentions.len(), 1);
         assert_eq!(detail.mentions[0].by, "uranusjr");

@@ -3,6 +3,10 @@
 # A PR is *tracked* if it matches any interest rule in its project, or if GitHub
 # says I am already involved. Every queue item carries a reason string naming
 # the rule that produced it; `reviewq show N` prints it.
+#
+# Nothing here is how you stop watching one: `reviewq untrack N` is, and it
+# outranks the rules below — a PR you have untracked stays untracked however
+# well it matches, until `reviewq track N` puts it back.
 
 [identity]
 # Whose queue this is. All attention reasons are computed relative to this login.

@@ -48,6 +48,7 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Defer(args) => actions::defer(&args),
         Command::Undefer(args) => actions::undefer(&args),
         Command::Track(args) => actions::track(cfg, &args).await,
+        Command::Untrack(args) => actions::untrack(&args),
         Command::Review(args) => review::run(cfg, &args).await,
         Command::Tui => tui::run(cfg).await,
         Command::Doctor => doctor::run(cfg).await,

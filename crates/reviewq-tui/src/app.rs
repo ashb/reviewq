@@ -32,7 +32,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
 use reviewq_app::peek::Peeked;
-use reviewq_app::sync::Refreshed;
+use reviewq_app::sync::{Refreshed, RepoSummary};
 use reviewq_core::model::{MyState, PrSnapshot, PrState};
 use reviewq_forge::ForgeError;
 use std::collections::BTreeMap;
@@ -92,6 +92,22 @@ fn failure_note(number: u64, err: &anyhow::Error) -> String {
         }
         _ => format!("#{number} refresh failed: {err:#}"),
     }
+}
+
+/// What to put in the header when a sync finished.
+///
+/// The header has one line, and a per-repo breakdown is what `reviewq sync`
+/// prints — so this totals them and names the repo only when there was one, the
+/// case where naming it costs nothing and says which.
+fn synced_note(summaries: &[RepoSummary]) -> String {
+    let new: u64 = summaries.iter().map(|s| s.stats.new).sum();
+    let queued: u64 = summaries.iter().map(|s| s.stats.queued).sum();
+    let what = match summaries {
+        [] => "synced".to_string(),
+        [one] => format!("synced {}", one.repo),
+        many => format!("synced {} repos", many.len()),
+    };
+    format!("{what} — {new} new, {queued} on the queue")
 }
 
 /// Refuse, in a test build, the paths that reach what the developer actually uses.
@@ -200,6 +216,10 @@ pub struct App {
     /// one PR doesn't fetch it twice, while two different PRs can refresh at
     /// once.
     pub refreshing: BTreeSet<u64>,
+    /// Whether a full sync is in flight. One at a time: two sweeps of the same
+    /// repos would spend the rate-limit budget twice to reach the same ledger,
+    /// and the second would race the first for the cursor.
+    pub syncing: bool,
     /// How many rows the focused pane last displayed, so a paging key moves by a
     /// screenful rather than a guessed constant. Written by the renderer, which
     /// is the only thing that knows the laid-out height; 1 until the first draw.
@@ -276,6 +296,14 @@ pub struct Hooks {
     /// Begin refreshing a PR. Must not block: whatever it starts is expected to
     /// report back as [`Message::Refreshed`] eventually, or never.
     pub refresh: Box<dyn Fn(u64, mpsc::Sender<Message>) + Send + Sync>,
+    /// Begin a full sync of every configured repo. Must not block, for the same
+    /// reason [`refresh`](Self::refresh) must not: this is minutes of work on a
+    /// large repo, and the queue stays usable throughout — what a sync writes,
+    /// the interface reads on the next reload.
+    ///
+    /// Expected to report progress as [`Message::SyncNote`] and to finish with
+    /// exactly one [`Message::Synced`], which is what lets another be started.
+    pub sync: Box<dyn Fn(mpsc::Sender<Message>) + Send + Sync>,
     /// Tell the forge a PR's notifications are read. Fire-and-forget: `done` has
     /// already been recorded locally by the time this runs, and nothing waits on
     /// it, so a failure is logged and no more.
@@ -422,6 +450,12 @@ pub enum Overlay {
         /// The PR it would mark done.
         number: u64,
     },
+    /// Confirming an `untrack`, which drops the reason a PR is watched at all
+    /// — and, unlike a `done`, nothing but tracking it again brings it back.
+    ConfirmUntrack {
+        /// The PR it would stop watching.
+        number: u64,
+    },
     /// Picking a snooze duration from presets.
     SnoozePresets {
         /// The PR it would snooze.
@@ -486,6 +520,25 @@ pub enum Message {
         number: u64,
         /// What came back.
         outcome: Result<Refreshed>,
+    },
+
+    /// A sync in flight got somewhere worth saying. Advisory: a sync that sent
+    /// none of these would still finish, and the interface would simply have
+    /// said "syncing…" throughout.
+    SyncNote {
+        /// What to put in the header, already phrased for a person.
+        note: String,
+    },
+
+    /// A sync finished, for better or worse. One per [`Hooks::sync`] call,
+    /// whatever happened, since it is what puts the interface back in a state
+    /// where another can be started.
+    Synced {
+        /// Each repo's numbers, in the order they were synced, or the error
+        /// that stopped the run. Everything committed before a failure stays
+        /// committed — the summaries of repos that finished are lost with it,
+        /// not their work.
+        outcome: Result<Vec<RepoSummary>>,
     },
 }
 
@@ -675,6 +728,7 @@ impl App {
             help_max_scroll: 0,
             status: None,
             refreshing: BTreeSet::new(),
+            syncing: false,
             page: 1,
             detail_lines: 0,
             queue_area: Rect::ZERO,
@@ -982,13 +1036,7 @@ impl App {
 
             // Results from tasks first, and without waiting: they may be already
             // queued, and a keystroke should not have to arrive to reveal them.
-            while let Ok(message) = channel.rx.try_recv() {
-                let Message::Refreshed { number, outcome } = message;
-                self.on_refreshed(number, outcome);
-                // A refresh landing is a change like any other, and the one that
-                // arrives without anybody pressing a key.
-                self.dirty = true;
-            }
+            self.drain(channel);
             if self.quit {
                 break;
             }
@@ -1037,7 +1085,7 @@ impl App {
             return self.on_overlay_key(key);
         }
         if self.peek.is_some() {
-            return self.on_peek_key(key, hooks);
+            return self.on_peek_key(key, channel, hooks);
         }
         let Some(action) = keys::action_for(key) else {
             return Ok(());
@@ -1052,6 +1100,10 @@ impl App {
                 if let Some(number) = self.refresh_target() {
                     (hooks.refresh)(number, channel.tx.clone());
                 }
+                Ok(())
+            }
+            Update::Passed(Action::SyncAll) => {
+                self.start_sync(channel, hooks);
                 Ok(())
             }
             Update::Passed(Action::Review) => {
@@ -1075,6 +1127,12 @@ impl App {
                 }
                 Ok(())
             }
+            Update::Passed(Action::Untrack) => {
+                if let Some(number) = self.selected_number() {
+                    self.overlay = Overlay::ConfirmUntrack { number };
+                }
+                Ok(())
+            }
             Update::Passed(Action::OpenInBrowser) => self.open_selected(hooks),
             Update::Passed(Action::CopyUrl) => self.copy_selected_url(hooks),
             Update::Passed(Action::ToggleMute) => self.toggle_mute(),
@@ -1082,6 +1140,7 @@ impl App {
             // Everything else `update` handles itself, and says so.
             Update::Passed(
                 Action::Quit
+                | Action::Back
                 | Action::Help
                 | Action::Jump
                 | Action::SwitchPane
@@ -1106,11 +1165,7 @@ impl App {
     /// write to, and acting on the row *behind* the view would be worse. The keys
     /// that only read are all here — scroll it, open it, copy its URL — and Esc
     /// puts it away.
-    fn on_peek_key(&mut self, key: KeyEvent, hooks: &Hooks) -> Result<()> {
-        if key.code == KeyCode::Esc {
-            self.stop_peeking();
-            return Ok(());
-        }
+    fn on_peek_key(&mut self, key: KeyEvent, channel: &Channel, hooks: &Hooks) -> Result<()> {
         let page = self.page() as isize;
         let Some(action) = keys::action_for(key) else {
             return Ok(());
@@ -1118,6 +1173,12 @@ impl App {
         match action {
             Action::Quit => {
                 self.quit = true;
+                Ok(())
+            }
+            // The nearest thing to leave is the PR being shown, so Esc puts that
+            // away rather than reaching past it to the list behind.
+            Action::Back => {
+                self.stop_peeking();
                 Ok(())
             }
             Action::Help => {
@@ -1170,6 +1231,12 @@ impl App {
             // and the shown PR stays shown, since the list is behind it.
             Action::ShowMuted => self.toggle_listing(Listing::Muted),
             Action::ShowWaiting => self.toggle_listing(Listing::Waiting),
+            // A sync is about every repo rather than about this PR, so being in
+            // a read-only view of one is no reason to refuse it.
+            Action::SyncAll => {
+                self.start_sync(channel, hooks);
+                Ok(())
+            }
             Action::Jump
             | Action::SwitchPane
             | Action::RefreshSelected
@@ -1177,7 +1244,8 @@ impl App {
             | Action::Done
             | Action::Snooze
             | Action::ToggleMute
-            | Action::ToggleDefer => {
+            | Action::ToggleDefer
+            | Action::Untrack => {
                 let number = self.peek.as_ref().map_or(0, |peek| peek.show.pr.number);
                 self.status = Some(format!(
                     "#{number} is only being shown — Esc returns to the queue"
@@ -1393,6 +1461,14 @@ impl App {
                 }
                 Ok(())
             }
+            Overlay::ConfirmUntrack { number } => {
+                let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
+                self.overlay = Overlay::None;
+                if confirmed {
+                    self.untrack(number)?;
+                }
+                Ok(())
+            }
             Overlay::SnoozePresets { number } => {
                 if escape {
                     self.overlay = Overlay::None;
@@ -1507,6 +1583,25 @@ impl App {
         // keeps the overlay's keys free of hooks entirely.
         self.pending_mark_read = Some(number);
         self.status = Some(format!("#{number} done at {}", short(&head)));
+        self.reload()
+    }
+
+    /// Stop watching the selected PR, and say what undoes it.
+    ///
+    /// It leaves every list at once — the queue, waiting and muted all ask for a
+    /// tracked reason — so the row under the cursor goes with it and the reload
+    /// picks whatever is now in its place.
+    fn untrack(&mut self, number: u64) -> Result<()> {
+        let Some(repo_id) = self.selected_repo_id() else {
+            return Ok(());
+        };
+        self.status = Some(
+            if reviewq_app::actions::untrack(&self.ledger, repo_id, number)? {
+                format!("#{number} untracked — `reviewq track {number}` puts it back")
+            } else {
+                format!("#{number} is not in the ledger")
+            },
+        );
         self.reload()
     }
 
@@ -1674,6 +1769,16 @@ impl App {
                 self.quit = true;
                 Ok(Update::Handled)
             }
+            // One list deep, Esc is the way back out of it — quitting from there
+            // would throw away the queue as well as the list, and the key that
+            // opened the list is not the one a hand reaches for to close it.
+            Action::Back if self.listing != Listing::Queue => {
+                handled(self.toggle_listing(Listing::Queue))
+            }
+            Action::Back => {
+                self.quit = true;
+                Ok(Update::Handled)
+            }
             Action::Help => {
                 self.overlay = Overlay::Help { scroll: 0 };
                 Ok(Update::Handled)
@@ -1710,6 +1815,8 @@ impl App {
             // Not this layer's: performing these needs the hooks, the channel or
             // the ledger. Handed back rather than silently ignored.
             Action::RefreshSelected
+            | Action::SyncAll
+            | Action::Untrack
             | Action::Review
             | Action::Done
             | Action::Snooze
@@ -1802,6 +1909,58 @@ impl App {
         }
     }
 
+    /// Take in everything finished work has reported, without waiting for any
+    /// of it: a message may be queued already, and a keystroke should not have
+    /// to arrive to reveal it.
+    fn drain(&mut self, channel: &Channel) {
+        while let Ok(message) = channel.rx.try_recv() {
+            match message {
+                Message::Refreshed { number, outcome } => self.on_refreshed(number, outcome),
+                // Only while a sync is running: a note that outlived the run it
+                // came from would leave the header describing work that has
+                // already been summarised.
+                Message::SyncNote { note } if self.syncing => self.status = Some(note),
+                Message::SyncNote { .. } => {}
+                Message::Synced { outcome } => self.on_synced(outcome),
+            }
+            // Work landing is a change like any other, and the one that arrives
+            // without anybody pressing a key.
+            self.dirty = true;
+        }
+    }
+
+    /// Start a full sync, unless one is already running.
+    ///
+    /// Nothing waits for it: the queue you are reading is the ledger's last
+    /// committed state, and the sweep writes through a connection of its own —
+    /// so the rows only change when [`on_synced`](Self::on_synced) reloads them.
+    fn start_sync(&mut self, channel: &Channel, hooks: &Hooks) {
+        if self.syncing {
+            self.status = Some("already syncing".into());
+            return;
+        }
+        self.syncing = true;
+        self.status = Some("syncing…".into());
+        (hooks.sync)(channel.tx.clone());
+    }
+
+    /// Take in a finished sync: report what it did, and re-read the ledger it
+    /// wrote to.
+    ///
+    /// A failure is the status line rather than the end of the session, as a
+    /// refresh's is — and what a failed run committed before it stopped is
+    /// still there to be read, so it reloads either way.
+    fn on_synced(&mut self, outcome: Result<Vec<RepoSummary>>) {
+        self.syncing = false;
+        self.status = Some(match outcome {
+            Ok(summaries) => synced_note(&summaries),
+            Err(err) => format!("sync failed: {err:#}"),
+        });
+        if let Err(err) = self.reload() {
+            self.status = Some(format!("reload failed: {err:#}"));
+        }
+    }
+
     /// The PR a refresh should fetch, marking it in flight — `None` when nothing
     /// is selected, or when this PR is already being fetched.
     fn refresh_target(&mut self) -> Option<u64> {
@@ -1817,6 +1976,18 @@ impl App {
     fn on_refreshed(&mut self, number: u64, outcome: Result<Refreshed>) {
         self.refreshing.remove(&number);
         self.status = Some(match outcome {
+            // What the PR *is* outranks what it wants: a PR that turns out to
+            // have been closed or merged since the last sweep wants nothing by
+            // definition, and reporting that as "wants nothing" says the fetch
+            // found nothing new when it found the only thing that mattered.
+            Ok(Refreshed::Updated {
+                state: PrState::Closed,
+                ..
+            }) => format!("#{number} is closed on the forge"),
+            Ok(Refreshed::Updated {
+                state: PrState::Merged,
+                ..
+            }) => format!("#{number} is merged"),
             Ok(Refreshed::Updated { queued, .. }) => format!(
                 "#{number} refreshed — {}",
                 if queued {
@@ -2118,6 +2289,7 @@ pub(super) mod tests {
             70135,
             Ok(Refreshed::Updated {
                 repo: "apache/airflow".into(),
+                state: PrState::Open,
                 queued: true,
                 cost: 1,
                 remaining: 4999,
@@ -2446,12 +2618,31 @@ mod loop_tests {
         /// nothing here writes one.
         saved: Arc<Mutex<Vec<String>>>,
         refreshed: Seen,
+        /// How many full syncs were asked for — a sync names nothing, so a
+        /// count is all there is to record.
+        synced: Arc<Mutex<usize>>,
         marked: Seen,
         reviewed: Seen,
         fetched: Seen,
         peeked: Seen,
         opened: Seen,
         copied: Seen,
+    }
+
+    /// One repo's sync outcome, with only the two counters the header reports
+    /// set — the rest is what `reviewq sync` prints and this never reads.
+    fn summary(repo: &str, new: u64, queued: u64) -> RepoSummary {
+        RepoSummary {
+            repo: repo.to_string(),
+            stats: reviewq_app::sync::Stats {
+                new,
+                queued,
+                ..Default::default()
+            },
+            tracked: 0,
+            total: 0,
+            truncated: false,
+        }
     }
 
     /// What the peek hook hands back: a PR that exists on the forge and nowhere
@@ -2487,6 +2678,7 @@ mod loop_tests {
         let recorded = Recorded {
             saved: Arc::new(Mutex::new(Vec::new())),
             refreshed: Arc::new(Mutex::new(Vec::new())),
+            synced: Arc::new(Mutex::new(0)),
             marked: Arc::new(Mutex::new(Vec::new())),
             reviewed: Arc::new(Mutex::new(Vec::new())),
             fetched: Arc::new(Mutex::new(Vec::new())),
@@ -2496,6 +2688,7 @@ mod loop_tests {
         };
         let saved = Arc::clone(&recorded.saved);
         let refreshed = Arc::clone(&recorded.refreshed);
+        let synced = Arc::clone(&recorded.synced);
         let marked = Arc::clone(&recorded.marked);
         let reviewed = Arc::clone(&recorded.reviewed);
         let fetched = Arc::clone(&recorded.fetched);
@@ -2525,6 +2718,9 @@ mod loop_tests {
                     });
                 }
             }),
+            // Started and never heard from again, which is what lets a test
+            // see the interface's in-flight state at all.
+            sync: Box::new(move |_tx| *synced.lock().expect("lock") += 1),
             mark_read: Box::new(move |number| marked.lock().expect("lock").push(number)),
             review: Box::new(move |number| {
                 reviewed.lock().expect("lock").push(number);
@@ -2715,6 +2911,7 @@ mod loop_tests {
             // before the trailing `q` is read.
             vec![press('r'), press('q')],
             Some(Refreshed::Updated {
+                state: PrState::Open,
                 repo: "apache/airflow".into(),
                 queued: false,
                 cost: 1,
@@ -2777,6 +2974,47 @@ mod loop_tests {
         assert!(app.status.is_none(), "and nothing happened");
         assert_eq!(app.queue.len(), 1);
         assert!(recorded.marked.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn u_asks_first_and_a_confirmation_stops_watching_the_pr_for_good() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('u')]);
+        assert_eq!(app.overlay, Overlay::ConfirmUntrack { number: 70135 });
+        assert_eq!(app.queue.len(), 1, "asking is not doing");
+
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![press('u'), press('y'), press('q')], None, false);
+        drive(&mut app, &hooks);
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("#70135 untracked"), "{status}");
+        assert!(
+            status.contains("track 70135"),
+            "and says what puts it back: {status}"
+        );
+        assert!(app.queue.is_empty());
+        // Not merely off the queue: off every list, which is what `done` and
+        // `mute` deliberately are not.
+        app.listing = Listing::Waiting;
+        app.reload().expect("reload");
+        assert!(app.queue.is_empty());
+        app.listing = Listing::Muted;
+        app.reload().expect("reload");
+        assert!(app.queue.is_empty());
+    }
+
+    #[test]
+    fn declining_an_untrack_leaves_the_pr_watched() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![press('u'), press('n'), press('q')], None, false);
+
+        drive(&mut app, &hooks);
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.status.is_none());
+        assert_eq!(app.queue.len(), 1);
     }
 
     #[test]
@@ -3007,6 +3245,7 @@ mod loop_tests {
                 let _ = tx.send(Message::Refreshed {
                     number,
                     outcome: Ok(Refreshed::Updated {
+                        state: PrState::Open,
                         repo: "apache/airflow".into(),
                         queued: false,
                         cost: 1,
@@ -3017,6 +3256,7 @@ mod loop_tests {
             fetch: Box::new(|_| Ok(())),
             peek: Box::new(|number| Ok(scratch_peek(number))),
             save_screen: Box::new(|_| Ok(String::new())),
+            sync: Box::new(|_| {}),
             mark_read: Box::new(|_| {}),
             review: Box::new(|_| Ok(())),
             open_url: Box::new(|_, _| Ok(())),
@@ -3128,6 +3368,133 @@ mod loop_tests {
 
         feed(&mut app, &hooks, &[KeyCode::Char('M')]);
         assert_eq!(app.listing, Listing::Queue);
+    }
+
+    #[test]
+    fn shift_s_starts_one_sync_and_the_queue_stays_usable_while_it_runs() {
+        // The point of the key: a sweep is minutes of work on a large repo, so
+        // it happens behind the queue rather than in place of it.
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('S')]);
+
+        assert_eq!(*recorded.synced.lock().expect("lock"), 1);
+        assert!(app.syncing, "and the interface knows one is in flight");
+        assert_eq!(app.status.as_deref(), Some("syncing…"));
+
+        // Moving about still works, and the rows are the ones the ledger last
+        // committed — a sweep in flight has changed nothing yet.
+        feed(&mut app, &hooks, &[KeyCode::Char('j')]);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.queue.len(), 2);
+
+        // A second press is not a second sweep: it would spend the budget twice
+        // to reach the same ledger.
+        feed(&mut app, &hooks, &[KeyCode::Char('S')]);
+        assert_eq!(*recorded.synced.lock().expect("lock"), 1);
+        assert_eq!(app.status.as_deref(), Some("already syncing"));
+    }
+
+    #[test]
+    fn a_finished_sync_reports_what_it_did_and_re_reads_the_ledger() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        add_queued(&ledger, repo_id, 70201);
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        assert_eq!(app.queue.len(), 2);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('S')]);
+
+        // What the sync task would have written, through a connection of its
+        // own — which is how the real one reaches the ledger this app is reading.
+        let other = Ledger::open(&path).expect("second connection");
+        other.clear_attention(repo_id, 70201).expect("cleared");
+
+        app.on_synced(Ok(vec![summary("apache/airflow", 3, 1)]));
+
+        assert!(!app.syncing);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("synced apache/airflow — 3 new, 1 on the queue")
+        );
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|item| item.item.pr.number)
+                .collect::<Vec<_>>(),
+            vec![70135],
+            "the reload picked up what the sync committed"
+        );
+    }
+
+    #[test]
+    fn a_failed_sync_says_so_and_keeps_the_queue() {
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('S')]);
+
+        app.on_synced(Err(anyhow::anyhow!("github.com rejected the token")));
+
+        assert!(!app.syncing, "and another can be started");
+        assert_eq!(
+            app.status.as_deref(),
+            Some("sync failed: github.com rejected the token")
+        );
+        assert_eq!(app.queue.len(), 2, "a failure discards nothing");
+    }
+
+    #[test]
+    fn a_syncs_progress_reaches_the_header_only_while_it_is_running() {
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        let channel = Channel::new();
+
+        channel
+            .tx
+            .send(Message::SyncNote {
+                note: "syncing — updated 50/300".into(),
+            })
+            .expect("send");
+        app.drain(&channel);
+        assert_eq!(
+            app.status, None,
+            "nothing is syncing, so this is a note about work already summarised"
+        );
+
+        feed(&mut app, &hooks, &[KeyCode::Char('S')]);
+        channel
+            .tx
+            .send(Message::SyncNote {
+                note: "syncing — updated 50/300".into(),
+            })
+            .expect("send");
+        app.drain(&channel);
+        assert_eq!(app.status.as_deref(), Some("syncing — updated 50/300"));
+    }
+
+    #[test]
+    fn esc_leaves_a_list_before_it_leaves_the_interface() {
+        // Esc means "out of this" everywhere else in the interface — an overlay,
+        // a shown PR — so a list it quit out of would be the one place it threw
+        // away more than what you were looking at.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        for list in [KeyCode::Char('M'), KeyCode::Char('W')] {
+            feed(&mut app, &hooks, &[list, KeyCode::Esc]);
+            assert_eq!(app.listing, Listing::Queue, "{list:?} then Esc");
+            assert!(!app.quit, "{list:?} then Esc must not quit");
+        }
+
+        // On the queue there is nothing left to leave, so it still does.
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert!(app.quit);
     }
 
     #[test]
@@ -3470,6 +3837,7 @@ mod loop_tests {
             peek: Box::new(|number| Ok(scratch_peek(number))),
             save_screen: Box::new(|_| Ok(String::new())),
             refresh: Box::new(|_, _| {}),
+            sync: Box::new(|_| {}),
             mark_read: Box::new(|_| {}),
             review: Box::new(|_| Ok(())),
             open_url: Box::new(|_, _| Ok(())),
@@ -3677,6 +4045,7 @@ mod loop_tests {
         let (hooks, recorded) = fake_hooks(
             vec![special(KeyCode::Enter), press('q')],
             Some(Refreshed::Updated {
+                state: PrState::Open,
                 repo: "apache/airflow".into(),
                 queued: false,
                 cost: 1,

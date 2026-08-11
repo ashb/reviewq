@@ -14,7 +14,7 @@ use rusqlite_migration::{M, MigrationDefinitionError, Migrations};
 use crate::{LedgerError, Result};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 9;
+pub const SCHEMA_VERSION: usize = 10;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -315,6 +315,21 @@ CREATE TABLE labels (
 );
 ";
 
+/// When `reviewq untrack` was told to stop watching a PR.
+///
+/// A stamp rather than a flag because the interesting question a support
+/// question asks is *when* you dropped it, and because a nullable timestamp
+/// carries the boolean for free.
+///
+/// It has to persist, and it has to outrank the rules: a sweep re-evaluates
+/// every PR in its window against them, so a PR untracked while it still
+/// matches `area:task-sdk` would be tracked again minutes later, and the verb
+/// would mean nothing. `reviewq track` clears it, which is what makes untracking
+/// a decision rather than a deletion.
+const MIGRATION_10: &str = r"
+ALTER TABLE prs ADD COLUMN untracked_at TEXT;
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -326,6 +341,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(MIGRATION_7),
         M::up(MIGRATION_8),
         M::up(MIGRATION_9),
+        M::up(MIGRATION_10),
     ])
 });
 

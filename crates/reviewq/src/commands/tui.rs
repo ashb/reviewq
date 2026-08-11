@@ -18,6 +18,7 @@ use crossterm::event;
 use crossterm::execute;
 use jiff::Timestamp;
 use reviewq_app::config::{Config, Loaded, ThemeMode};
+use reviewq_app::sync::RepoSummary;
 use reviewq_ledger::RepoKey;
 use reviewq_tui::{Hooks, Message};
 use tokio::runtime::Handle;
@@ -61,6 +62,7 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
 /// must own what they capture.
 fn live_hooks(config: Arc<Config>) -> Hooks {
     let for_refresh = Arc::clone(&config);
+    let for_sync = Arc::clone(&config);
     let for_fetch = Arc::clone(&config);
     let for_peek = Arc::clone(&config);
     let for_review = Arc::clone(&config);
@@ -91,6 +93,29 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
                 // A closed channel means the interface has already exited, so the
                 // result has nowhere to go and nothing is waiting for it.
                 let _ = tx.send(Message::Refreshed { number, outcome });
+            });
+        }),
+        sync: Box::new(move |tx: Sender<Message>| {
+            let config = Arc::clone(&for_sync);
+            // `spawn_blocking` for the same reason the refresh above uses it:
+            // the sync holds a ledger handle across every forge round trip, and
+            // `rusqlite::Connection` is not `Sync`, so its future is not `Send`.
+            // The interface reads through a connection of its own meanwhile,
+            // which is what WAL is turned on for.
+            tokio::task::spawn_blocking(move || {
+                let mut progress = ChannelProgress {
+                    tx: tx.clone(),
+                    summaries: Vec::new(),
+                };
+                let ran = Handle::current().block_on(reviewq_app::sync::run(
+                    &config,
+                    false,
+                    &mut progress,
+                ));
+                // The exit code is the CLI's business: here the run either
+                // finished or it didn't, and the summaries say what it did.
+                let outcome = ran.map(|_| progress.summaries);
+                let _ = tx.send(Message::Synced { outcome });
             });
         }),
         fetch: Box::new(move |number| {
@@ -190,6 +215,35 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
                 }
             });
         }),
+    }
+}
+
+/// A sync's progress, reported to the interface rather than to a terminal it
+/// does not own.
+///
+/// The CLI's implementation writes the same two events to stderr and stdout;
+/// this one sends them down the channel the interface already drains, and keeps
+/// each repo's summary so the finished run can report what it did in one line.
+struct ChannelProgress {
+    tx: Sender<Message>,
+    summaries: Vec<RepoSummary>,
+}
+
+impl reviewq_app::sync::SyncProgress for ChannelProgress {
+    fn page(&mut self, what: &str, fetched: usize, total: u32) {
+        // A closed channel means the interface has already exited. The sync
+        // carries on regardless: what it has fetched is worth committing
+        // whether or not anything is left to watch it.
+        let _ = self.tx.send(Message::SyncNote {
+            note: format!("syncing — {what} {fetched}/{total}"),
+        });
+    }
+
+    fn repo_finished(&mut self, summary: &RepoSummary) {
+        let _ = self.tx.send(Message::SyncNote {
+            note: reviewq_app::sync::summary_line(summary),
+        });
+        self.summaries.push(summary.clone());
     }
 }
 

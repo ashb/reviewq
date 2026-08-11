@@ -324,14 +324,25 @@ fn row_mark(mark: Option<Mark>, marks: &Marks, t: &Theme) -> Span<'static> {
 /// What a mark's colour says: dim once what I did no longer covers the head that
 /// is there, quiet for a PR I have set aside, and the live colour otherwise.
 ///
+/// A mark that still stands is also **bold**, because the pair this has to tell
+/// apart is one glyph wide: green against grey is a clear difference in a
+/// paragraph and a subtle one in a single `✓`, and a terminal whose palette
+/// flattens the two leaves the column saying nothing at all. Weight survives
+/// that, and it reads as what it means — the mark that still counts is the
+/// louder one.
+///
 /// One function for the queue and the reference both, so the legend cannot come
-/// to show a colour the rows don't use.
+/// to show a mark the rows don't draw.
 fn mark_style(mark: Mark, t: &Theme) -> Style {
-    Style::default().fg(color(match mark {
+    let style = Style::default().fg(color(match mark {
         Mark::Deferred => t.quiet,
         Mark::Handled { current: true, .. } => t.good,
         Mark::Handled { current: false, .. } => t.dim,
-    }))
+    }));
+    match mark {
+        Mark::Handled { current: true, .. } => style.add_modifier(Modifier::BOLD),
+        _ => style,
+    }
 }
 
 /// My review of this PR, in the words `show` uses for the same line — and, when
@@ -686,7 +697,7 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(color(t.key)).bold(),
         ));
         spans.push(Span::styled(
-            format!(" {}", footer_label(binding, app.focus)),
+            format!(" {}", footer_label(binding, app)),
             Style::default().fg(color(t.dim)),
         ));
     }
@@ -742,17 +753,20 @@ fn footer_keys(binding: &keys::Binding) -> &'static str {
 ///
 /// Shorter than the overlay's `what` where that matters — the footer is the
 /// thing that has to fit 80 columns as bindings accumulate, and the overlay is
-/// where the roomier wording lives. `Down` is the exception that changes meaning
-/// rather than length: `j` moving in one pane and scrolling in the other reads
-/// as a bug unless the label says which.
-fn footer_label(binding: &keys::Binding, focus: Focus) -> &'static str {
-    match (binding.action, focus) {
+/// where the roomier wording lives. `Down` and `Back` are the exceptions that
+/// change meaning rather than length: `j` moving in one pane and scrolling in
+/// the other reads as a bug unless the label says which, and Esc leaving a list
+/// where it would otherwise leave the interface is worth more than one word.
+fn footer_label(binding: &keys::Binding, app: &App) -> &'static str {
+    match (binding.action, app.focus) {
         (Action::Down, Focus::Detail) => "scroll",
         (Action::SwitchPane, _) => "pane",
         (Action::RefreshSelected, _) => "refresh",
         (Action::Review, _) => "review",
         (Action::Done, _) => "done",
         (Action::Snooze, _) => "snooze",
+        (Action::Back, _) if app.listing != Listing::Queue => "back to the queue",
+        (Action::Back, _) => "quit",
         _ => binding.what,
     }
 }
@@ -841,6 +855,27 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
                 Line::from(""),
                 Line::from(Span::styled(
                     "New commits bring it back. A review requested of you stays.",
+                    Style::default().fg(color(t.dim)),
+                )),
+                Line::from(""),
+                keyed_hint(&[("y / ⏎", "yes"), ("any other key", "cancel")], t),
+            ],
+            t,
+        ),
+        Overlay::ConfirmUntrack { number } => modal(
+            frame,
+            area,
+            &format!(" Untrack #{number} "),
+            vec![
+                Line::from(Span::styled(
+                    "Stop watching it altogether?",
+                    Style::default().fg(color(t.text)),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    // The difference from `done` is the whole reason this asks.
+                    "It leaves every list, and no rule tracks it again. \
+                     `reviewq track` puts it back.",
                     Style::default().fg(color(t.dim)),
                 )),
                 Line::from(""),
@@ -1644,16 +1679,30 @@ sensor = S3KeySensor(deferrable=True)
         terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
         let buffer = terminal.backend().buffer().clone();
 
-        let colours: std::collections::BTreeSet<String> = (0..46)
+        let ticks: Vec<(String, bool)> = (0..46)
             .flat_map(|y| (0..100).map(move |x| (x, y)))
             .filter(|&(x, y)| buffer[(x, y)].symbol() == "✓")
-            .map(|(x, y)| format!("{:?}", buffer[(x, y)].fg))
+            .map(|(x, y)| {
+                let cell = &buffer[(x, y)];
+                (
+                    format!("{:?}", cell.fg),
+                    cell.modifier.contains(Modifier::BOLD),
+                )
+            })
             .collect();
 
+        let shades: std::collections::BTreeSet<&(String, bool)> = ticks.iter().collect();
         assert_eq!(
-            colours.len(),
+            shades.len(),
             2,
-            "the same glyph should appear in both shades: {colours:?}"
+            "the same glyph should appear in both shades: {shades:?}"
+        );
+        // And the difference is not colour alone: one glyph of green against one
+        // of grey is a shade nobody has to compare against, so the mark that
+        // still stands carries weight as well.
+        assert!(
+            ticks.iter().any(|(_, bold)| *bold) && ticks.iter().any(|(_, bold)| !bold),
+            "one tick stands and the other does not: {ticks:?}"
         );
     }
 
@@ -1910,13 +1959,14 @@ sensor = S3KeySensor(deferrable=True)
         let footer = render(&mut app, 100, 24).last().expect("footer").clone();
 
         assert!(footer.contains("M 1 muted"), "{footer}");
-        assert!(footer.contains("q / Esc quit"), "the keys are still there");
+        assert!(footer.contains("Esc quit"), "the keys are still there");
 
         // The list you are on counts itself in the header, so it is not repeated
-        // down here.
+        // down here — and the way out now says where it goes.
         app.show_muted();
         let footer = render(&mut app, 100, 24).last().expect("footer").clone();
         assert!(!footer.contains("muted"), "{footer}");
+        assert!(footer.contains("Esc back to the queue"), "{footer}");
     }
 
     #[test]
@@ -1983,7 +2033,7 @@ sensor = S3KeySensor(deferrable=True)
         // Tall enough for the whole reference — which grows as bindings are added,
         // so this has room to spare. What it does when it *doesn't* fit is the
         // next test's business.
-        let screen = render(&mut app, 100, 46).join("\n");
+        let screen = render(&mut app, 100, 50).join("\n");
 
         // Every binding the table describes reaches the reference — derived from
         // the table rather than listed here, so a new key with no entry fails

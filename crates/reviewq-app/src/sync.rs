@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use jiff::{Timestamp, ToSpan};
-use reviewq_core::model::{ClassifyCtx, PrSnapshot, classify};
+use reviewq_core::model::{ClassifyCtx, PrSnapshot, PrState, classify};
 use reviewq_core::rules::{Evaluation, Interest};
 use reviewq_forge::{Forge, PrDetail};
 use reviewq_ledger::{Committed, Ledger, TrackedReason};
@@ -414,6 +414,10 @@ pub enum Refreshed {
     Updated {
         /// `owner/name` it was fetched from.
         repo: String,
+        /// The state the forge has it in, which the fetch may just have learnt:
+        /// a PR closed or merged since the last sweep is what a single refresh
+        /// most often turns up.
+        state: PrState,
         /// It now holds at least one attention reason — it's on the queue.
         queued: bool,
         /// GraphQL points the fetch spent.
@@ -494,6 +498,7 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         None => Refreshed::Gone,
         Some((detail, queued)) => Refreshed::Updated {
             repo: repo.slug(),
+            state: detail.state,
             queued,
             cost: detail.cost,
             remaining: detail.remaining,
@@ -587,10 +592,18 @@ pub async fn refresh_one(
         return Ok(None);
     };
 
-    // Classify against the head the detail fetch saw, not the sweep's: the
-    // head can move between the two, and re-review keys on it.
+    // Classify against what the detail fetch saw, not what the sweep did: both
+    // can move between the two, and a PR closed since the sweep must classify
+    // as closed rather than as the open one the ledger still holds.
     let mut pr = pr.clone();
     pr.head_sha = detail.head_sha.clone();
+    if pr.state != detail.state {
+        pr.state = detail.state;
+        // Stored as well as classified against — this is the only path that
+        // ever learns a single PR's state, so leaving it in memory would mean
+        // refreshing a closed PR reported it correctly and then forgot.
+        ledger.set_state(repo_id, number, detail.state)?;
+    }
 
     // GitHub owns my review history; the ledger owns done/snooze/mute. Read
     // the local state and overlay only the forge-derived fields.
@@ -1343,6 +1356,69 @@ mod engine_tests {
         let queue = ledger.queue(repo_id).expect("queue");
         assert_eq!(queue.len(), 1, "the rule still keeps it");
         assert_eq!(queue[0].tracked_reason, "involved: review_requested");
+    }
+
+    #[tokio::test]
+    async fn refreshing_one_pr_learns_it_was_closed_and_stops_calling_it_waiting() {
+        // The sweep is what usually notices a PR closing, and a refresh never
+        // sweeps — so before the detail fetch carried the state, pressing `r`
+        // on a PR closed on the forge left it stored as open, and it went on
+        // being listed as waiting on somebody forever.
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![pr(7, "2026-08-09T09:00:00Z")])])
+            .with_detail(7, 4900);
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+        // Reviewed and answered, so it wants nothing: tracked, open, waiting on
+        // the author — which is where the PR this was reported against sat.
+        ledger.clear_attention(repo_id, 7).expect("reviewed");
+        assert_eq!(
+            ledger
+                .waiting(repo_id)
+                .expect("waiting")
+                .iter()
+                .map(|tracked| tracked.pr.number)
+                .collect::<Vec<_>>(),
+            vec![7],
+        );
+
+        // Somebody closes it, and the only thing asked of the forge is this
+        // one PR's detail.
+        let forge = FakeForge::new(vec![])
+            .with_detail(7, 4800)
+            .with_detail_state(7, PrState::Closed);
+        let show = ledger.show(repo_id, 7).expect("show").expect("stored");
+        let outcome = refresh_one(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            &cfg.identity.login,
+            &cfg.bots.logins,
+            false,
+            &HashSet::new(),
+            &show.pr,
+            show.tracked_reason.as_deref().unwrap_or(""),
+            now(),
+        )
+        .await
+        .expect("refresh");
+
+        assert!(outcome.is_some(), "the PR still exists, it is just closed");
+        assert_eq!(
+            ledger
+                .show(repo_id, 7)
+                .expect("show")
+                .expect("stored")
+                .pr
+                .state,
+            PrState::Closed,
+            "and the state the fetch found is what the ledger now holds"
+        );
+        assert!(
+            ledger.waiting(repo_id).expect("waiting").is_empty(),
+            "nobody is waiting on a closed PR"
+        );
+        assert!(ledger.queue(repo_id).expect("queue").is_empty());
     }
 
     #[tokio::test]

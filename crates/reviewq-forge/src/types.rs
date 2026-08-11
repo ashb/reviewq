@@ -6,7 +6,7 @@
 
 use jiff::Timestamp;
 use reviewq_core::model::{
-    Mention, PrSnapshot, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
+    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
 };
 use serde::Deserialize;
 
@@ -99,6 +99,12 @@ pub struct LabelColour {
 pub struct PrDetail {
     /// PR number.
     pub number: u64,
+    /// Whether it is still open, and if not how it ended.
+    ///
+    /// The sweep learns this too, but a refresh of one PR never runs the sweep
+    /// — so without it here, closing a PR on the forge left the ledger calling
+    /// it open until a full sync came round.
+    pub state: PrState,
     /// Head SHA at fetch time; lets the caller detect a head that moved between
     /// the sweep and this fetch.
     pub head_sha: String,

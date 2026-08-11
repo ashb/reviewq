@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 # This crate is deliberately IO-free: no tokio, no octocrab, no rusqlite.
-# `make purity` fails the build if one of them appears here transitively.
+# `just purity` fails the build if one of them appears here transitively.
 [dependencies]
 globset.workspace = true
 jiff.workspace = true

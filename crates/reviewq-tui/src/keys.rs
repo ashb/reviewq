@@ -12,6 +12,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Action {
     /// Leave the interface.
     Quit,
+    /// Leave whatever is being looked at: the muted or waiting list first, and
+    /// the interface itself once the queue is what's up.
+    Back,
     /// Move the keyboard between the queue and the description.
     SwitchPane,
     /// Adapt the palette for the other terminal background.
@@ -32,6 +35,8 @@ pub enum Action {
     Jump,
     /// Fetch the selected PR's detail from the forge.
     RefreshSelected,
+    /// Sweep every configured repo, in the background.
+    SyncAll,
     /// Hand the selected PR to the configured review command.
     Review,
     /// Mark the selected PR handled at its current head.
@@ -46,6 +51,8 @@ pub enum Action {
     ToggleMute,
     /// Sink the selected PR to the bottom of the queue, or restore it.
     ToggleDefer,
+    /// Stop watching the selected PR altogether.
+    Untrack,
     /// Swap the list between the queue and what has been muted.
     ShowMuted,
     /// Swap the list between the queue and what is waiting on somebody else.
@@ -251,9 +258,9 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         action: Action::CopyUrl,
-        // `y` as well as `c`, because yanking is what this is in vim's terms; `u`
-        // is left alone for the undo that a queue of destructive-ish actions will
-        // eventually want.
+        // `y` as well as `c`, because yanking is what this is in vim's terms.
+        // `u` was held back here for a future undo and has since gone to
+        // `untrack`, which is itself undone by tracking the PR again.
         chords: &[key(KeyCode::Char('c')), key(KeyCode::Char('y'))],
         keys: "c / y",
         what: "copy its URL",
@@ -280,10 +287,30 @@ pub const BINDINGS: &[Binding] = &[
         hidden: false,
     },
     Binding {
+        action: Action::Untrack,
+        chords: &[key(KeyCode::Char('u'))],
+        keys: "u",
+        what: "untrack — stop watching it",
+        group: "Act on the PR",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
         action: Action::RefreshSelected,
         chords: &[key(KeyCode::Char('r'))],
         keys: "r",
         what: "refresh from the forge",
+        group: "Forge",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        // Capitalised like the two list keys, and for the same reason: `r` acts
+        // on the row under the cursor, this acts on everything.
+        action: Action::SyncAll,
+        chords: &[key(KeyCode::Char('S'))],
+        keys: "S",
+        what: "sync every repo, in the background",
         group: "Forge",
         footer: false,
         hidden: false,
@@ -298,16 +325,24 @@ pub const BINDINGS: &[Binding] = &[
         hidden: false,
     },
     Binding {
-        action: Action::Quit,
-        chords: &[
-            key(KeyCode::Char('q')),
-            key(KeyCode::Esc),
-            ctrl(KeyCode::Char('c')),
-        ],
-        keys: "q / Esc",
-        what: "quit",
+        // Esc rather than q, because Esc is already how every overlay and every
+        // shown PR is left: one key that always means "out of this", whatever
+        // this is. On the queue there is nothing left to leave, so it quits.
+        action: Action::Back,
+        chords: &[key(KeyCode::Esc)],
+        keys: "Esc",
+        what: "back to the queue, or quit",
         group: "Session",
         footer: true,
+        hidden: false,
+    },
+    Binding {
+        action: Action::Quit,
+        chords: &[key(KeyCode::Char('q')), ctrl(KeyCode::Char('c'))],
+        keys: "q",
+        what: "quit, from wherever you are",
+        group: "Session",
+        footer: false,
         hidden: false,
     },
     Binding {
@@ -450,10 +485,13 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_shows_help_and_quit_so_the_rest_is_discoverable() {
+    fn the_footer_shows_help_and_the_way_out_so_the_rest_is_discoverable() {
         let footer: Vec<Action> = described().filter(|b| b.footer).map(|b| b.action).collect();
         assert!(footer.contains(&Action::Help), "{footer:?}");
-        assert!(footer.contains(&Action::Quit), "{footer:?}");
+        // The way out is `Back`, which is Esc: on the queue it quits, and in a
+        // list it leaves the list. `q` is in the reference rather than here —
+        // one exit advertised, and it is the one that cannot lose you the queue.
+        assert!(footer.contains(&Action::Back), "{footer:?}");
         // The real constraint is width, which the renderer's own test measures;
         // this is a nudge to reconsider rather than a hard limit.
         assert!(footer.len() <= 6, "footer has grown to {footer:?}");

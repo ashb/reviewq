@@ -19,7 +19,7 @@
 <text x="327.6" y="49.5" fill="#96b5b4" textLength="512.4" lengthAdjust="spacing" xml:space="preserve">╭ Reference ────────────────────────────────────────────────╮</text>
 <text x="1167.6" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="33.6" y="67.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">·</text>
+<text x="33.6" y="67.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">·</text>
 <text x="50.4" y="67.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69757</text>
 <text x="117.6" y="67.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@dstandish mentioned you</text>
 <text x="327.6" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -31,13 +31,13 @@
 <text x="50.4" y="85.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70390</text>
 <text x="117.6" y="85.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@o-nikolas mentioned you</text>
 <text x="327.6" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="344.4" y="85.5" fill="#a3be8c" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ✓           </text>
+<text x="344.4" y="85.5" fill="#a3be8c" textLength="117.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">  ✓           </text>
 <text x="462.0" y="85.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">you reviewed it on the forge                </text>
 <text x="831.6" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="840.0" y="85.5" fill="#9a9a9a" textLength="16.8" lengthAdjust="spacing" xml:space="preserve">in</text>
 <text x="1167.6" y="85.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="33.6" y="103.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="33.6" y="103.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">✓</text>
 <text x="50.4" y="103.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70208</text>
 <text x="117.6" y="103.5" fill="#c36b73" textLength="210.0" lengthAdjust="spacing" xml:space="preserve">@potiuk replied in 2 thre</text>
 <text x="327.6" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -48,10 +48,10 @@
 <text x="840.0" y="103.5" fill="#646464" textLength="84.0" lengthAdjust="spacing" xml:space="preserve">ds-review </text>
 <text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="33.6" y="121.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="33.6" y="121.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">✓</text>
 <text x="50.4" y="121.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70061</text>
 <text x="117.6" y="121.5" fill="#96b5b4" textLength="218.4" lengthAdjust="spacing" xml:space="preserve">@jedcunningham resolved y│</text>
-<text x="344.4" y="121.5" fill="#a3be8c" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ·           </text>
+<text x="344.4" y="121.5" fill="#a3be8c" textLength="117.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">  ·           </text>
 <text x="462.0" y="121.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">you marked it done here                     </text>
 <text x="831.6" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="1167.6" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -147,13 +147,13 @@
 <text x="327.6" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="391.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  W           </text>
 <text x="462.0" y="391.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">show what waits on someone else, or go back </text>
-<text x="831.6" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="391.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="1167.6" y="391.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="344.4" y="409.5" fill="#ebcb8b" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  M           </text>
 <text x="462.0" y="409.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">show what you have muted, or go back        </text>
-<text x="831.6" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="831.6" y="409.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="1167.6" y="409.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="327.6" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -226,8 +226,8 @@
 <text x="260.4" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> snooze</text>
 <text x="344.4" y="607.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">? / h</text>
 <text x="386.4" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> keys</text>
-<text x="453.6" y="607.5" fill="#ebcb8b" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">q / Esc</text>
-<text x="512.4" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> quit</text>
+<text x="453.6" y="607.5" fill="#ebcb8b" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Esc</text>
+<text x="478.8" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> quit</text>
 <text x="966.0" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">W</text>
 <text x="974.4" y="607.5" fill="#8fa1b3" textLength="92.4" lengthAdjust="spacing" xml:space="preserve"> 2 waiting </text>
 <text x="1092.0" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">M</text>

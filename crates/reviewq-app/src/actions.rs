@@ -68,6 +68,19 @@ pub fn set_muted(ledger: &Ledger, repo_id: i64, number: u64, muted: bool) -> Res
     Ok(ledger.set_muted(repo_id, number, muted)?)
 }
 
+/// Stop watching a PR: drop what it was tracked for, and the attention with it.
+///
+/// The verb `done` is not. `done` says "handled at this head" and leaves the PR
+/// waiting on somebody, to come back when they push or reply; this says "I am
+/// finished with it", and a rule that still matches may not take it back.
+/// `false` if the ledger has no such PR, so a caller can say so rather than
+/// reporting a success it didn't have.
+///
+/// [`track`] is the undo, which is why this stops short of deleting anything.
+pub fn untrack(ledger: &Ledger, repo_id: i64, number: u64) -> Result<bool> {
+    Ok(ledger.untrack(repo_id, number, Timestamp::now())?)
+}
+
 /// Set or clear a PR's defer, which sinks it to the bottom of the queue without
 /// hiding it. It clears itself once something new happens on the PR.
 pub fn set_deferred(ledger: &Ledger, repo_id: i64, number: u64, deferred: bool) -> Result<()> {

@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use reviewq_app::config::{Config, Loaded};
 use reviewq_app::sync::{Refreshed, RepoSummary, SyncProgress, summary_line};
+use reviewq_core::model::PrState;
 
 use crate::cli::SyncArgs;
 use crate::commands::EXIT_EMPTY;
@@ -35,16 +36,20 @@ async fn one(cfg: &Config, number: u64) -> Result<ExitCode> {
         }
         Refreshed::Updated {
             repo,
+            state,
             queued,
             cost,
             remaining,
         } => {
-            let state = if queued {
-                "wants attention"
-            } else {
-                "wants nothing"
+            // A PR that is no longer open wants nothing whatever its reasons
+            // once said, so saying which it is beats reporting the absence.
+            let standing = match state {
+                PrState::Closed => "closed on the forge",
+                PrState::Merged => "merged",
+                PrState::Open if queued => "wants attention",
+                PrState::Open => "wants nothing",
             };
-            println!("sync {repo}#{number}: {state}; {cost} pts, {remaining} left");
+            println!("sync {repo}#{number}: {standing}; {cost} pts, {remaining} left");
             Ok(ExitCode::SUCCESS)
         }
     }

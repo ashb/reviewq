@@ -120,6 +120,7 @@ impl FakeForge {
             number,
             PrDetail {
                 number,
+                state: reviewq_core::model::PrState::Open,
                 head_sha: format!("sha{number}"),
                 body: String::new(),
                 last_reviewed_sha: None,
@@ -134,6 +135,19 @@ impl FakeForge {
                 remaining,
             },
         );
+        self
+    }
+
+    /// Say that `number`'s detail finds it in `state` — what the forge reports
+    /// after somebody closes or merges a PR the ledger still has as open.
+    pub(crate) fn with_detail_state(
+        self,
+        number: u64,
+        state: reviewq_core::model::PrState,
+    ) -> Self {
+        if let Some(detail) = self.details.lock().expect("lock").get_mut(&number) {
+            detail.state = state;
+        }
         self
     }
 

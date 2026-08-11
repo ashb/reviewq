@@ -84,6 +84,22 @@ pub fn unmute(args: &NumberArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `reviewq untrack N`: stop watching a PR for good.
+///
+/// Distinct from `done`, which says the current head is handled and leaves the
+/// PR waiting on somebody. This says you are finished with it, and no rule may
+/// track it again until `reviewq track` puts it back.
+pub fn untrack(args: &NumberArgs) -> Result<ExitCode> {
+    let (ledger, repo_id, _show) = open_for_number(args.number)?;
+    actions::untrack(&ledger, repo_id, args.number)?;
+
+    println!(
+        "#{} untracked — `reviewq track {}` puts it back",
+        args.number, args.number
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn defer(args: &NumberArgs) -> Result<ExitCode> {
     let (ledger, repo_id, _show) = open_for_number(args.number)?;
     actions::set_deferred(&ledger, repo_id, args.number, true)?;

@@ -11,7 +11,7 @@
 <text x="604.8" y="31.5" fill="#606a74" textLength="571.2" lengthAdjust="spacing" xml:space="preserve">───────────────────────────────────────────────────────────────────╮</text>
 <text x="0.0" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="16.8" y="49.5" fill="#96b5b4" textLength="16.8" lengthAdjust="spacing" xml:space="preserve">▸ </text>
-<text x="33.6" y="49.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="33.6" y="49.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">✓</text>
 <text x="50.4" y="49.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70255</text>
 <text x="117.6" y="49.5" fill="#c36b73" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">@eladkal replied in 4 threads you own</text>
 <rect x="436.8" y="36.0" width="75.6" height="18" fill="#291d46"/>
@@ -159,8 +159,8 @@
 <text x="260.4" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> snooze</text>
 <text x="344.4" y="607.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">? / h</text>
 <text x="386.4" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> keys</text>
-<text x="453.6" y="607.5" fill="#ebcb8b" textLength="58.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">q / Esc</text>
-<text x="512.4" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> quit</text>
+<text x="453.6" y="607.5" fill="#ebcb8b" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Esc</text>
+<text x="478.8" y="607.5" fill="#9a9a9a" textLength="151.2" lengthAdjust="spacing" xml:space="preserve"> back to the queue</text>
 <text x="1075.2" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">W</text>
 <text x="1083.6" y="607.5" fill="#8fa1b3" textLength="92.4" lengthAdjust="spacing" xml:space="preserve"> 2 waiting </text>
 </svg>

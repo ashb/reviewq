@@ -109,7 +109,7 @@ fn help_and_version_succeed() {
 fn every_subcommand_is_reachable() {
     for name in [
         "sync", "list", "next", "show", "done", "snooze", "mute", "unmute", "defer", "undefer",
-        "track", "review", "doctor",
+        "track", "untrack", "review", "doctor",
     ] {
         let output = run(&[name, "--help"]);
         assert!(
@@ -138,6 +138,7 @@ fn an_action_on_an_unknown_pr_is_a_clear_error() {
         vec!["unmute", "999"],
         vec!["defer", "999"],
         vec!["undefer", "999"],
+        vec!["untrack", "999"],
     ] {
         let output = run_in(&config, &db, &args);
         assert!(!output.status.success(), "{args:?} unexpectedly succeeded");

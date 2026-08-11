@@ -120,6 +120,10 @@ pub enum Command {
     #[command(alias = "add")]
     Track(TrackArgs),
 
+    /// Stop watching a PR for good: drop what it was tracked for, and keep a
+    /// rule that still matches from tracking it again. `track` puts it back.
+    Untrack(NumberArgs),
+
     /// Exec `handoff.review_command` with the PR number substituted. Does not
     /// imply `done`.
     Review(NumberArgs),
