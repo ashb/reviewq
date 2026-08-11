@@ -205,9 +205,13 @@ fn every_attention_reason_is_covered_by_a_fixture() {
 
 /// Every suppression is exercised too: a fixture that classifies to nothing.
 ///
-/// Muted, snoozed and draft PRs all have to come back empty, and a suppression
-/// that silently stopped working would otherwise only show as a snapshot diff
-/// nobody reads as a suppression.
+/// Snoozed and draft PRs have to come back empty, and a suppression that
+/// silently stopped working would otherwise only show as a snapshot diff nobody
+/// reads as a suppression.
+///
+/// A *mute* is deliberately not in this list: it is the queue's business rather
+/// than the state machine's, and `muted_still_classifies` is the fixture that
+/// holds it to that.
 #[test]
 fn suppressions_are_exercised_by_fixtures_that_classify_to_nothing() {
     let silent: Vec<String> = load_all()
@@ -216,12 +220,7 @@ fn suppressions_are_exercised_by_fixtures_that_classify_to_nothing() {
         .map(|(name, _)| name)
         .collect();
 
-    for expected in [
-        "bot_comment_suppressed",
-        "draft_suppressed",
-        "mute_beats_mention",
-        "snoozed",
-    ] {
+    for expected in ["bot_comment_suppressed", "draft_suppressed", "snoozed"] {
         assert!(
             silent.iter().any(|name| name == expected),
             "{expected} should classify to nothing, silent were {silent:?}"

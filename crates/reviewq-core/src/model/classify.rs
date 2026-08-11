@@ -10,10 +10,16 @@
 //!
 //! The reasons and their priorities are the design's reason table; see
 //! [`AttentionReason`](crate::model::AttentionReason). Suppressions are checked
-//! before any reason: mute beats everything, then snooze, then a closed
-//! (unmerged) PR, then draft (which only a mention pierces). A *merged* PR is
-//! deliberately not suppressed — post-merge activity can be the signal that
-//! something shipped broken.
+//! before any reason: snooze first, then a closed (unmerged) PR, then draft
+//! (which only a mention pierces). A *merged* PR is deliberately not suppressed
+//! — post-merge activity can be the signal that something shipped broken.
+//!
+//! A **mute is not a suppression here at all**. It says what you want shown, not
+//! what is true of the PR, so it belongs to the query that builds the queue
+//! rather than to the state machine that works out what a PR wants. Keeping it
+//! out is what lets the interface list what you have silenced, with the reasons
+//! that would have surfaced it, and what makes unmuting immediate rather than a
+//! wait for the next sync to rediscover them.
 //!
 //! [`MyState::done_at`] is how `reviewq done` clears `mention`, `thread_reply`
 //! and `resolved_unanswered` without waiting for a sync to rebuild the
@@ -97,11 +103,14 @@ pub fn classify(
     now: Timestamp,
     ctx: &ClassifyCtx<'_>,
 ) -> Vec<Attention> {
-    // Mute is absolute — it exists precisely to silence a PR that would
-    // otherwise keep firing, mentions included.
-    if mine.muted {
-        return Vec::new();
-    }
+    // A mute is deliberately *not* checked here. Silencing a PR is a statement
+    // about what you want to see, not about what is true of it, and the two used
+    // to be the same thing: classification returned nothing, the reasons were
+    // erased, and unmuting bought you a PR with no reasons until the next sync
+    // recomputed them — with nothing able to say what you had silenced in the
+    // meantime. The queue is what hides a muted PR now (see `Ledger::queue`),
+    // and what it hides stays computed.
+    //
     // A snooze still in effect suppresses everything; once it lapses the same
     // reasons reappear unchanged, so nothing about the PR's state is consumed.
     if let Some(until) = mine.snoozed_until
@@ -344,11 +353,10 @@ mod tests {
     }
 
     #[test]
-    fn mute_suppresses_a_live_mention() {
-        let mine = MyState {
-            muted: true,
-            ..Default::default()
-        };
+    fn a_mute_does_not_change_what_a_pr_wants() {
+        // Muting says what you want shown; it does not make the mention go away.
+        // Keeping the reason is what lets the interface list what you silenced,
+        // and what makes unmuting immediate — the queue is what hides it.
         let mentions = [Mention {
             by: "potiuk".into(),
             at: ts("2026-08-05T08:00:00Z"),
@@ -357,7 +365,16 @@ mod tests {
             mentions: &mentions,
             ..Default::default()
         };
-        assert!(classify(&pr(), &mine, &[], now(), &ctx).is_empty());
+        let muted = MyState {
+            muted: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            classify(&pr(), &muted, &[], now(), &ctx),
+            classify(&pr(), &MyState::default(), &[], now(), &ctx),
+            "a mute is invisible to the state machine"
+        );
     }
 
     #[test]

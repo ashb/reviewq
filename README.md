@@ -37,7 +37,7 @@ everything it needs to be true before a sync can work, and says which of it isn'
 | | |
 |---|---|
 | `sync [N]` | Fetch from the forge and rebuild the ledger, or refresh one PR |
-| `list [--all\|--waiting] [--json]` | The queue, everything tracked, or what is waiting on someone else |
+| `list [--all\|--waiting\|--muted] [--json]` | The queue, everything tracked, what waits on someone else, or what you have silenced |
 | `next [--json]` | Just the most urgent one |
 | `show <N\|url> [--json]` | Everything known about one PR and why it is on the queue |
 | `done <N>` | Record the current head as handled, and mark its notifications read |
@@ -65,6 +65,13 @@ Taking the offer fetches it into a scratch view that is never stored, and says s
 `Esc` returns to the queue.
 
 ![A PR shown read-only, fetched but not tracked](docs/imgs/showing.svg)
+
+`M` shows what you have muted. A mute says what you want shown rather than what
+is true of the PR, so the reasons stay computed while it is hidden — which is what
+lets this list say why each one would be on the queue, and what makes `m` put one
+straight back rather than leaving it blank until the next sync.
+
+![The muted list, each row with the reason a mute is hiding](docs/imgs/muted.svg)
 
 The palette adapts to a light terminal with `t`, or `[output] theme = "light"`.
 

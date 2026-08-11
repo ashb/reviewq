@@ -64,6 +64,8 @@ struct Fixture {
     state: PrState,
     /// Work in progress: only a mention reaches the queue past one.
     draft: bool,
+    /// Silenced by hand: off the queue, on the muted list, reason and all.
+    muted: bool,
     /// The interest rule or involvement that tracked it.
     tracked: TrackedReason,
     reason: AttentionReason,
@@ -93,6 +95,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "9f2a1c4",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: interest("label area:task-sdk"),
             reason: AttentionReason::Mention { by: "kaxil".into() },
             since: "2026-08-12T07:05:00Z",
@@ -121,6 +124,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "c1d9a77",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: interest("label area:Scheduler"),
             reason: AttentionReason::ThreadReply {
                 by: "potiuk".into(),
@@ -145,6 +149,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "aa3f019",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: interest("path airflow-core/src/airflow/serialization/**"),
             reason: AttentionReason::ReReview {
                 new_commits: 3,
@@ -169,6 +174,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "e40b1a9",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: interest("label area:Scheduler"),
             reason: AttentionReason::ResolvedUnanswered {
                 by: "jedcunningham".into(),
@@ -195,12 +201,40 @@ fn fixtures() -> Vec<Fixture> {
             head: "5c02fae",
             state: PrState::Open,
             draft: true,
+            muted: false,
             tracked: interest("label area:Executors-core"),
             reason: AttentionReason::Mention {
                 by: "o-nikolas".into(),
             },
             since: "2026-08-12T08:55:00Z",
             mine: MyState::default(),
+            deferred: false,
+            body: None,
+            threads: vec![],
+            reviewers: vec![],
+        },
+        // Silenced by hand: absent from the queue, and the whole of the muted
+        // list — with the reason a mute hides rather than erases.
+        Fixture {
+            number: 70255,
+            title: "Rename the KubernetesExecutor config section",
+            author: "eladkal",
+            head: "6b1fa02",
+            state: PrState::Open,
+            draft: false,
+            muted: true,
+            tracked: interest("label area:Executors-core"),
+            reason: AttentionReason::ThreadReply {
+                by: "eladkal".into(),
+                threads: 4,
+            },
+            since: "2026-08-12T06:05:00Z",
+            mine: MyState {
+                last_reviewed_sha: Some("6b1fa02".into()),
+                last_verdict: Some(Verdict::Commented),
+                last_action_at: Some(ts("2026-08-10T09:30:00Z")),
+                ..MyState::default()
+            },
             deferred: false,
             body: None,
             threads: vec![],
@@ -213,6 +247,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "77b0cd1",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: TrackedReason::Involved("review_requested".into()),
             reason: AttentionReason::ReviewRequested {
                 team: Some("apache/airflow-committers".into()),
@@ -231,6 +266,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "0ac41e5",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: interest("author FIRST_TIME_CONTRIBUTOR"),
             reason: AttentionReason::NeedsFirstLook {
                 rule: "author FIRST_TIME_CONTRIBUTOR".into(),
@@ -249,6 +285,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "3d8e440",
             state: PrState::Open,
             draft: false,
+            muted: false,
             tracked: interest("label area:Executors-core"),
             reason: AttentionReason::NeedsFirstLook {
                 rule: "label area:Executors-core".into(),
@@ -270,6 +307,7 @@ fn fixtures() -> Vec<Fixture> {
             head: "b62ff31",
             state: PrState::Merged,
             draft: false,
+            muted: false,
             tracked: TrackedReason::Interest {
                 rule: "path airflow-core/src/airflow/jobs/**".into(),
                 after_merge: true,
@@ -376,6 +414,9 @@ fn ledger() -> Ledger {
         if f.deferred {
             reviewq_app::actions::set_deferred(&ledger, repo_id, f.number, true).expect("defer");
         }
+        if f.muted {
+            reviewq_app::actions::set_muted(&ledger, repo_id, f.number, true).expect("mute");
+        }
     }
     ledger
 }
@@ -444,6 +485,11 @@ const SHOTS: &[Shot] = &[
         name: "snooze",
         height: HEIGHT,
         arrange: |app| app.overlay = Overlay::SnoozePresets { number: 70135 },
+    },
+    Shot {
+        name: "muted",
+        height: HEIGHT,
+        arrange: |app| app.show_muted(),
     },
 ];
 

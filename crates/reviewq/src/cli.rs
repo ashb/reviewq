@@ -151,13 +151,17 @@ pub struct SyncArgs {
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// Show everything tracked, grouped by state, rather than just the queue.
-    #[arg(long, conflicts_with = "waiting")]
+    #[arg(long, conflicts_with_all = ["waiting", "muted"])]
     pub all: bool,
 
     /// Show the tracked PRs that want nothing right now — seen, waiting on
     /// someone else.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "muted")]
     pub waiting: bool,
+
+    /// Show what you have muted, with the reason each would be on the queue for.
+    #[arg(long)]
+    pub muted: bool,
 
     /// Emit machine-readable JSON.
     #[arg(long)]

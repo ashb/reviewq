@@ -51,6 +51,23 @@ pub fn run(args: &ListArgs) -> Result<ExitCode> {
         return Ok(empty_code(waiting.is_empty()));
     }
 
+    // What a mute hides, rather than what it leaves. Same rows, same order, and
+    // each still carries the reason it would have been listed for — a mute stops
+    // it being shown, not being computed.
+    if args.muted {
+        let muted = ledger.muted_all()?;
+        if args.json {
+            print_queue_json(&muted)?;
+        } else if muted.is_empty() {
+            eprintln!("nothing muted");
+        } else {
+            for item in &muted {
+                print_queue_row(multi, item);
+            }
+        }
+        return Ok(empty_code(muted.is_empty()));
+    }
+
     let queue = ledger.queue_all()?;
     if args.json {
         print_queue_json(&queue)?;

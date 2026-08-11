@@ -17,7 +17,7 @@ use reviewq_app::present::{self, Handled, Mark};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
 use reviewq_ledger::{Located, QueueItem, RepoKey};
 
-use crate::app::{App, Focus, Overlay, SNOOZE_PRESETS};
+use crate::app::{App, Focus, Listing, Overlay, SNOOZE_PRESETS};
 use crate::keys::{self, Action};
 use crate::theme::{Theme, color};
 
@@ -121,8 +121,18 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("reviewq", Style::default().fg(color(t.text)).bold()),
         Span::styled("  ", Style::default()),
         Span::styled(
-            format!("{} on the queue", app.queue.len()),
-            Style::default().fg(color(t.dim)),
+            match app.listing {
+                Listing::Queue => format!("{} on the queue", app.queue.len()),
+                // Named rather than counted the same way: these are rows the
+                // queue is deliberately not showing, and a bare count would read
+                // as the queue being that long.
+                Listing::Muted => format!("{} muted", app.queue.len()),
+            },
+            Style::default().fg(color(if app.listing == Listing::Queue {
+                t.dim
+            } else {
+                t.quiet
+            })),
         ),
     ];
     if app.repo_count > 1 {
@@ -172,12 +182,21 @@ fn panel(frame: &mut Frame, area: Rect, title: &str, focused: bool, t: &Theme) -
 /// back to one.
 fn queue_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
     let t = &app.theme;
-    let inner = panel(frame, area, "Queue", app.focus == Focus::Queue, t);
+    let inner = panel(
+        frame,
+        area,
+        app.listing.title(),
+        app.focus == Focus::Queue,
+        t,
+    );
     if app.queue.is_empty() {
         frame.render_widget(
-            Paragraph::new("Nothing on the queue.")
-                .style(Style::default().fg(color(t.dim)))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(match app.listing {
+                Listing::Queue => "Nothing on the queue.",
+                Listing::Muted => "Nothing muted.",
+            })
+            .style(Style::default().fg(color(t.dim)))
+            .wrap(Wrap { trim: true }),
             inner,
         );
         return inner;

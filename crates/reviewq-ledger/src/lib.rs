@@ -330,6 +330,20 @@ impl TrackedReason {
     }
 }
 
+/// Which side of a mute a read wants.
+///
+/// A mute is a statement about what you want shown, so it belongs here rather
+/// than in the state machine — which means every queue read has to say which of
+/// the two lists it is asking for, and cannot get them mixed up by passing a
+/// bare `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Muted {
+    /// The queue proper: everything you have not silenced.
+    Hidden,
+    /// Only what you have silenced.
+    Only,
+}
+
 /// One repo's stored PR rows, counted by category.
 ///
 /// A sweep stores every PR it sees, so the ledger grows with the repo's activity
@@ -988,6 +1002,21 @@ impl Ledger {
     /// [`QueueItem::deferred`]), which sorts after every non-deferred item
     /// regardless of priority.
     pub fn queue(&self, repo_id: i64) -> Result<Vec<QueueItem>> {
+        self.queued(repo_id, Muted::Hidden)
+    }
+
+    /// What a mute is hiding: the same rows [`queue`](Self::queue) leaves out,
+    /// in the same order, each with the reason it would be there for.
+    ///
+    /// The reasons are real — a mute stops nothing being computed, it only stops
+    /// it being shown (see `classify`) — which is what makes this answerable at
+    /// all, and what makes unmuting immediate rather than a wait for the next
+    /// sync to rediscover them.
+    pub fn muted(&self, repo_id: i64) -> Result<Vec<QueueItem>> {
+        self.queued(repo_id, Muted::Only)
+    }
+
+    fn queued(&self, repo_id: i64, muted: Muted) -> Result<Vec<QueueItem>> {
         // Open PRs, plus merged PRs when a project opted into post-merge review
         // (those only carry attention rows when it did). Closed-unmerged never.
         let mut stmt = self.conn.prepare(&format!(
@@ -997,10 +1026,12 @@ impl Ledger {
             JOIN attention a ON a.repo_id = p.repo_id AND a.pr_number = p.number
             LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
             WHERE p.repo_id = ?1 AND p.state IN ('OPEN', 'MERGED') AND p.tracked_reason IS NOT NULL
+              AND COALESCE(ms.muted, 0) = ?2
             ",
         ))?;
+        let muted = i64::from(muted == Muted::Only);
         let rows = stmt
-            .query_map(params![repo_id], |row| {
+            .query_map(params![repo_id, muted], |row| {
                 let pr = snapshot_from_row(row, 0)?;
                 let tracked_reason: String = row.get(13)?;
                 let attention = attention_from_row(row, 14)?;
@@ -1089,7 +1120,20 @@ impl Ledger {
     /// that happen to share a PR number and an urgency don't order by
     /// whichever was registered first.
     pub fn queue_all(&self) -> Result<Vec<Located<QueueItem>>> {
-        let mut queue = self.across_repos(Self::queue)?;
+        self.ordered(Self::queue)
+    }
+
+    /// Every repo's [`muted`](Self::muted), merged and ordered like the queue —
+    /// so what you silenced reads in the order it would have arrived in.
+    pub fn muted_all(&self) -> Result<Vec<Located<QueueItem>>> {
+        self.ordered(Self::muted)
+    }
+
+    fn ordered(
+        &self,
+        read: fn(&Self, i64) -> Result<Vec<QueueItem>>,
+    ) -> Result<Vec<Located<QueueItem>>> {
+        let mut queue = self.across_repos(read)?;
         queue.sort_by_key(|l| {
             (
                 l.item.deferred,

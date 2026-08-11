@@ -46,6 +46,8 @@ pub enum Action {
     ToggleMute,
     /// Sink the selected PR to the bottom of the queue, or restore it.
     ToggleDefer,
+    /// Swap the list between the queue and what has been muted.
+    ShowMuted,
     /// Show or hide the key reference.
     Help,
     /// Save what is on screen as an SVG.
@@ -187,6 +189,15 @@ pub const BINDINGS: &[Binding] = &[
         chords: &[key(KeyCode::Char('t'))],
         keys: "t",
         what: "adapt for a light or dark terminal",
+        group: "View",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        action: Action::ShowMuted,
+        chords: &[key(KeyCode::Char('M'))],
+        keys: "M",
+        what: "show what you have muted, or go back",
         group: "View",
         footer: false,
         hidden: false,

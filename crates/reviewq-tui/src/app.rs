@@ -118,8 +118,11 @@ use crate::ui;
 pub struct App {
     /// The palette, resolved once at startup.
     pub theme: Theme,
-    /// The queue, most-urgent first, spanning every repo the ledger knows.
+    /// The rows on the left, most-urgent first, spanning every repo the ledger
+    /// knows — the queue, or what has been muted (see [`listing`](Self::listing)).
     pub queue: Vec<Located<QueueItem>>,
+    /// Which of the two the rows are.
+    pub listing: Listing,
     /// Index into [`queue`](Self::queue) of the highlighted row. Always a valid
     /// index when the queue is non-empty; meaningless when it's empty.
     pub selected: usize,
@@ -479,6 +482,39 @@ pub enum Message {
 /// and enough to see what's coming without the list moving under every keypress.
 const SCROLLOFF: usize = 3;
 
+/// Which list the left pane is showing.
+///
+/// Two views of the same rows: a muted PR keeps its reasons — the mute is a
+/// statement about what you want shown, not about the PR — so what you silenced
+/// can be listed with the reason it would have been there for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Listing {
+    /// Everything that wants attention and isn't muted.
+    #[default]
+    Queue,
+    /// Only what is muted.
+    Muted,
+}
+
+impl Listing {
+    /// The other one — this is a two-way switch, so a caller that has one always
+    /// wants the other by name rather than by matching.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Queue => Self::Muted,
+            Self::Muted => Self::Queue,
+        }
+    }
+
+    /// What the pane is called while it shows this.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Muted => "Muted",
+        }
+    }
+}
+
 /// Which pane has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -505,6 +541,7 @@ impl App {
         let mut app = Self {
             theme,
             queue: Vec::new(),
+            listing: Listing::default(),
             selected: 0,
             detail: None,
             peek: None,
@@ -548,7 +585,7 @@ impl App {
             .current()
             .map(|item| (item.repo.clone(), item.item.pr.number));
         self.repo_count = self.ledger.repos()?.len();
-        self.queue = self.ledger.queue_all()?;
+        self.queue = self.rows_for(self.listing)?;
         self.selected = held
             .and_then(|(repo, number)| {
                 self.queue
@@ -558,6 +595,36 @@ impl App {
             .unwrap_or(self.selected)
             .min(self.queue.len().saturating_sub(1));
         self.load_detail()
+    }
+
+    /// Show the muted list, for a caller arranging a screen rather than pressing
+    /// a key.
+    #[cfg(test)]
+    pub(crate) fn show_muted(&mut self) {
+        self.listing = Listing::Muted;
+        self.reload().expect("reading the muted list");
+    }
+
+    /// The rows one of the two listings holds, straight from the ledger.
+    fn rows_for(&self, listing: Listing) -> Result<Vec<Located<QueueItem>>> {
+        Ok(match listing {
+            Listing::Queue => self.ledger.queue_all()?,
+            Listing::Muted => self.ledger.muted_all()?,
+        })
+    }
+
+    /// Swap between the queue and what has been muted.
+    ///
+    /// Back to the top rather than keeping the row: the two lists have nothing
+    /// in common by construction — a PR is on exactly one of them — so a kept
+    /// index would land on an unrelated PR.
+    fn toggle_listing(&mut self) -> Result<()> {
+        self.listing = self.listing.other();
+        self.selected = 0;
+        self.queue_scroll = 0;
+        self.detail_scroll = 0;
+        self.status = None;
+        self.reload()
     }
 
     /// Read the selected PR's full detail.
@@ -843,6 +910,7 @@ impl App {
                 | Action::SwitchPane
                 | Action::ToggleTheme
                 | Action::SaveSvg
+                | Action::ShowMuted
                 | Action::Down
                 | Action::Up
                 | Action::PageDown
@@ -920,6 +988,9 @@ impl App {
                 });
                 Ok(())
             }
+            // Swapping lists is reading, not writing, so it works from here —
+            // and the shown PR stays shown, since the list is behind it.
+            Action::ShowMuted => self.toggle_listing(),
             Action::Jump
             | Action::SwitchPane
             | Action::RefreshSelected
@@ -1271,13 +1342,27 @@ impl App {
             .pr_number_in(text)
             .with_context(|| format!("{text:?} is not a PR number"))?;
 
+        if let Some(index) = self.row_of(number) {
+            self.status = None;
+            return self.move_to(index);
+        }
+
+        // It may be on the list you are not looking at, which is a place to be
+        // taken rather than a reason to be refused — asking for a PR by number
+        // says nothing about which of the two views you had up.
+        let elsewhere = self.listing.other();
         if let Some(index) = self
-            .queue
+            .rows_for(elsewhere)?
             .iter()
             .position(|item| item.item.pr.number == number)
         {
-            self.status = None;
-            return self.move_to(index);
+            self.listing = elsewhere;
+            self.reload()?;
+            self.status = Some(match elsewhere {
+                Listing::Muted => format!("#{number} is muted — `m` unmutes it"),
+                Listing::Queue => format!("#{number} is on the queue"),
+            });
+            return self.select(index);
         }
 
         self.overlay = Overlay::Unqueued {
@@ -1355,9 +1440,7 @@ impl App {
             return Ok(());
         };
         reviewq_app::actions::set_muted(&self.ledger, repo_id, number, false)?;
-        self.status = Some(format!(
-            "#{number} unmuted — its reasons return on the next sync"
-        ));
+        self.status = Some(format!("#{number} unmuted — back on the queue"));
         self.reload()
     }
 
@@ -1370,9 +1453,9 @@ impl App {
         let muted = self.detail.as_ref().is_some_and(|show| show.my_state.muted);
         reviewq_app::actions::set_muted(&self.ledger, repo_id, number, !muted)?;
         self.status = Some(if muted {
-            format!("#{number} unmuted — its reasons return on the next sync")
+            format!("#{number} unmuted — back on the queue")
         } else {
-            format!("#{number} muted")
+            format!("#{number} muted — `M` lists what you have silenced")
         });
         self.reload()
     }
@@ -1431,6 +1514,7 @@ impl App {
                 self.pending_svg = true;
                 Ok(Update::Handled)
             }
+            Action::ShowMuted => handled(self.toggle_listing()),
             Action::Down => handled(self.scroll(1)),
             Action::Up => handled(self.scroll(-1)),
             Action::PageDown => handled(self.scroll(page)),
@@ -1629,7 +1713,17 @@ impl App {
     }
 
     fn move_to(&mut self, index: usize) -> Result<()> {
-        if self.queue.is_empty() || index == self.selected {
+        if index == self.selected {
+            return Ok(());
+        }
+        self.select(index)
+    }
+
+    /// Put the selection on `index` and read what it points at, whether or not
+    /// it is where the selection already was — which is what a jump that has
+    /// just swapped lists needs, since row 0 of the new one is a different PR.
+    fn select(&mut self, index: usize) -> Result<()> {
+        if self.queue.is_empty() {
             return Ok(());
         }
         self.selected = index.min(self.queue.len() - 1);
@@ -1638,6 +1732,13 @@ impl App {
         // it halfway down.
         self.detail_scroll = 0;
         self.load_detail()
+    }
+
+    /// Where `number` sits in the list on screen, if it is on it.
+    fn row_of(&self, number: u64) -> Option<usize> {
+        self.queue
+            .iter()
+            .position(|item| item.item.pr.number == number)
     }
 }
 
@@ -2589,7 +2690,8 @@ mod loop_tests {
 
         drive(&mut app, &hooks);
 
-        assert_eq!(app.status.as_deref(), Some("#70135 muted"));
+        let status = app.status.clone().expect("a status");
+        assert!(status.starts_with("#70135 muted"), "{status}");
         assert!(app.queue.is_empty(), "muting clears what it holds");
         // Which leaves nothing selected to unmute — the honest consequence of
         // acting from a queue view, and why `list --all` exists.
@@ -2689,10 +2791,70 @@ mod loop_tests {
     }
 
     #[test]
-    fn going_to_a_muted_pr_says_it_is_muted_rather_than_quiet() {
-        // "Tracked, and wants nothing right now" is true of a muted PR and no
-        // use at all: you silenced it, and what you came to find out is where it
-        // went and how to get it back.
+    fn shift_m_swaps_between_the_queue_and_what_is_muted() {
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        // The queue has the one that is not muted, and says nothing of the other.
+        assert_eq!(app.listing, Listing::Queue);
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|item| item.item.pr.number)
+                .collect::<Vec<_>>(),
+            vec![70135]
+        );
+
+        feed(&mut app, &hooks, &[KeyCode::Char('M')]);
+
+        assert_eq!(app.listing, Listing::Muted);
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|item| item.item.pr.number)
+                .collect::<Vec<_>>(),
+            vec![70201],
+            "and the muted list has the other, with its reason intact"
+        );
+        assert_eq!(app.selected, 0, "starting at the top of a different list");
+
+        feed(&mut app, &hooks, &[KeyCode::Char('M')]);
+        assert_eq!(app.listing, Listing::Queue);
+    }
+
+    #[test]
+    fn unmuting_from_the_muted_list_puts_the_pr_back_at_once() {
+        // The reasons were never erased, so there is nothing to wait for.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('M'), KeyCode::Char('m')]);
+
+        assert!(app.queue.is_empty(), "nothing muted any more");
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("unmuted"), "{status}");
+
+        feed(&mut app, &hooks, &[KeyCode::Char('M')]);
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|item| item.item.pr.number)
+                .collect::<Vec<_>>(),
+            vec![70135, 70201],
+            "and it is back on the queue with the rest"
+        );
+    }
+
+    #[test]
+    fn going_to_a_muted_pr_from_the_queue_takes_you_to_it() {
+        // Asking for a PR by number says nothing about which list you had up, so
+        // being on the wrong one is not a reason to refuse.
         let ledger = two_queued();
         let repo_id = ledger.repos().expect("repos")[0].0;
         reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
@@ -2709,6 +2871,52 @@ mod loop_tests {
                 KeyCode::Char('2'),
                 KeyCode::Char('0'),
                 KeyCode::Char('1'),
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(app.listing, Listing::Muted, "it switched to find it");
+        assert_eq!(app.selected_number(), Some(70201));
+        assert_eq!(app.overlay, Overlay::None, "no offer was needed");
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("muted"), "{status}");
+    }
+
+    #[test]
+    fn a_muted_pr_with_no_reasons_is_explained_and_unmuted_from_the_offer() {
+        // Muted and quiet: it is on neither list — the muted list is built from
+        // the reasons a mute hides, and this one has none — so being asked for by
+        // number is the only way to reach it, and the offer is where the undo has
+        // to live.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut quiet = pr_snapshot(70999);
+        quiet.labels.clear();
+        ledger
+            .upsert_pr(
+                repo_id,
+                &quiet,
+                Some(reviewq_ledger::TrackedReason::Interest {
+                    rule: "label x".into(),
+                    after_merge: false,
+                }),
+                ts("2026-08-11T12:00:00Z"),
+            )
+            .expect("tracked, no detail");
+        reviewq_app::actions::set_muted(&ledger, repo_id, 70999, true).expect("mute");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('7'),
+                KeyCode::Char('0'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
                 KeyCode::Enter,
             ],
         );
@@ -2716,43 +2924,17 @@ mod loop_tests {
         assert_eq!(
             app.overlay,
             Overlay::Unqueued {
-                number: 70201,
+                number: 70999,
                 why: Unqueued::Muted
-            }
+            },
+            "it says what you did to it, not that it wants nothing"
         );
-    }
 
-    #[test]
-    fn a_muted_pr_can_be_unmuted_from_the_offer() {
-        // The only way back: muting takes the PR out of the list you would have
-        // selected it in to press `m` again, so without this it is a one-way
-        // door from inside the interface.
-        let ledger = two_queued();
-        let repo_id = ledger.repos().expect("repos")[0].0;
-        reviewq_app::actions::set_muted(&ledger, repo_id, 70201, true).expect("mute");
-        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
-        let (hooks, _) = fake_hooks(vec![], None, false);
-
-        feed(
-            &mut app,
-            &hooks,
-            &[
-                KeyCode::Char(':'),
-                KeyCode::Char('7'),
-                KeyCode::Char('0'),
-                KeyCode::Char('2'),
-                KeyCode::Char('0'),
-                KeyCode::Char('1'),
-                KeyCode::Enter,
-                KeyCode::Char('u'),
-            ],
-        );
+        feed(&mut app, &hooks, &[KeyCode::Char('u')]);
 
         assert_eq!(app.overlay, Overlay::None);
         let repo_id = app.ledger.repos().expect("repos")[0].0;
-        assert!(!app.ledger.my_state(repo_id, 70201).expect("state").muted);
-        let status = app.status.clone().expect("a status");
-        assert!(status.contains("unmuted"), "{status}");
+        assert!(!app.ledger.my_state(repo_id, 70999).expect("state").muted);
     }
 
     #[test]

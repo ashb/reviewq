@@ -58,14 +58,14 @@ pub fn snooze(ledger: &Ledger, repo_id: i64, number: u64, until: Timestamp) -> R
 
 /// Set or clear a PR's mute.
 ///
-/// Muting clears what it currently holds. Unmuting does not put it back, because
-/// the reasons are recomputed by the next sync rather than remembered.
+/// Keeps the attention it holds, deliberately. A mute is a statement about what
+/// you want shown — the queue is what hides it (see [`Ledger::muted`]) — so the
+/// reasons stay computed, which is what lets the interface show you what you
+/// have silenced and why. It also makes unmuting immediate: this used to clear
+/// them, so a PR came back empty and stayed that way until the next sync
+/// rediscovered what had been true all along.
 pub fn set_muted(ledger: &Ledger, repo_id: i64, number: u64, muted: bool) -> Result<()> {
-    ledger.set_muted(repo_id, number, muted)?;
-    if muted {
-        ledger.clear_attention(repo_id, number)?;
-    }
-    Ok(())
+    Ok(ledger.set_muted(repo_id, number, muted)?)
 }
 
 /// Set or clear a PR's defer, which sinks it to the bottom of the queue without
@@ -267,19 +267,30 @@ mod tests {
     }
 
     #[test]
-    fn muting_clears_attention_and_unmuting_does_not_restore_it() {
+    fn muting_hides_a_pr_without_forgetting_why_it_was_there() {
         let (ledger, repo_id, number) = queued(mention());
 
         set_muted(&ledger, repo_id, number, true).unwrap();
-        assert!(ledger.queue(repo_id).unwrap().is_empty());
+
+        assert!(ledger.queue(repo_id).unwrap().is_empty(), "off the queue");
         assert!(ledger.my_state(repo_id, number).unwrap().muted);
+        let hidden = ledger.muted(repo_id).unwrap();
+        assert_eq!(hidden.len(), 1, "but findable, and it says why");
+        assert_eq!(hidden[0].top.reason, mention());
+    }
+
+    #[test]
+    fn unmuting_puts_a_pr_straight_back() {
+        // It used to come back empty and stay that way until the next sync
+        // rediscovered what had been true the whole time.
+        let (ledger, repo_id, number) = queued(mention());
+        set_muted(&ledger, repo_id, number, true).unwrap();
 
         set_muted(&ledger, repo_id, number, false).unwrap();
+
         assert!(!ledger.my_state(repo_id, number).unwrap().muted);
-        assert!(
-            ledger.queue(repo_id).unwrap().is_empty(),
-            "the reasons come back from the next sync, not from unmuting"
-        );
+        assert_eq!(ledger.queue(repo_id).unwrap().len(), 1);
+        assert!(ledger.muted(repo_id).unwrap().is_empty());
     }
 
     #[test]

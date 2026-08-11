@@ -1,5 +1,5 @@
 {
-  "description": "Muted PR with a fresh mention in a thread I own: mute wins, because mute means mute.",
+  "description": "Muted PR with a fresh reply in a thread I own: the reason is computed all the same. A mute says what you want shown, which is the queue's business \u2014 so what you silenced can be listed, with the reason that would have surfaced it, and unmuting needs no sync to bring it back.",
   "now": "2026-08-05T12:00:00Z",
   "pr": {
     "number": 43012,
@@ -10,9 +10,13 @@
     "is_draft": false,
     "state": "OPEN",
     "updated_at": "2026-08-05T11:30:00Z",
-    "labels": ["area:Executors-core"],
+    "labels": [
+      "area:Executors-core"
+    ],
     "milestone": null,
-    "files": ["airflow-core/src/airflow/executors/executor_loader.py"],
+    "files": [
+      "airflow-core/src/airflow/executors/executor_loader.py"
+    ],
     "files_truncated": false
   },
   "mine": {
