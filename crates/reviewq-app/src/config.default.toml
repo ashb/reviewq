@@ -53,6 +53,11 @@ paths = ["task-sdk/**", "airflow-core/src/airflow/serialization/**"]
 [[project.interest]]
 author_associations = ["FIRST_TIME_CONTRIBUTOR"]
 
+# Named people, for what a relationship class cannot say — whose PRs these are.
+# Logins, matched however GitHub happens to capitalise them:
+#   [[project.interest]]
+#   authors = ["potiuk"]
+
 # Milestones I'm watching (substring match against the milestone title).
 [[project.interest]]
 milestones = ["3.2"]

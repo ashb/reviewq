@@ -149,6 +149,9 @@ pub struct InterestRule {
     pub labels: Vec<String>,
     /// Match a PR touching any file these globs match.
     pub paths: Vec<String>,
+    /// Match a PR opened by any of these logins, whatever their relationship to
+    /// the repo. What `author_associations` cannot say: whose PRs these are.
+    pub authors: Vec<String>,
     /// Match a PR whose author has any of these associations to the repo, e.g.
     /// `FIRST_TIME_CONTRIBUTOR`.
     pub author_associations: Vec<String>,
@@ -166,8 +169,13 @@ impl InterestRule {
         if !self.paths.is_empty() {
             conditions.push(ConditionInput::Paths(self.paths.clone()));
         }
+        if !self.authors.is_empty() {
+            conditions.push(ConditionInput::Authors(self.authors.clone()));
+        }
         if !self.author_associations.is_empty() {
-            conditions.push(ConditionInput::Authors(self.author_associations.clone()));
+            conditions.push(ConditionInput::AuthorAssociations(
+                self.author_associations.clone(),
+            ));
         }
         if !self.milestones.is_empty() {
             conditions.push(ConditionInput::Milestones(self.milestones.clone()));
@@ -175,7 +183,7 @@ impl InterestRule {
         if conditions.is_empty() {
             bail!(
                 "interest rule{} sets no condition (needs one of labels/paths/\
-                 author_associations/milestones)",
+                 authors/author_associations/milestones)",
                 self.name
                     .as_deref()
                     .map(|n| format!(" {n:?}"))
@@ -702,6 +710,31 @@ mod tests {
             rules.evaluate(&first_timer_elsewhere),
             reviewq_core::rules::Evaluation::NoMatch,
             "one dimension is not enough"
+        );
+    }
+
+    #[test]
+    fn a_rule_may_name_the_authors_it_cares_about() {
+        let config: Config = toml::from_str(&minimal(
+            r#"
+            [[project.interest]]
+            authors = ["potiuk"]
+            "#,
+        ))
+        .expect("parses");
+        config.validate(Path::new("cfg")).expect("validates");
+
+        let rules = config.interest_for(&config.projects[0]).expect("compiles");
+        let mut theirs = pr();
+        theirs.author = "potiuk".into();
+        assert_eq!(
+            rules.evaluate(&theirs),
+            reviewq_core::rules::Evaluation::Match("author @potiuk".into())
+        );
+        assert_eq!(
+            rules.evaluate(&pr()),
+            reviewq_core::rules::Evaluation::NoMatch,
+            "a login rule must not fire for everyone else"
         );
     }
 

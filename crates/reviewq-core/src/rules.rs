@@ -7,10 +7,8 @@
 //!
 //! Interest is a **disjunction of rules** — a PR is interesting if any rule
 //! matches. A rule is a **conjunction of conditions** — every condition must
-//! match. Today the config surface allows only one condition per rule, so a
-//! rule is effectively single-dimension; the conjunction machinery is here and
-//! tested so that "first-time contributor AND touches these paths" is a config
-//! change later, not a redesign.
+//! match, and within a condition any listed value is enough. So "one of these
+//! authors *and* one of these paths" is one rule with two conditions.
 //!
 //! Repo scoping lives a layer up: each project compiles its own [`Interest`],
 //! so nothing here needs to know which repo a PR came from.
@@ -37,8 +35,10 @@ pub enum ConditionInput {
     Labels(Vec<String>),
     /// A changed path matches any of these globs.
     Paths(Vec<String>),
-    /// The author's association is any of these.
+    /// The author is any of these logins.
     Authors(Vec<String>),
+    /// The author's association is any of these.
+    AuthorAssociations(Vec<String>),
     /// The milestone title contains any of these substrings.
     Milestones(Vec<String>),
 }
@@ -76,6 +76,7 @@ enum Condition {
     Labels(Vec<String>),
     Paths { set: GlobSet, patterns: Vec<String> },
     Authors(Vec<String>),
+    AuthorAssociations(Vec<String>),
     Milestones(Vec<String>),
 }
 
@@ -177,6 +178,7 @@ impl Condition {
         Ok(match input {
             ConditionInput::Labels(v) => Condition::Labels(v),
             ConditionInput::Authors(v) => Condition::Authors(v),
+            ConditionInput::AuthorAssociations(v) => Condition::AuthorAssociations(v),
             ConditionInput::Milestones(v) => Condition::Milestones(v),
             ConditionInput::Paths(patterns) => {
                 let mut builder = GlobSetBuilder::new();
@@ -201,7 +203,17 @@ impl Condition {
                 }
                 CondOutcome::NoMatch
             }
-            Condition::Authors(values) => {
+            // Logins are compared case-insensitively: GitHub treats `Potiuk` and
+            // `potiuk` as one account, so a rule naming either has to match the
+            // casing the sweep happened to report.
+            Condition::Authors(logins) => {
+                if logins.iter().any(|v| v.eq_ignore_ascii_case(&pr.author)) {
+                    CondOutcome::Match(format!("author @{}", pr.author))
+                } else {
+                    CondOutcome::NoMatch
+                }
+            }
+            Condition::AuthorAssociations(values) => {
                 if values.iter().any(|v| v == &pr.author_association) {
                     CondOutcome::Match(format!("author {}", pr.author_association))
                 } else {
@@ -304,7 +316,7 @@ mod tests {
         author_pr.author_association = "FIRST_TIME_CONTRIBUTOR".into();
         let rule = RuleInput {
             name: None,
-            conditions: vec![ConditionInput::Authors(vec![
+            conditions: vec![ConditionInput::AuthorAssociations(vec![
                 "FIRST_TIME_CONTRIBUTOR".into(),
             ])],
         };
@@ -322,6 +334,27 @@ mod tests {
         assert_eq!(
             interest(vec![rule]).evaluate(&pr),
             Evaluation::Match("milestone 3.2".into())
+        );
+    }
+
+    #[test]
+    fn an_author_rule_names_a_login_and_ignores_its_casing() {
+        // What `author_associations` cannot express: GitHub's relationship
+        // classes say nothing about *which* person opened the PR.
+        let rule = RuleInput {
+            name: None,
+            conditions: vec![ConditionInput::Authors(vec!["OctoCat".into()])],
+        };
+        assert_eq!(
+            interest(vec![rule.clone()]).evaluate(&pr()),
+            Evaluation::Match("author @octocat".into())
+        );
+
+        let mut someone_else = pr();
+        someone_else.author = "potiuk".into();
+        assert_eq!(
+            interest(vec![rule]).evaluate(&someone_else),
+            Evaluation::NoMatch
         );
     }
 
@@ -380,7 +413,7 @@ mod tests {
         let both = RuleInput {
             name: None,
             conditions: vec![
-                ConditionInput::Authors(vec!["FIRST_TIME_CONTRIBUTOR".into()]),
+                ConditionInput::AuthorAssociations(vec!["FIRST_TIME_CONTRIBUTOR".into()]),
                 ConditionInput::Paths(vec!["task-sdk/**".into()]),
             ],
         };
