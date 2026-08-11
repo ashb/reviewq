@@ -1,0 +1,14 @@
+---
+source: crates/reviewq-tui/src/svg.rs
+expression: picture
+---
+<svg xmlns="http://www.w3.org/2000/svg" width="168" height="36" viewBox="0 0 168 36" font-family="&quot;JetBrains Mono&quot;, &quot;Symbols Nerd Font&quot;, monospace" font-size="14">
+<style>
+@import url("https://fonts.bunny.net/css?family=jetbrains-mono:400,700");
+</style>
+<rect width="100%" height="100%" fill="#1e1e1e"/>
+<text x="0.0" y="13.5" fill="#010203" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">a &amp; b</text>
+<rect x="42.0" y="0.0" width="25.2" height="18" fill="#090807"/>
+<text x="42.0" y="13.5" fill="#ffffff" textLength="25.2" lengthAdjust="spacing" xml:space="preserve">&lt;c&gt;</text>
+<text x="0.0" y="31.5" fill="#ffffff" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">plain               </text>
+</svg>

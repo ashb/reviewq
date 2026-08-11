@@ -262,6 +262,38 @@ pub struct Output {
     pub theme: ThemeMode,
     /// The glyphs a queue row is marked with. `[output.marks]` in TOML.
     pub marks: Marks,
+    /// How a saved screen is drawn. `[output.svg]` in TOML.
+    pub svg: Svg,
+}
+
+/// How the interface's saved screen is drawn.
+///
+/// An SVG names fonts, it cannot practically carry them — a patched Nerd Font is
+/// megabytes — so what a viewer sees depends on what it can resolve. The default
+/// asks Bunny (a Google Fonts mirror that sets no cookies and logs no addresses)
+/// for the text face, and names the symbol face without a stylesheet at all: a
+/// font already installed needs no fetching, and there is no privacy-preserving
+/// CDN that carries one. On a machine without it the deferred mark comes out as
+/// a box, which is what [`Marks`] is there to work around.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Svg {
+    /// Stylesheets the SVG imports, in order. Empty for a file that fetches
+    /// nothing at all and draws in whatever the viewer already has.
+    pub font_css: Vec<String>,
+    /// The CSS font stack the text is drawn with. Each family is tried in turn
+    /// for each character, which is what lets a symbol face cover the glyphs the
+    /// text face has no room for.
+    pub font_family: String,
+}
+
+impl Default for Svg {
+    fn default() -> Self {
+        Self {
+            font_css: vec!["https://fonts.bunny.net/css?family=jetbrains-mono:400,700".into()],
+            font_family: "\"JetBrains Mono\", \"Symbols Nerd Font\", monospace".into(),
+        }
+    }
 }
 
 /// The one-glyph marks a list puts in front of a PR, saying where you stand with
@@ -360,6 +392,7 @@ impl Default for Output {
             underline_links: true,
             theme: ThemeMode::default(),
             marks: Marks::default(),
+            svg: Svg::default(),
         }
     }
 }

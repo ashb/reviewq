@@ -129,6 +129,15 @@ theme = "dark"
 #   done     = "·"   # you marked it done here
 #   deferred = "z"   # you deferred it to the bottom
 
+# How a saved screen is drawn. An SVG names fonts, it cannot carry them, so what
+# a viewer sees depends on what it can resolve: the text face comes from Bunny (a
+# Google Fonts mirror that sets no cookies), and the symbol face is only named —
+# a font already installed needs no fetching, and no privacy-preserving CDN
+# carries one. Set font_css = [] for a file that fetches nothing at all.
+#   [output.svg]
+#   font_css    = ["https://fonts.bunny.net/css?family=jetbrains-mono:400,700"]
+#   font_family = '"JetBrains Mono", "Symbols Nerd Font", monospace'
+
 # Per-host forge settings, keyed by host. Public github.com is built in, so this
 # whole section is optional. A user entry overlays the built-in field by field.
 #

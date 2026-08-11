@@ -110,6 +110,7 @@ fn forbid_in_tests(what: &str) {
 const WHEEL_ROWS: isize = 3;
 
 use crate::keys::{self, Action};
+use crate::svg;
 use crate::theme::Theme;
 use crate::ui;
 
@@ -156,6 +157,10 @@ pub struct App {
     pending_fetch: Option<u64>,
     /// And for a PR to look at, which may have to be fetched to show at all.
     pending_peek: Option<u64>,
+    /// A screen to save once it has been drawn. Held rather than done on the
+    /// keypress because what is wanted is the frame *without* the note saying it
+    /// was saved — which is the frame drawn a moment later.
+    pending_svg: bool,
     /// A PR whose forge notifications should be marked read, recorded once the
     /// local `done` is committed. Fire-and-forget, so the loop needs no draw
     /// first — it is held only so that acting on an overlay's keys needs no
@@ -268,6 +273,11 @@ pub struct Hooks {
     /// stored, from the forge where it isn't. Blocks for the same reason
     /// [`fetch`](Self::fetch) does, and may not have to touch the network at all.
     pub peek: Box<dyn Fn(u64) -> Result<Peeked> + Send + Sync>,
+    /// Put a drawn screen somewhere, returning where it went so the header can
+    /// say. Given the finished SVG rather than the buffer: composing it is this
+    /// crate's business and writing a file is not, which also lets a test read
+    /// what would have been saved without touching a disk.
+    pub save_screen: Box<dyn Fn(String) -> Result<String> + Send + Sync>,
     /// Show a PR's page in whatever the desktop opens URLs with.
     ///
     /// Takes the PR rather than a URL because working out the URL is itself
@@ -487,6 +497,7 @@ impl App {
             pending_review: None,
             pending_fetch: None,
             pending_peek: None,
+            pending_svg: false,
             pending_mark_read: None,
             repaint: false,
             dirty: true,
@@ -665,7 +676,18 @@ impl App {
             // PR's description as markdown ten times a second, for as long as the
             // interface was open.
             if std::mem::take(&mut self.dirty) {
-                terminal.draw(|frame| ui::draw(frame, self))?;
+                let drawn = terminal.draw(|frame| ui::draw(frame, self))?;
+                // The frame that was just composed, whatever the backend did
+                // with it afterwards — so this works against a test terminal
+                // exactly as it does against a real one.
+                if std::mem::take(&mut self.pending_svg) {
+                    let picture = svg::render(drawn.buffer, &self.theme, &self.config.output.svg);
+                    self.status = Some(match (hooks.save_screen)(picture) {
+                        Ok(where_it_went) => format!("screen saved to {where_it_went}"),
+                        Err(err) => format!("the screen could not be saved: {err:#}"),
+                    });
+                    self.dirty = true;
+                }
             }
 
             // A handoff runs here rather than in `dispatch`, because the draw
@@ -735,6 +757,13 @@ impl App {
     /// [`Action`]: the ones with side effects are performed here, where the hooks
     /// and the ledger are, and the rest go to [`update`](Self::update).
     fn dispatch(&mut self, key: KeyEvent, channel: &Channel, hooks: &Hooks) -> Result<()> {
+        // Before anything else claims the keyboard: the screen worth saving is
+        // often one an overlay is covering, and a modal that swallowed the key
+        // would be the one thing that could never be photographed.
+        if keys::action_for(key) == Some(Action::SaveSvg) {
+            self.pending_svg = true;
+            return Ok(());
+        }
         if self.overlay != Overlay::None {
             return self.on_overlay_key(key);
         }
@@ -788,6 +817,7 @@ impl App {
                 | Action::Jump
                 | Action::SwitchPane
                 | Action::ToggleTheme
+                | Action::SaveSvg
                 | Action::Down
                 | Action::Up
                 | Action::PageDown
@@ -825,6 +855,13 @@ impl App {
             }
             Action::ToggleTheme => {
                 self.theme = self.theme.toggled();
+                Ok(())
+            }
+            // `dispatch` takes this one before anything else gets the keyboard,
+            // so it does not arrive here — but a shown PR is worth photographing
+            // too, and refusing it as a write would be wrong.
+            Action::SaveSvg => {
+                self.pending_svg = true;
                 Ok(())
             }
             // Always the description: the queue is still drawn, but it is not
@@ -1304,6 +1341,10 @@ impl App {
                 // Nothing but the palette: every colour comes from the theme, so
                 // swapping it is the whole change, and the next draw carries it.
                 self.theme = self.theme.toggled();
+                Ok(Update::Handled)
+            }
+            Action::SaveSvg => {
+                self.pending_svg = true;
                 Ok(Update::Handled)
             }
             Action::Down => handled(self.scroll(1)),
@@ -2030,6 +2071,9 @@ mod loop_tests {
 
     /// What the hooks were asked to do.
     struct Recorded {
+        /// Screens handed to the save hook — the SVG itself, not a path, since
+        /// nothing here writes one.
+        saved: Arc<Mutex<Vec<String>>>,
         refreshed: Seen,
         marked: Seen,
         reviewed: Seen,
@@ -2070,6 +2114,7 @@ mod loop_tests {
         review_fails: bool,
     ) -> (Hooks, Recorded) {
         let recorded = Recorded {
+            saved: Arc::new(Mutex::new(Vec::new())),
             refreshed: Arc::new(Mutex::new(Vec::new())),
             marked: Arc::new(Mutex::new(Vec::new())),
             reviewed: Arc::new(Mutex::new(Vec::new())),
@@ -2078,6 +2123,7 @@ mod loop_tests {
             opened: Arc::new(Mutex::new(Vec::new())),
             copied: Arc::new(Mutex::new(Vec::new())),
         };
+        let saved = Arc::clone(&recorded.saved);
         let refreshed = Arc::clone(&recorded.refreshed);
         let marked = Arc::clone(&recorded.marked);
         let reviewed = Arc::clone(&recorded.reviewed);
@@ -2093,6 +2139,10 @@ mod loop_tests {
             peek: Box::new(move |number| {
                 peeked.lock().expect("lock").push(number);
                 Ok(scratch_peek(number))
+            }),
+            save_screen: Box::new(move |picture| {
+                saved.lock().expect("lock").push(picture);
+                Ok("/tmp/reviewq.svg".to_string())
             }),
             next_event: scripted(script),
             refresh: Box::new(move |number, tx| {
@@ -2778,6 +2828,7 @@ mod loop_tests {
                 Ok(())
             }),
             peek: Box::new(|number| Ok(scratch_peek(number))),
+            save_screen: Box::new(|_| Ok(String::new())),
             refresh: Box::new(|_, _| {}),
             mark_read: Box::new(|_| {}),
             review: Box::new(|_| Ok(())),
@@ -2885,6 +2936,68 @@ mod loop_tests {
         assert!(app.peek.is_none());
         let status = app.status.clone().expect("a status");
         assert!(status.contains("could not be shown"), "{status}");
+        assert!(!app.queue.is_empty(), "the queue survives");
+    }
+
+    #[test]
+    fn the_screen_is_saved_as_it_was_before_the_note_saying_so() {
+        // The point of holding it for the loop: a screenshot with "screen saved
+        // to …" across its header is a picture of the act, not of the queue.
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(vec![special(KeyCode::F(12)), press('q')], None, false);
+
+        drive(&mut app, &hooks);
+
+        let saved = recorded.saved.lock().expect("lock");
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].starts_with("<svg"), "{}", &saved[0][..40]);
+        assert!(
+            !saved[0].contains("screen saved"),
+            "the note must not be in the picture of what it describes"
+        );
+        assert!(
+            saved[0].contains("70135"),
+            "and the queue that was on screen is"
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("/tmp/reviewq.svg"), "{status}");
+    }
+
+    #[test]
+    fn the_screen_can_be_saved_from_under_an_overlay() {
+        // The frames worth keeping are often the ones a modal is covering, and a
+        // modal owns the keyboard — so this key is taken before it can be
+        // swallowed.
+        let mut app = app();
+        let (hooks, recorded) = fake_hooks(
+            // The first `q` dismisses the reference — which is itself the proof
+            // that F12 did not, since a key the overlay had seen would have.
+            vec![press('?'), special(KeyCode::F(12)), press('q'), press('q')],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks);
+
+        let saved = recorded.saved.lock().expect("lock");
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].contains("Reference"), "the overlay is in the shot");
+    }
+
+    #[test]
+    fn a_save_that_fails_says_so_and_carries_on() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(vec![special(KeyCode::F(12)), press('q')], None, false);
+        let hooks = Hooks {
+            save_screen: Box::new(|_| bail!("read-only filesystem")),
+            ..hooks
+        };
+
+        drive(&mut app, &hooks);
+
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("could not be saved"), "{status}");
+        assert!(status.contains("read-only"), "{status}");
         assert!(!app.queue.is_empty(), "the queue survives");
     }
 

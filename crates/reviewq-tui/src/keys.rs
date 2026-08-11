@@ -48,6 +48,8 @@ pub enum Action {
     ToggleDefer,
     /// Show or hide the key reference.
     Help,
+    /// Save what is on screen as an SVG.
+    SaveSvg,
 }
 
 /// One chord: a key, and whether Ctrl must be held.
@@ -90,6 +92,15 @@ pub struct Binding {
     /// Also shown in the footer. The footer has room for the handful you need
     /// before you know the rest exists — everything else lives in the overlay.
     pub footer: bool,
+    /// Kept out of the reference and the footer.
+    ///
+    /// The table is still where the key is declared, so it cannot collide with
+    /// another and cannot do something the reference contradicts — it simply has
+    /// nothing to say to somebody who isn't looking for it. For a shortcut that
+    /// serves the person writing the documentation rather than the person
+    /// reading it, that is the honest arrangement; a bare match arm in `dispatch`
+    /// would have put the key outside the one table that knows about keys.
+    pub hidden: bool,
 }
 
 /// The heading order in the help overlay, which is declaration order here.
@@ -101,6 +112,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "move",
         group: "Navigate",
         footer: true,
+        hidden: false,
     },
     Binding {
         action: Action::Up,
@@ -111,6 +123,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "",
         group: "Navigate",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::PageDown,
@@ -119,6 +132,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "page down",
         group: "Navigate",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::PageUp,
@@ -127,6 +141,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "page up",
         group: "Navigate",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::First,
@@ -135,6 +150,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "first",
         group: "Navigate",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::Last,
@@ -143,6 +159,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "last",
         group: "Navigate",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::Jump,
@@ -154,6 +171,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "go to a PR by number",
         group: "Navigate",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::SwitchPane,
@@ -162,6 +180,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "switch pane",
         group: "View",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::ToggleTheme,
@@ -170,6 +189,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "adapt for a light or dark terminal",
         group: "View",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::Review,
@@ -178,6 +198,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "review it — hand off to your review command",
         group: "Act on the PR",
         footer: true,
+        hidden: false,
     },
     Binding {
         action: Action::Done,
@@ -186,6 +207,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "done — handled at this head",
         group: "Act on the PR",
         footer: true,
+        hidden: false,
     },
     Binding {
         action: Action::Snooze,
@@ -194,6 +216,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "snooze for a while",
         group: "Act on the PR",
         footer: true,
+        hidden: false,
     },
     Binding {
         action: Action::OpenInBrowser,
@@ -202,6 +225,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "open it in your browser",
         group: "Act on the PR",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::CopyUrl,
@@ -213,6 +237,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "copy its URL",
         group: "Act on the PR",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::ToggleMute,
@@ -221,6 +246,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "mute, or unmute",
         group: "Act on the PR",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::ToggleDefer,
@@ -229,6 +255,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "defer to the bottom, or restore",
         group: "Act on the PR",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::RefreshSelected,
@@ -237,6 +264,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "refresh from the forge",
         group: "Forge",
         footer: false,
+        hidden: false,
     },
     Binding {
         action: Action::Help,
@@ -245,6 +273,7 @@ pub const BINDINGS: &[Binding] = &[
         what: "keys",
         group: "Session",
         footer: true,
+        hidden: false,
     },
     Binding {
         action: Action::Quit,
@@ -257,6 +286,19 @@ pub const BINDINGS: &[Binding] = &[
         what: "quit",
         group: "Session",
         footer: true,
+        hidden: false,
+    },
+    Binding {
+        action: Action::SaveSvg,
+        // F12 because nothing types it by accident, and because ctrl-s is XOFF
+        // on a terminal that still honours flow control — which would freeze the
+        // interface rather than photograph it.
+        chords: &[key(KeyCode::F(12))],
+        keys: "F12",
+        what: "save the screen as an SVG",
+        group: "Session",
+        footer: false,
+        hidden: true,
     },
 ];
 
@@ -274,10 +316,11 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
 
 /// The bindings with something to display, in declaration order.
 ///
-/// Skips the rows folded into a neighbour (see [`Action::Up`]), so a caller
-/// listing bindings doesn't render a blank line for them.
+/// Skips the rows folded into a neighbour (see [`Action::Up`]) so a caller
+/// listing bindings doesn't render a blank line for them, and the
+/// [`hidden`](Binding::hidden) ones, which are deliberately not advertised.
 pub fn described() -> impl Iterator<Item = &'static Binding> {
-    BINDINGS.iter().filter(|b| !b.keys.is_empty())
+    BINDINGS.iter().filter(|b| !b.keys.is_empty() && !b.hidden)
 }
 
 #[cfg(test)]
@@ -344,6 +387,22 @@ mod tests {
         // would silently break it.
         let shifted = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         assert_eq!(action_for(shifted), Some(Action::Last));
+    }
+
+    #[test]
+    fn a_hidden_binding_still_works_but_is_never_advertised() {
+        // The point of keeping it in the table rather than special-casing it in
+        // `dispatch`: it is checked for collisions like any other key, and the
+        // two places that list keys skip it because it says to.
+        assert_eq!(
+            action_for(press(KeyCode::F(12))),
+            Some(Action::SaveSvg),
+            "the key works"
+        );
+        assert!(
+            !described().any(|b| b.action == Action::SaveSvg),
+            "and appears in neither the reference nor the footer"
+        );
     }
 
     #[test]

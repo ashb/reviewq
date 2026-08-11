@@ -37,6 +37,10 @@ struct Session {
 impl Session {
     /// Start the interface against `db`, which need not exist — an empty ledger
     /// still draws, and pointing at the real one would be rude.
+    ///
+    /// Runs in `db`'s directory. The interface can write where it is told to
+    /// (`F12` saves a screen beside you), and a test that let it do that in the
+    /// crate directory would leave files in the repository.
     fn start(db: &std::path::Path, config: &std::path::Path) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
@@ -49,6 +53,9 @@ impl Session {
 
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_reviewq"));
         command.arg("tui");
+        if let Some(dir) = db.parent() {
+            command.cwd(dir);
+        }
         command.env("REVIEWQ_DB", db);
         // The interface loads and validates config before taking the terminal, so
         // it needs a real one — and it must not be this machine's.
@@ -120,20 +127,7 @@ impl Session {
 #[test]
 fn it_takes_the_terminal_over_and_gives_it_back() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = dir.path().join("config.toml");
-    std::fs::write(
-        &config,
-        r#"
-        [identity]
-        login = "ashb"
-        [[project]]
-        repos = [{ owner = "apache", name = "airflow" }]
-        [[project.interest]]
-        labels = ["area:task-sdk"]
-        "#,
-    )
-    .expect("write config");
-    let mut session = Session::start(&dir.path().join("ledger.db"), &config);
+    let mut session = Session::start(&dir.path().join("ledger.db"), &config_in(dir.path()));
 
     // Drew its opening frame, which means the layout survived a real terminal
     // rather than only a TestBackend. Single words, for the reason in the module
@@ -172,5 +166,70 @@ fn it_takes_the_terminal_over_and_gives_it_back() {
     assert!(
         seen.contains("\u{1b}[?1003l") || seen.contains("\u{1b}[?1000l"),
         "never turned mouse reporting off. Output:\n{seen:?}"
+    );
+}
+
+/// A minimal config, written where the interface will look for it.
+fn config_in(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+        [identity]
+        login = "ashb"
+        [[project]]
+        repos = [{ owner = "apache", name = "airflow" }]
+        [[project.interest]]
+        labels = ["area:task-sdk"]
+        "#,
+    )
+    .expect("write config");
+    path
+}
+
+#[test]
+fn f12_writes_the_screen_beside_you() {
+    // The one part of saving a screen the unit tests structurally cannot see:
+    // they stand in for the hook that decides where the file goes, so nothing
+    // else exercises the working directory, the name, or the write itself.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("ledger.db");
+    let mut session = Session::start(&db, &config_in(dir.path()));
+    session.wait_for("Queue");
+
+    // xterm's F12. Sent as bytes because that is what a terminal sends.
+    session.press("\u{1b}[24~");
+
+    let deadline = Instant::now() + DEADLINE;
+    let saved = loop {
+        let found = std::fs::read_dir(dir.path())
+            .expect("read tempdir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|e| e == "svg"));
+        match found {
+            Some(path) => break path,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            None => panic!("no SVG appeared. Output so far:\n{}", session.seen()),
+        }
+    };
+
+    session.press("q");
+    assert_eq!(session.wait_for_exit(), 0);
+
+    let name = saved.file_name().expect("a name").to_string_lossy();
+    assert!(name.starts_with("reviewq-"), "{name}");
+    // A colon is a path separator to some tools and a display quirk in the
+    // Finder, so the stamp in the name must not carry the ones RFC 3339 has.
+    assert!(!name.contains(':'), "{name}");
+    let picture = std::fs::read_to_string(&saved).expect("read it back");
+    assert!(
+        picture.starts_with("<svg"),
+        "{}",
+        &picture[..40.min(picture.len())]
+    );
+    assert!(
+        picture.contains("Nothing on the queue"),
+        "it drew the screen"
     );
 }

@@ -10,6 +10,7 @@
 //! choice is informed.
 
 mod app;
+mod svg;
 mod ui;
 
 pub mod keys;

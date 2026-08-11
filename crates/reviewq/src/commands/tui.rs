@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event;
 use crossterm::execute;
+use jiff::Timestamp;
 use reviewq_app::config::{Config, Loaded, ThemeMode};
 use reviewq_ledger::RepoKey;
 use reviewq_tui::{Hooks, Message};
@@ -100,6 +101,17 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
         peek: Box::new(move |number| {
             Handle::current().block_on(reviewq_app::peek::peek_one(&for_peek, number))
         }),
+        save_screen: Box::new(|picture| {
+            // The working directory, because a screenshot is nearly always
+            // wanted where you already are — pasted into the PR or the README
+            // you have open — and a state directory would hide it.
+            let path = std::env::current_dir()
+                .context("finding the directory to save into")?
+                .join(format!("reviewq-{}.svg", file_stamp(Timestamp::now())));
+            std::fs::write(&path, picture)
+                .with_context(|| format!("writing {}", path.display()))?;
+            Ok(path.display().to_string())
+        }),
         open_url: Box::new(move |repo, number| {
             let url = pr_url(&for_open, repo, number)?;
             // Never handed the terminal, unlike the review command: an opener
@@ -179,6 +191,13 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             });
         }),
     }
+}
+
+/// A timestamp as a filename can carry it: RFC 3339 with the colons swapped for
+/// dashes, since a colon is a path separator to some tools and a display quirk in
+/// the macOS Finder.
+fn file_stamp(at: Timestamp) -> String {
+    reviewq_app::present::stamp(at).replace(':', "-")
 }
 
 /// A PR's page on the forge.
