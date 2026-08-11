@@ -664,6 +664,10 @@ struct DetailRepo {
 struct DetailPr {
     number: u64,
     head_ref_oid: String,
+    /// The labels it carries, with their colours. Fetched here as well as in the
+    /// sweep because this is the only query a single-PR refresh makes: without
+    /// it, pressing `r` learns nothing about how the repo paints anything.
+    labels: LabelConn,
     /// The PR's description. GraphQL types it non-null, but an empty
     /// description is the common case, so it's defaulted rather than required.
     #[serde(default)]
@@ -794,6 +798,17 @@ fn mentions_login(body: &str, login: &str) -> bool {
 
 impl DetailPr {
     fn into_detail(self, login: &str, cost: u32, remaining: u32) -> PrDetail {
+        let labels = self
+            .labels
+            .nodes
+            .iter()
+            .filter_map(|label| {
+                Some(LabelColour {
+                    name: label.name.clone(),
+                    color: label.color.clone()?,
+                })
+            })
+            .collect();
         let mut action_times: Vec<Timestamp> = Vec::new();
         let mut mentions: Vec<Mention> = Vec::new();
 
@@ -892,6 +907,7 @@ impl DetailPr {
             number: self.number,
             head_sha: self.head_ref_oid,
             body: self.body,
+            labels,
             last_reviewed_sha,
             last_verdict,
             last_action_at: action_times.into_iter().max(),
@@ -975,6 +991,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       number
       headRefOid
       body
+      labels(first: 30) { nodes { name color } }
       reviewRequests(first: 20) {
         nodes { requestedReviewer {
           __typename

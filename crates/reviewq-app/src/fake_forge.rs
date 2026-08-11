@@ -130,6 +130,7 @@ impl FakeForge {
                 number,
                 head_sha: format!("sha{number}"),
                 body: String::new(),
+                labels: Vec::new(),
                 last_reviewed_sha: None,
                 last_verdict: None,
                 last_action_at: None,
@@ -142,6 +143,20 @@ impl FakeForge {
                 remaining,
             },
         );
+        self
+    }
+
+    /// Paint the labels `number`'s detail reports, as the forge does.
+    pub(crate) fn with_detail_labels(self, number: u64, labels: &[(&str, &str)]) -> Self {
+        if let Some(detail) = self.details.lock().expect("lock").get_mut(&number) {
+            detail.labels = labels
+                .iter()
+                .map(|(name, color)| reviewq_forge::LabelColour {
+                    name: (*name).to_string(),
+                    color: (*color).to_string(),
+                })
+                .collect();
+        }
         self
     }
 
