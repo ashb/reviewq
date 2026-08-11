@@ -594,6 +594,15 @@ impl App {
             })
             .unwrap_or(self.selected)
             .min(self.queue.len().saturating_sub(1));
+        // A list that has emptied under the keyboard takes it back. Submitting a
+        // review clears the reason the PR was there for, so the refresh after a
+        // handoff can empty the queue while the description pane holds the
+        // focus — and a description pane with nothing in it is a pane where the
+        // movement keys do nothing and `Tab` looks broken, because the only
+        // thing it changes is a border on two empty panes.
+        if self.queue.is_empty() {
+            self.focus = Focus::Queue;
+        }
         self.load_detail()
     }
 
@@ -2787,6 +2796,63 @@ mod loop_tests {
             app.current().map(|item| item.item.pr.number),
             Some(70201),
             "the selection moved to the PR named"
+        );
+    }
+
+    #[test]
+    fn reviewing_the_last_pr_does_not_strand_you_on_an_empty_detail() {
+        // What actually happens after a review: submitting one clears the reason
+        // the PR was there for, so the refresh that follows the handoff drops it
+        // off the queue — and if it was the only one, the queue empties under
+        // you. The keyboard must not be left pointing at a pane with nothing in
+        // it and nothing to move.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        add_queued(&ledger, repo_id, 70135);
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        assert_eq!(app.queue.len(), 1);
+
+        let write_path = path.clone();
+        let hooks = Hooks {
+            next_event: scripted(vec![
+                special(KeyCode::Tab),
+                special(KeyCode::Enter),
+                press('q'),
+            ]),
+            // The real refresh: a submitted review leaves the PR wanting
+            // nothing, so its attention goes.
+            refresh: Box::new(move |number, tx| {
+                let other = Ledger::open(&write_path).expect("second connection");
+                let repo_id = other.repos().expect("repos")[0].0;
+                other.clear_attention(repo_id, number).expect("cleared");
+                let _ = tx.send(Message::Refreshed {
+                    number,
+                    outcome: Ok(Refreshed::Updated {
+                        repo: "apache/airflow".into(),
+                        queued: false,
+                        cost: 1,
+                        remaining: 4900,
+                    }),
+                });
+            }),
+            fetch: Box::new(|_| Ok(())),
+            peek: Box::new(|number| Ok(scratch_peek(number))),
+            save_screen: Box::new(|_| Ok(String::new())),
+            mark_read: Box::new(|_| {}),
+            review: Box::new(|_| Ok(())),
+            open_url: Box::new(|_, _| Ok(())),
+            copy_url: Box::new(|_, _| Ok(())),
+        };
+
+        drive(&mut app, &hooks);
+
+        assert!(app.queue.is_empty(), "the PR left the queue, as it should");
+        assert_eq!(
+            app.focus,
+            Focus::Queue,
+            "so the keyboard belongs back on the list, not on a blank description"
         );
     }
 
