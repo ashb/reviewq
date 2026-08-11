@@ -4,9 +4,10 @@ expression: screen
 ---
 reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
-│ ▸   #70135  @kaxi╭ Reference ────────────────────────────────────────────────╮r                  │
-│     #70201  match│ Marks                                                     │area:async         │
-│                  │   ✓           you reviewed it on the forge                │main               │
+│ ▸   #70135  @kaxil mentioned you  Add def ││ Add deferrable mode to S3KeySensor                  │
+│     #70201  match╭ Reference ────────────────────────────────────────────────╮area:async         │
+│                  │ Marks                                                     │main               │
+│                  │   ✓           you reviewed it on the forge                │                   │
 │                  │   ✓           …and the PR has moved on since              │                   │
 │                  │   ·           you marked it done here                     │                   │
 │                  │   ·           …and the PR has moved on since              │                   │
@@ -16,14 +17,14 @@ reviewq  2 on the queue
 │                  │   ↑↓ / jk     move                                        │                   │
 │                  │   PgDn / ^D   page down                                   │                   │
 │                  │   PgUp / ^U   page up                                     │                   │
-│                  │   g / Home    first                                       │                   │
-│                  │   G / End     last                                        │nsor.              │
+│                  │   g / Home    first                                       │nsor.              │
+│                  │   G / End     last                                        │                   │
 │                  │   :           go to a PR by number                        │                   │
 │                  │                                                           │                   │
 │                  │ View                                                      │                   │
 │                  │   Tab         switch pane                                 │                   │
-│                  │   t           adapt for a light or dark terminal          │                   │
-│                  │                                                           │rue)               │
+│                  │   t           adapt for a light or dark terminal          │rue)               │
+│                  │                                                           │                   │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
 │                  │   d           done — handled at this head                 │                   │
@@ -43,8 +44,7 @@ reviewq  2 on the queue
 │                  │ Mouse                                                     │                   │
 │                  │   click       select the row, or focus the pane           │                   │
 │                  │   wheel       scroll what is under the pointer            │                   │
-│                  │                                                           │                   │
-│                  │   ↑↓ scroll   any other key close                         │                   │
-│                  ╰───────────────────────────────────────────────────────────╯                   │
+│                  ╰ ↑↓ scroll   any other key close ──────────────────────────╯                   │
+│                                           ││                                                     │
 ╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit

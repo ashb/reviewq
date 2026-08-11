@@ -606,6 +606,12 @@ impl App {
     /// Record how far the key reference can usefully scroll, and hold it there.
     /// Called by the renderer, which knows both how many rows it has and how
     /// many fit.
+    /// How far the reference can scroll, as the last render measured it.
+    #[cfg(test)]
+    pub(crate) fn help_max_scroll(&self) -> u16 {
+        self.help_max_scroll
+    }
+
     pub(crate) fn set_help_max_scroll(&mut self, max: u16) {
         self.help_max_scroll = max;
         if let Overlay::Help { scroll } = self.overlay {
@@ -912,6 +918,18 @@ impl App {
         }
     }
 
+    /// Where the reference lands after moving `delta` rows from `scroll`.
+    ///
+    /// Held to what the renderer measured, so neither the keys nor the wheel can
+    /// push it past the last row into blank space — the two must agree, and the
+    /// measurement is the only thing that knows how much of it fits.
+    fn scrolled_help(&self, scroll: u16, delta: isize) -> u16 {
+        let target = (scroll as isize).saturating_add(delta).max(0);
+        u16::try_from(target)
+            .unwrap_or(u16::MAX)
+            .min(self.help_max_scroll)
+    }
+
     /// Scroll the peeked description, saturating at both ends.
     fn scroll_peek(&mut self, delta: isize) -> Result<()> {
         let target = (self.detail_scroll as isize).saturating_add(delta);
@@ -970,10 +988,23 @@ impl App {
     /// The pane under the pointer is what acts, and takes focus with it. A wheel
     /// over the detail that scrolled the queue instead — because the queue
     /// happened to have focus — would be worse than doing nothing.
-    fn on_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+    pub(crate) fn on_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         // An overlay owns the keyboard, and the mouse with it: the rows are still
         // drawn underneath, so a click on one you cannot see would act on
-        // whatever the modal is covering.
+        // whatever the modal is covering. The reference is the exception — it is
+        // the one overlay that can outgrow the screen, and a panel you can scroll
+        // with the keys should scroll with the wheel wherever the pointer is.
+        if let Overlay::Help { scroll } = self.overlay {
+            let rows = match mouse.kind {
+                MouseEventKind::ScrollUp => -WHEEL_ROWS,
+                MouseEventKind::ScrollDown => WHEEL_ROWS,
+                _ => return Ok(()),
+            };
+            self.overlay = Overlay::Help {
+                scroll: self.scrolled_help(scroll, rows),
+            };
+            return Ok(());
+        }
         if !matches!(self.overlay, Overlay::None) {
             return Ok(());
         }
@@ -1047,20 +1078,18 @@ impl App {
             // Movement scrolls the reference; anything else dismisses it, so it
             // still needs nothing remembered to get out of.
             Overlay::Help { scroll } => {
-                let page = self.page().try_into().unwrap_or(u16::MAX);
+                let page = isize::try_from(self.page()).unwrap_or(isize::MAX);
                 let moved = match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => Some(scroll.saturating_add(1)),
-                    KeyCode::Up | KeyCode::Char('k') => Some(scroll.saturating_sub(1)),
-                    KeyCode::PageDown => Some(scroll.saturating_add(page)),
-                    KeyCode::PageUp => Some(scroll.saturating_sub(page)),
+                    KeyCode::Down | KeyCode::Char('j') => Some(self.scrolled_help(scroll, 1)),
+                    KeyCode::Up | KeyCode::Char('k') => Some(self.scrolled_help(scroll, -1)),
+                    KeyCode::PageDown => Some(self.scrolled_help(scroll, page)),
+                    KeyCode::PageUp => Some(self.scrolled_help(scroll, -page)),
                     KeyCode::Home | KeyCode::Char('g') => Some(0),
-                    KeyCode::End | KeyCode::Char('G') => Some(u16::MAX),
+                    KeyCode::End | KeyCode::Char('G') => Some(self.help_max_scroll),
                     _ => None,
                 };
                 self.overlay = match moved {
-                    Some(to) => Overlay::Help {
-                        scroll: to.min(self.help_max_scroll),
-                    },
+                    Some(scroll) => Overlay::Help { scroll },
                     None => Overlay::None,
                 };
                 Ok(())

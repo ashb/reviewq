@@ -8,7 +8,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 use reviewq_app::config::Marks;
 use reviewq_app::present::{self, Handled, Mark};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
@@ -926,20 +929,18 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, marks: &Marks, t: 
         rows.push(entry(gesture, what));
     }
 
-    rows.push(Line::from(""));
-    rows.push(keyed_hint(
-        &[("↑↓", "scroll"), ("any other key", "close")],
-        t,
-    ));
-
     let width = rows
         .iter()
         .map(Line::width)
         .max()
         .unwrap_or(0)
         .saturating_add(4) as u16;
+    // Never the whole pane: a row of the queue stays visible above and below, so
+    // the reference always reads as something laid over the interface rather than
+    // as a screen the interface turned into.
+    let room = screen.height.saturating_sub(2).max(3);
     let wanted = rows.len().saturating_add(2) as u16;
-    let area = centred(screen, width.min(screen.width), wanted.min(screen.height));
+    let area = centred(screen, width.min(screen.width), wanted.min(room));
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -952,15 +953,60 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, marks: &Marks, t: 
         .title(Span::styled(
             " Reference ",
             Style::default().fg(color(t.focus)),
-        ));
+        ))
+        // In the border rather than the last row, because the last row scrolls:
+        // the way out of a panel must not be the first thing to leave it.
+        .title_bottom(Line::from(vec![
+            Span::styled(" ↑↓ ", Style::default().fg(color(t.key)).bold()),
+            Span::styled("scroll   ", Style::default().fg(color(t.dim))),
+            Span::styled("any other key ", Style::default().fg(color(t.key)).bold()),
+            Span::styled("close ", Style::default().fg(color(t.dim))),
+        ]));
+
     let inner = block.inner(area);
+    let total = rows.len();
+    let shown = inner.height as usize;
+    let max_scroll = total.saturating_sub(shown) as u16;
+    let scroll = scroll.min(max_scroll);
+
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    let total = rows.len();
     frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+
+    // ratatui owns the drawing of this; the offset above is ours. Only shown
+    // when there is somewhere to go, so a reference that fits carries no
+    // furniture about scrolling it.
+    if max_scroll > 0 {
+        let track = Rect {
+            x: area.right().saturating_sub(1),
+            y: area.y + 1,
+            width: 1,
+            height: inner.height,
+        };
+        // `content_length` counts scroll *positions*, not rows: the widget puts
+        // the thumb at the end when `position == content_length - 1`, so passing
+        // the row count would leave it a third of the way down with the last row
+        // already on screen. One more than the furthest we can scroll is the
+        // number of positions there are.
+        let mut state = ScrollbarState::new(max_scroll as usize + 1)
+            .position(scroll as usize)
+            .viewport_content_length(shown);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                // Drawn over the border rather than inside it: an arrow at each
+                // end would be two more things that look like they can be
+                // clicked, and nothing here can be.
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(color(t.border)))
+                .thumb_style(Style::default().fg(color(t.focus))),
+            track,
+            &mut state,
+        );
+    }
     // What is left below the last visible row. Zero when it all fits, which is
     // what stops a scroll key doing anything on a tall terminal.
-    total.saturating_sub(inner.height as usize) as u16
+    max_scroll
 }
 
 /// The `width` x `height` rect at the middle of `area`, clamped to fit.
@@ -1010,7 +1056,7 @@ mod tests {
     use jiff::Timestamp;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot};
     use reviewq_ledger::{Ledger, TrackedReason};
 
@@ -1145,6 +1191,16 @@ sensor = S3KeySensor(deferrable=True)
             )
             .expect("detail")
             .expect_applied();
+    }
+
+    /// A wheel event at a point, for the panes and the overlays both.
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     /// Just the queue pane's half of each rendered row.
@@ -1701,6 +1757,143 @@ sensor = S3KeySensor(deferrable=True)
         assert!(screen.contains("close"), "{screen}");
 
         insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_reference_never_covers_the_whole_pane() {
+        // A row of the queue stays visible above and below it, so it always reads
+        // as something laid over the interface rather than as a screen the
+        // interface turned into. Sizes are given, never the terminal running the
+        // test — this has to hold at 24 rows and at 80.
+        for height in [16u16, 24, 80] {
+            let mut app =
+                App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+            app.overlay = Overlay::Help { scroll: 0 };
+            let rows = render(&mut app, 100, height);
+
+            // Found by its own titles rather than by a border character: the
+            // panes underneath have borders too, and the first one down the
+            // screen is theirs.
+            let row_with = |needle: &str| {
+                rows.iter()
+                    .position(|row| row.contains(needle))
+                    .unwrap_or_else(|| {
+                        panic!("no {needle:?} at {height} rows:\n{}", rows.join("\n"))
+                    })
+            };
+            let overlay_top = row_with("Reference");
+            let overlay_bottom = row_with("any other key");
+
+            assert!(
+                overlay_top >= 2,
+                "at {height} rows it started at {overlay_top}:\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                overlay_bottom + 2 < rows.len(),
+                "at {height} rows it ended at {overlay_bottom} of {}:\n{}",
+                rows.len(),
+                rows.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_that_does_not_fit_says_so_and_scrolls_with_the_wheel() {
+        // Short enough that the reference cannot fit, whatever terminal the test
+        // is run in.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.overlay = Overlay::Help { scroll: 0 };
+        let top = render(&mut app, 100, 20).join("\n");
+
+        // The scrollbar is ratatui's, drawn only when there is somewhere to go.
+        assert!(top.contains('█'), "no scrollbar thumb:\n{top}");
+        assert!(top.contains("Marks"), "{top}");
+        assert!(!top.contains("Mouse"), "the tail is below the fold:\n{top}");
+        // The way out is in the border, so it cannot scroll away.
+        assert!(top.contains("any other key"), "{top}");
+
+        // Two notches of the wheel, anywhere — an overlay owns the pointer as
+        // well as the keyboard, so where it is over does not matter.
+        for _ in 0..2 {
+            app.on_mouse(wheel(MouseEventKind::ScrollDown, 10, 10))
+                .expect("wheel");
+        }
+        let scrolled = render(&mut app, 100, 20).join("\n");
+
+        assert_ne!(
+            app.overlay,
+            Overlay::Help { scroll: 0 },
+            "the wheel moved nothing"
+        );
+        assert!(
+            scrolled.contains("any other key"),
+            "the way out is still there:\n{scrolled}"
+        );
+    }
+
+    #[test]
+    fn the_scrollbar_reaches_the_bottom_when_the_last_row_does() {
+        // The widget places the thumb by `position / (content_length - 1)`, so
+        // handing it the row count rather than the number of scroll positions
+        // left the thumb a third of the way down with the end already on screen.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.overlay = Overlay::Help { scroll: 0 };
+        render(&mut app, 100, 20);
+        let end = app.help_max_scroll();
+
+        // The rows the scrollbar occupies, in order: thumb `█`, track `║`.
+        let bar_rows = |app: &mut App| -> Vec<char> {
+            render(app, 100, 20)
+                .iter()
+                .filter_map(|row| row.chars().find(|c| *c == '█' || *c == '║'))
+                .collect()
+        };
+
+        let at_top = bar_rows(&mut app);
+        assert_eq!(at_top.first(), Some(&'█'), "not at the top: {at_top:?}");
+        assert_eq!(
+            at_top.last(),
+            Some(&'║'),
+            "the thumb should not fill the track: {at_top:?}"
+        );
+
+        app.overlay = Overlay::Help { scroll: end };
+        let at_end = bar_rows(&mut app);
+        assert_eq!(
+            at_end.last(),
+            Some(&'█'),
+            "the last row is on screen, so the thumb belongs at the bottom: {at_end:?}"
+        );
+        assert_eq!(at_end.first(), Some(&'║'), "{at_end:?}");
+    }
+
+    #[test]
+    fn the_reference_stops_at_its_last_row_however_it_is_scrolled() {
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.overlay = Overlay::Help { scroll: 0 };
+        render(&mut app, 100, 20);
+        let end = app.help_max_scroll();
+
+        // Far past the end, by wheel and by key.
+        for _ in 0..40 {
+            app.on_mouse(wheel(MouseEventKind::ScrollDown, 10, 10))
+                .expect("wheel");
+        }
+        assert_eq!(app.overlay, Overlay::Help { scroll: end });
+
+        app.on_overlay_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .expect("end");
+        assert_eq!(app.overlay, Overlay::Help { scroll: end });
+
+        // And back up past the top.
+        for _ in 0..40 {
+            app.on_mouse(wheel(MouseEventKind::ScrollUp, 10, 10))
+                .expect("wheel");
+        }
+        assert_eq!(app.overlay, Overlay::Help { scroll: 0 });
+        let top = render(&mut app, 100, 20).join("\n");
+        assert!(top.contains("Marks"), "back at the top:\n{top}");
     }
 
     #[test]
