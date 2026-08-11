@@ -141,11 +141,11 @@ fn it_takes_the_terminal_over_and_gives_it_back() {
     session.wait_for("Queue");
     session.wait_for("quit");
 
-    // The key reference opens over it, then closes — worth proving here because
-    // it draws `Clear` against a real terminal's own background rather than a
+    // The reference opens over it, then closes — worth proving here because it
+    // draws `Clear` against a real terminal's own background rather than a
     // buffer that starts blank.
     session.press("?");
-    session.wait_for("Keys");
+    session.wait_for("Reference");
     session.wait_for("Navigate");
     session.press(" ");
 

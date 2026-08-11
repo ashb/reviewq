@@ -64,45 +64,47 @@ pub enum Handled {
     Done,
 }
 
-/// How far I have got with a PR: what I did, and whether it still covers the
-/// head that is there now.
+/// Where I stand with a PR, as the one column in front of a list row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mark {
-    /// Which of the two marks it is.
-    pub handled: Handled,
-    /// One of my marks names the PR's current head, so what I did still stands.
-    /// False once the PR has moved on, which is most of what reaches the queue
-    /// twice.
-    pub current: bool,
+pub enum Mark {
+    /// I sank it with `reviewq defer`: still listed, still wanting something,
+    /// but put below everything else until it changes.
+    Deferred,
+    /// I have been through it.
+    Handled {
+        /// A review of mine, or my own `done`.
+        what: Handled,
+        /// One of my marks names the PR's current head, so what I did still
+        /// stands. False once the PR has moved on, which is most of what reaches
+        /// the queue twice.
+        current: bool,
+    },
 }
 
-impl Mark {
-    /// The one column a list gives this. A glyph rather than a word because it
-    /// sits in front of every row, and the wording belongs in the pane that has
-    /// room for it.
-    pub fn glyph(self) -> &'static str {
-        match self.handled {
-            Handled::Reviewed => "✓",
-            Handled::Done => "·",
-        }
-    }
-}
-
-/// My standing on `pr`, or `None` if I have never touched it.
+/// Where I stand with `pr`, or `None` if I have never touched it and it is
+/// sitting where the queue put it.
 ///
-/// A review outranks a `done` when both are there: it is the stronger statement
-/// and the one other people can see. `current` still asks about both, though —
-/// a `done` at today's head means today's head is dealt with, whichever sha I
-/// happened to review.
-pub fn mark(pr: &PrSnapshot, my: &MyState) -> Option<Mark> {
-    let handled = match (&my.last_reviewed_sha, &my.done_sha) {
+/// A defer outranks the rest: it is the thing I most recently decided about the
+/// PR, and it is why the row is at the bottom. Between the other two a review
+/// wins — it is the stronger statement, and the one other people can see —
+/// though `current` asks about both, since a `done` at today's head means
+/// today's head is dealt with whichever sha I reviewed.
+///
+/// `deferred` comes from the queue row rather than from `my`, because a defer
+/// only stands while nothing has happened since; the ledger is what works that
+/// out.
+pub fn mark(pr: &PrSnapshot, my: &MyState, deferred: bool) -> Option<Mark> {
+    if deferred {
+        return Some(Mark::Deferred);
+    }
+    let what = match (&my.last_reviewed_sha, &my.done_sha) {
         (Some(_), _) => Handled::Reviewed,
         (None, Some(_)) => Handled::Done,
         (None, None) => return None,
     };
     let at_head = |sha: &Option<String>| sha.as_deref() == Some(pr.head_sha.as_str());
-    Some(Mark {
-        handled,
+    Some(Mark::Handled {
+        what,
         current: at_head(&my.last_reviewed_sha) || at_head(&my.done_sha),
     })
 }
@@ -253,7 +255,7 @@ mod tests {
     #[test]
     fn a_pr_never_acted_on_has_no_history() {
         assert!(done_note(&pr(), &MyState::default()).is_none());
-        assert_eq!(mark(&pr(), &MyState::default()), None);
+        assert_eq!(mark(&pr(), &MyState::default(), false), None);
     }
 
     #[test]
@@ -266,9 +268,9 @@ mod tests {
             ..MyState::default()
         };
         assert_eq!(
-            mark(&pr(), &reviewed),
-            Some(Mark {
-                handled: Handled::Reviewed,
+            mark(&pr(), &reviewed, false),
+            Some(Mark::Handled {
+                what: Handled::Reviewed,
                 current: true
             })
         );
@@ -278,9 +280,9 @@ mod tests {
             ..MyState::default()
         };
         assert_eq!(
-            mark(&pr(), &done_only),
-            Some(Mark {
-                handled: Handled::Done,
+            mark(&pr(), &done_only, false),
+            Some(Mark::Handled {
+                what: Handled::Done,
                 current: false
             })
         );
@@ -293,24 +295,25 @@ mod tests {
             ..MyState::default()
         };
         assert_eq!(
-            mark(&pr(), &both),
-            Some(Mark {
-                handled: Handled::Reviewed,
+            mark(&pr(), &both, false),
+            Some(Mark::Handled {
+                what: Handled::Reviewed,
                 current: true
             })
         );
     }
 
     #[test]
-    fn the_two_marks_do_not_share_a_glyph() {
-        let glyph = |handled| {
-            Mark {
-                handled,
-                current: true,
-            }
-            .glyph()
+    fn a_deferred_pr_says_that_before_anything_else() {
+        // It is the most recent thing I decided about the PR, and the reason the
+        // row is at the bottom of the queue — which is what a reader is asking
+        // about when they look at it there.
+        let reviewed = MyState {
+            last_reviewed_sha: Some("head0000".into()),
+            ..MyState::default()
         };
-        assert_ne!(glyph(Handled::Reviewed), glyph(Handled::Done));
+        assert_eq!(mark(&pr(), &reviewed, true), Some(Mark::Deferred));
+        assert_eq!(mark(&pr(), &MyState::default(), true), Some(Mark::Deferred));
     }
 
     #[test]

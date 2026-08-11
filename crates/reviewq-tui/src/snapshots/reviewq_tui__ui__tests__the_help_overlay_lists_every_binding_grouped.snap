@@ -4,26 +4,32 @@ expression: screen
 ---
 reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
-│ ▸   #70135  @kaxil mentioned you  Add def ││ Add deferrable mode to S3KeySensor                  │
-│     #70201  match╭ Keys ─────────────────────────────────────────────────────╮area:async         │
-│                  │ Navigate                                                  │main               │
+│ ▸   #70135  @kaxi╭ Reference ────────────────────────────────────────────────╮r                  │
+│     #70201  match│ Marks                                                     │area:async         │
+│                  │   ✓           you reviewed it on the forge                │main               │
+│                  │   ✓           …and the PR has moved on since              │                   │
+│                  │   ·           you marked it done here                     │                   │
+│                  │   ·           …and the PR has moved on since              │                   │
+│                  │   󰒲           you deferred it to the bottom               │                   │
+│                  │                                                           │                   │
+│                  │ Navigate                                                  │                   │
 │                  │   ↑↓ / jk     move                                        │                   │
 │                  │   PgDn / ^D   page down                                   │                   │
 │                  │   PgUp / ^U   page up                                     │                   │
 │                  │   g / Home    first                                       │                   │
-│                  │   G / End     last                                        │                   │
+│                  │   G / End     last                                        │nsor.              │
 │                  │   :           go to a PR by number                        │                   │
 │                  │                                                           │                   │
 │                  │ View                                                      │                   │
 │                  │   Tab         switch pane                                 │                   │
 │                  │   t           adapt for a light or dark terminal          │                   │
-│                  │                                                           │nsor.              │
+│                  │                                                           │rue)               │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
 │                  │   d           done — handled at this head                 │                   │
 │                  │   z           snooze for a while                          │                   │
 │                  │   o           open it in your browser                     │                   │
-│                  │   c / y       copy its URL                                │rue)               │
+│                  │   c / y       copy its URL                                │                   │
 │                  │   m           mute, or unmute                             │                   │
 │                  │   f           defer to the bottom, or restore             │                   │
 │                  │                                                           │                   │
@@ -34,17 +40,11 @@ reviewq  2 on the queue
 │                  │   ? / h       keys                                        │                   │
 │                  │   q / Esc     quit                                        │                   │
 │                  │                                                           │                   │
-│                  │ Marks                                                     │                   │
-│                  │   ✓           you reviewed it on the forge                │                   │
-│                  │   ·           you marked it done here                     │                   │
-│                  │   dim         at an earlier head — the PR has moved since │                   │
-│                  │                                                           │                   │
 │                  │ Mouse                                                     │                   │
 │                  │   click       select the row, or focus the pane           │                   │
 │                  │   wheel       scroll what is under the pointer            │                   │
 │                  │                                                           │                   │
 │                  │   ↑↓ scroll   any other key close                         │                   │
 │                  ╰───────────────────────────────────────────────────────────╯                   │
-│                                           ││                                                     │
 ╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 jk move   ⏎ review   d done   z snooze   ? / h keys   q / Esc quit

@@ -9,7 +9,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
-use reviewq_app::present;
+use reviewq_app::config::Marks;
+use reviewq_app::present::{self, Handled, Mark};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
 use reviewq_ledger::{Located, QueueItem, RepoKey};
 
@@ -31,10 +32,40 @@ const MOUSE_GESTURES: &[(&str, &str)] = &[
 ///
 /// A glyph nobody can look up is a decoration, and these two are worth telling
 /// apart: one is a review everybody can see, the other is a note to yourself.
-const MARKS: &[(&str, &str)] = &[
-    ("✓", "you reviewed it on the forge"),
-    ("·", "you marked it done here"),
-    ("dim", "at an earlier head — the PR has moved since"),
+///
+/// Held as marks rather than as text so the reference *shows* the difference —
+/// each row is drawn by the same code the queue draws, so a stale mark reads as
+/// stale here too, and neither can drift from the other.
+const MARKS: &[(Mark, &str)] = &[
+    (
+        Mark::Handled {
+            what: Handled::Reviewed,
+            current: true,
+        },
+        "you reviewed it on the forge",
+    ),
+    (
+        Mark::Handled {
+            what: Handled::Reviewed,
+            current: false,
+        },
+        "…and the PR has moved on since",
+    ),
+    (
+        Mark::Handled {
+            what: Handled::Done,
+            current: true,
+        },
+        "you marked it done here",
+    ),
+    (
+        Mark::Handled {
+            what: Handled::Done,
+            current: false,
+        },
+        "…and the PR has moved on since",
+    ),
+    (Mark::Deferred, "you deferred it to the bottom"),
 ];
 
 /// Draw the whole screen: header, the queue beside the detail, footer.
@@ -159,13 +190,27 @@ fn queue_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
         .enumerate()
         .skip(first)
         .take(height)
-        .map(|(index, item)| queue_row(item, index == app.selected, app.repo_count > 1, t))
+        .map(|(index, item)| {
+            queue_row(
+                item,
+                index == app.selected,
+                app.repo_count > 1,
+                app.marks(),
+                t,
+            )
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
     inner
 }
 
-fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) -> Line<'static> {
+fn queue_row(
+    item: &Located<QueueItem>,
+    selected: bool,
+    multi: bool,
+    marks: &Marks,
+    t: &Theme,
+) -> Line<'static> {
     let q = &item.item;
     let marker = if selected { "▸ " } else { "  " };
     let mut style = Style::default().fg(color(t.text));
@@ -184,7 +229,8 @@ fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) 
 
     let mut spans = vec![
         Span::styled(marker, Style::default().fg(color(t.focus))),
-        handled_mark(&q.pr, &q.my_state, t),
+        row_mark(present::mark(&q.pr, &q.my_state, q.deferred), marks, t),
+        Span::raw(" "),
         Span::styled(
             number_label(multi, &item.repo, q.pr.number),
             Style::default().fg(color(t.dim)),
@@ -207,21 +253,29 @@ fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) 
     Line::from(spans)
 }
 
-/// The one column in front of a queue row saying what I have already done to the
-/// PR: a review of mine, or my own `done` — dimmed once the PR has moved past the
-/// head that mark names, since what I did no longer covers what is there.
+/// The one column in front of a queue row saying where I stand with the PR — see
+/// [`Mark`], and [`MARKS`] for the legend the reference draws from the same
+/// pieces.
 ///
-/// Always two cells wide, marked or not, so the numbers below it still line up.
-/// [`MARKS`] is the legend, and the wording of both lives in `present` because
-/// this is a fact about the PR rather than about this frontend.
-fn handled_mark(pr: &PrSnapshot, my: &MyState, t: &Theme) -> Span<'static> {
-    match present::mark(pr, my) {
-        None => Span::raw("  "),
-        Some(mark) => Span::styled(
-            format!("{} ", mark.glyph()),
-            Style::default().fg(color(if mark.current { t.good } else { t.dim })),
-        ),
+/// Occupies its column marked or not, so the numbers beside it still line up.
+fn row_mark(mark: Option<Mark>, marks: &Marks, t: &Theme) -> Span<'static> {
+    match mark {
+        None => Span::raw(" "),
+        Some(mark) => Span::styled(marks.glyph(mark).to_string(), mark_style(mark, t)),
     }
+}
+
+/// What a mark's colour says: dim once what I did no longer covers the head that
+/// is there, quiet for a PR I have set aside, and the live colour otherwise.
+///
+/// One function for the queue and the reference both, so the legend cannot come
+/// to show a colour the rows don't use.
+fn mark_style(mark: Mark, t: &Theme) -> Style {
+    Style::default().fg(color(match mark {
+        Mark::Deferred => t.quiet,
+        Mark::Handled { current: true, .. } => t.good,
+        Mark::Handled { current: false, .. } => t.dim,
+    }))
 }
 
 /// My review of this PR, in the words `show` uses for the same line — and, when
@@ -598,7 +652,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.overlay.clone() {
         Overlay::None => {}
         Overlay::Help { scroll } => {
-            let max = help_overlay(frame, area, scroll, t);
+            let max = help_overlay(frame, area, scroll, app.marks(), t);
             app.set_help_max_scroll(max);
         }
         Overlay::Launching { number } => modal(
@@ -814,7 +868,8 @@ fn modal(frame: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The key reference, centred over the panes, scrolled to `scroll`.
+/// The reference — marks, keys, mouse — centred over the panes, scrolled to
+/// `scroll`.
 ///
 /// Returns how far it can still scroll, so the caller can hold the offset there.
 ///
@@ -822,7 +877,7 @@ fn modal(frame: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>
 /// leave a wide empty box on a big terminal. [`Clear`] blanks the cells beneath
 /// instead of painting a background colour, which keeps the overlay from having
 /// to guess the terminal's own — the same reason nothing else here fills.
-fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, t: &Theme) -> u16 {
+fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, marks: &Marks, t: &Theme) -> u16 {
     let heading = |text: &str| {
         Line::from(Span::styled(
             text.to_string(),
@@ -838,23 +893,31 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, t: &Theme) -> u16 
         ])
     };
 
-    let mut rows: Vec<Line> = Vec::new();
+    // The marks first: they are the part of the interface that is on screen with
+    // no words of its own, so somebody opening this is likelier to be asking
+    // what a glyph means than which key they already pressed to get here. Each
+    // is drawn by the row code, in the row colour — the difference between a
+    // mark that stands and one the PR has outrun is a shade, and a legend that
+    // spelled that out in prose would be describing what it could simply show.
+    let mut rows: Vec<Line> = vec![heading("Marks")];
+    for (mark, what) in MARKS {
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<12}", marks.glyph(*mark)),
+                mark_style(*mark, t),
+            ),
+            Span::styled((*what).to_string(), Style::default().fg(color(t.text))),
+        ]));
+    }
+
     let mut group = "";
     for binding in keys::described() {
         if binding.group != group {
-            if !rows.is_empty() {
-                rows.push(Line::from(""));
-            }
+            rows.push(Line::from(""));
             rows.push(heading(binding.group));
             group = binding.group;
         }
         rows.push(entry(binding.keys, binding.what));
-    }
-
-    rows.push(Line::from(""));
-    rows.push(heading("Marks"));
-    for (glyph, what) in MARKS {
-        rows.push(entry(glyph, what));
     }
 
     rows.push(Line::from(""));
@@ -883,7 +946,13 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, t: &Theme) -> u16 
         .border_style(Style::default().fg(color(t.focus)))
         .style(Style::default().bg(color(t.bg)))
         .padding(Padding::horizontal(1))
-        .title(Span::styled(" Keys ", Style::default().fg(color(t.focus))));
+        // Not "Keys": it explains the marks and the mouse too, and a panel whose
+        // title names one of its three sections invites the question of why the
+        // other two are in there.
+        .title(Span::styled(
+            " Reference ",
+            Style::default().fg(color(t.focus)),
+        ));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -1383,6 +1452,47 @@ sensor = S3KeySensor(deferrable=True)
     }
 
     #[test]
+    fn the_reference_shows_a_stale_mark_rather_than_describing_one() {
+        // The difference between a mark that stands and one the PR has outrun is
+        // a shade, so the legend has to be drawn in those shades — a row reading
+        // "dim: an earlier head" would be prose about a colour nobody can see.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.overlay = Overlay::Help { scroll: 0 };
+        let mut terminal = Terminal::new(TestBackend::new(100, 46)).expect("terminal");
+        terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+
+        let colours: std::collections::BTreeSet<String> = (0..46)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].symbol() == "✓")
+            .map(|(x, y)| format!("{:?}", buffer[(x, y)].fg))
+            .collect();
+
+        assert_eq!(
+            colours.len(),
+            2,
+            "the same glyph should appear in both shades: {colours:?}"
+        );
+    }
+
+    #[test]
+    fn a_deferred_row_says_so_where_the_other_marks_go() {
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        reviewq_app::actions::set_deferred(&ledger, repo_id, 70135, true).expect("defer");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let rows = queue_rows(&render(&mut app, 100, 24));
+        let row = rows
+            .iter()
+            .find(|line| line.contains("#70135"))
+            .expect("the deferred row");
+
+        let glyph = Marks::default().deferred.clone();
+        assert!(row.contains(&format!("{glyph} #70135")), "{row}");
+    }
+
+    #[test]
     fn a_pr_you_have_never_touched_carries_no_mark() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
 
@@ -1583,6 +1693,11 @@ sensor = S3KeySensor(deferrable=True)
         for what in MARKS.iter().map(|(_, what)| *what) {
             assert!(screen.contains(what), "missing mark {what}:\n{screen}");
         }
+        let marks = screen.find("Marks").expect("a marks section");
+        assert!(
+            marks < screen.find("Navigate").expect("the first key group"),
+            "the marks are what has no words of its own on screen, so they lead:\n{screen}"
+        );
         assert!(screen.contains("close"), "{screen}");
 
         insta::assert_snapshot!(screen);

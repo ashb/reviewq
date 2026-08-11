@@ -120,6 +120,15 @@ underline_links = true
 # every colour wrong, so this is configured.
 theme = "dark"
 
+# The glyphs a queue row is marked with, saying where you stand with the PR.
+# `deferred` defaults to a Nerd Font codepoint (U+F04B2), which a terminal
+# without a patched font draws as a box — override it with anything yours can
+# draw. Shown dimmed when what you did no longer covers the PR's current head.
+#   [output.marks]
+#   reviewed = "✓"   # you submitted a review on the forge
+#   done     = "·"   # you marked it done here
+#   deferred = "z"   # you deferred it to the bottom
+
 # Per-host forge settings, keyed by host. Public github.com is built in, so this
 # whole section is optional. A user entry overlays the built-in field by field.
 #

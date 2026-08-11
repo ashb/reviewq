@@ -587,6 +587,11 @@ impl App {
         self.page
     }
 
+    /// The glyphs to mark queue rows with, as configured.
+    pub(crate) fn marks(&self) -> &reviewq_app::config::Marks {
+        &self.config.output.marks
+    }
+
     /// Record how far the key reference can usefully scroll, and hold it there.
     /// Called by the renderer, which knows both how many rows it has and how
     /// many fit.

@@ -260,6 +260,55 @@ pub struct Output {
     /// it may ignore, and guessing wrong makes the whole palette wrong. `"dark"`
     /// or `"light"`.
     pub theme: ThemeMode,
+    /// The glyphs a queue row is marked with. `[output.marks]` in TOML.
+    pub marks: Marks,
+}
+
+/// The one-glyph marks a list puts in front of a PR, saying where you stand with
+/// it — see [`Mark`](crate::present::Mark).
+///
+/// Configurable because a glyph is only as good as the font drawing it: the
+/// default for `deferred` is a Nerd Font codepoint, which a terminal without a
+/// patched font renders as a box. Anything a terminal can draw in one cell will
+/// do, and nothing here is load-bearing — the mark is a hint, not a control.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Marks {
+    /// You submitted a review of it on the forge.
+    pub reviewed: String,
+    /// You marked it done here.
+    pub done: String,
+    /// You deferred it to the bottom of the queue.
+    pub deferred: String,
+}
+
+impl Default for Marks {
+    fn default() -> Self {
+        Self {
+            reviewed: "✓".into(),
+            done: "·".into(),
+            // U+F04B2, Nerd Fonts' `md-sleep`.
+            deferred: "\u{f04b2}".into(),
+        }
+    }
+}
+
+impl Marks {
+    /// The glyph for a mark.
+    pub fn glyph(&self, mark: crate::present::Mark) -> &str {
+        use crate::present::{Handled, Mark};
+        match mark {
+            Mark::Deferred => &self.deferred,
+            Mark::Handled {
+                what: Handled::Reviewed,
+                ..
+            } => &self.reviewed,
+            Mark::Handled {
+                what: Handled::Done,
+                ..
+            } => &self.done,
+        }
+    }
 }
 
 /// The background the palette is adapted for.
@@ -310,6 +359,7 @@ impl Default for Output {
         Self {
             underline_links: true,
             theme: ThemeMode::default(),
+            marks: Marks::default(),
         }
     }
 }
@@ -610,6 +660,29 @@ mod tests {
         ))
         .expect("parses");
         assert_eq!(light.output.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn the_row_marks_can_be_replaced_one_at_a_time() {
+        // A glyph is only as good as the font drawing it, and the default for a
+        // deferred PR is a Nerd Font codepoint — so each is overridable, and the
+        // ones left alone keep their default rather than emptying out.
+        let config: Config = toml::from_str(&minimal(
+            r#"
+            [output.marks]
+            deferred = "z"
+            "#,
+        ))
+        .expect("parses");
+
+        let marks = &config.output.marks;
+        assert_eq!(marks.deferred, "z");
+        assert_eq!(marks.reviewed, Marks::default().reviewed);
+        assert_eq!(
+            marks.glyph(crate::present::Mark::Deferred),
+            "z",
+            "and the override is what a row would draw"
+        );
     }
 
     #[test]
