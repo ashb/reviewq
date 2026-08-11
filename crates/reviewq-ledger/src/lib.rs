@@ -321,18 +321,6 @@ impl TrackedReason {
         }
     }
 
-    /// Whether this reason keeps the PR reviewable past its merge. Only a rule
-    /// can ask for that; being involved in a PR that then merged does not.
-    fn after_merge(&self) -> bool {
-        matches!(
-            self,
-            Self::Interest {
-                after_merge: true,
-                ..
-            }
-        )
-    }
-
     /// The string stored in `tracked_reason` and shown to the user.
     pub fn render(&self) -> String {
         match self {
@@ -1355,9 +1343,6 @@ fn existing_row(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<u
 
 /// Why a PR is tracked as the row holds it: the rendered reason, and whether it
 /// survives the PR merging.
-///
-/// The two travel together because the second is a property of the first — only
-/// the reason that won gets to say whether it keeps the PR past its merge.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Tracking {
     reason: Option<String>,
@@ -1367,21 +1352,30 @@ struct Tracking {
 /// Merge stored tracking with an incoming reason by precedence: keep the
 /// stronger, refresh on a tie, never downgrade. `None` incoming leaves the
 /// stored value.
+///
+/// The post-merge flag does not follow the winning reason: it is the rules'
+/// answer, so it changes when a rule match arrives and at no other time, whether
+/// or not that match also wins the reason. Only the sweep evaluates rules — an
+/// involvement search knows nothing of them, and letting it overwrite the flag
+/// on the way past would drop a PR a post-merge rule matched at merge, purely
+/// because somebody had also asked you to review it.
 fn merge_tracking(stored: Tracking, incoming: Option<&TrackedReason>) -> Tracking {
-    let adopt = |new: &TrackedReason| Tracking {
-        reason: Some(new.render()),
-        after_merge: new.after_merge(),
+    let after_merge = match incoming {
+        Some(TrackedReason::Interest { after_merge, .. }) => *after_merge,
+        Some(TrackedReason::Involved(_)) | None => stored.after_merge,
     };
-    match (stored.reason.as_deref(), incoming) {
-        (_, None) => stored,
-        (None, Some(new)) => adopt(new),
-        (Some(old), Some(new)) => {
-            if new.rank() >= stored_rank(old) {
-                adopt(new)
-            } else {
-                stored
-            }
-        }
+    let reason = match (stored.reason, incoming) {
+        (stored, None) => stored,
+        (None, Some(new)) => Some(new.render()),
+        (Some(old), Some(new)) => Some(if new.rank() >= stored_rank(&old) {
+            new.render()
+        } else {
+            old
+        }),
+    };
+    Tracking {
+        reason,
+        after_merge,
     }
 }
 
@@ -2175,10 +2169,7 @@ mod tests {
     }
 
     #[test]
-    fn the_after_merge_flag_follows_the_reason_that_won() {
-        // It is the rule's property, so it can only arrive and leave with the
-        // reason that carried it — an involvement upsert overwriting an
-        // interest match takes the flag down with it.
+    fn only_a_rule_match_has_anything_to_say_about_post_merge_review() {
         let keeps = TrackedReason::Interest {
             rule: "path task-sdk/**".into(),
             after_merge: true,
@@ -2186,12 +2177,25 @@ mod tests {
         let kept = merge_tracking(Tracking::default(), Some(&keeps));
         assert!(kept.after_merge);
 
-        let involved = TrackedReason::Involved("mention".into());
-        assert!(!merge_tracking(kept.clone(), Some(&involved)).after_merge);
+        // An involvement search evaluates no rules, so being asked to review a PR
+        // must not be what decides it stops mattering once it merges — even
+        // though the reason it displays becomes the stronger one.
+        let involved = TrackedReason::Involved("review_requested".into());
+        let both = merge_tracking(kept.clone(), Some(&involved));
+        assert_eq!(both.reason.as_deref(), Some("involved: review_requested"));
+        assert!(both.after_merge);
+
         assert!(
             merge_tracking(kept, None).after_merge,
-            "a sweep that says nothing leaves the stored answer alone"
+            "and a sweep that says nothing leaves the stored answer alone"
         );
+
+        // A rule that no longer asks for it is the one thing that takes it back.
+        let lets_go = TrackedReason::Interest {
+            rule: "path task-sdk/**".into(),
+            after_merge: false,
+        };
+        assert!(!merge_tracking(both, Some(&lets_go)).after_merge);
     }
 
     fn ts(s: &str) -> Timestamp {

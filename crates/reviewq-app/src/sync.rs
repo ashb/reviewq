@@ -1250,6 +1250,36 @@ mod engine_tests {
     }
 
     #[tokio::test]
+    async fn being_asked_to_review_a_pr_does_not_cost_it_its_post_merge_rule() {
+        // The involvement search runs after the sweep and outranks it, so its
+        // reason is the one displayed. It evaluates no rules, though, so it must
+        // not be what decides the PR stops mattering once it merged.
+        let cfg: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            after_merge = true
+            [involvement]
+            reasons = ["review_requested"]
+            "#,
+        )
+        .expect("config parses");
+        let mut merged = pr(4, "2026-08-09T09:00:00Z");
+        merged.state = PrState::Merged;
+        let forge = FakeForge::new(vec![Page::of(vec![merged])]).with_review_request(4, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        let queue = ledger.queue(repo_id).expect("queue");
+        assert_eq!(queue.len(), 1, "the rule still keeps it");
+        assert_eq!(queue[0].tracked_reason, "involved: review_requested");
+    }
+
+    #[tokio::test]
     async fn a_merged_pr_loses_the_attention_it_was_holding() {
         let cfg = config("");
         let mut merged = pr(4, "2026-08-09T09:00:00Z");
