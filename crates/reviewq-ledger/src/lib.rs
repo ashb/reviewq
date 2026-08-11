@@ -342,6 +342,34 @@ impl TrackedReason {
     }
 }
 
+/// One repo's stored PR rows, counted by category.
+///
+/// A sweep stores every PR it sees, so the ledger grows with the repo's activity
+/// rather than with the queue — most rows are untracked residue nothing will ever
+/// ask for again. Nothing deletes any of it yet, and this exists to show the
+/// shape of the growth before anything does: a row can be re-fetched from the
+/// forge, so the only irreplaceable ones are those carrying something *I* set,
+/// which is why [`mine`](Self::mine) is counted apart from the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Every stored row, tracked or not.
+    pub total: u64,
+    /// Rows a rule matched or an involvement search named.
+    pub tracked: u64,
+    /// Rows whose PR is still open.
+    pub open: u64,
+    /// Rows whose PR merged.
+    pub merged: u64,
+    /// Rows whose PR was closed unmerged.
+    pub closed: u64,
+    /// Rows carrying something I set — done, snooze, mute or defer. The forge
+    /// cannot give these back.
+    pub mine: u64,
+    /// How many of [`mine`](Self::mine) are on an untracked row, which is where
+    /// "delete the untracked residue" would destroy something.
+    pub mine_untracked: u64,
+}
+
 /// A tracked PR as read back from the ledger.
 #[derive(Debug, Clone)]
 pub struct TrackedPr {
@@ -600,6 +628,46 @@ impl Ledger {
             |row| row.get::<_, i64>(0),
         )?;
         Ok((tracked as u64, total as u64))
+    }
+
+    /// One repo's stored PR rows, counted the ways that say what the ledger is
+    /// accumulating. See [`Census`].
+    pub fn census(&self, repo_id: i64) -> Result<Census> {
+        // The join carries the predicate rather than a `WHERE`, so a PR with a
+        // `my_state` row that says nothing (every field back at its default)
+        // counts as having none — which is what "something I set" means.
+        self.conn
+            .query_row(
+                r"
+                SELECT COUNT(*),
+                       COALESCE(SUM(p.tracked_reason IS NOT NULL), 0),
+                       COALESCE(SUM(p.state = 'OPEN'), 0),
+                       COALESCE(SUM(p.state = 'MERGED'), 0),
+                       COALESCE(SUM(p.state = 'CLOSED'), 0),
+                       COALESCE(SUM(m.number IS NOT NULL), 0),
+                       COALESCE(SUM(m.number IS NOT NULL AND p.tracked_reason IS NULL), 0)
+                FROM prs p
+                LEFT JOIN my_state m
+                  ON m.repo_id = p.repo_id AND m.number = p.number
+                 AND (m.done_at IS NOT NULL OR m.snoozed_until IS NOT NULL
+                      OR m.muted = 1 OR m.deferred_at IS NOT NULL)
+                WHERE p.repo_id = ?1
+                ",
+                params![repo_id],
+                |row| {
+                    let count = |index: usize| row.get::<_, i64>(index).map(|n| n as u64);
+                    Ok(Census {
+                        total: count(0)?,
+                        tracked: count(1)?,
+                        open: count(2)?,
+                        merged: count(3)?,
+                        closed: count(4)?,
+                        mine: count(5)?,
+                        mine_untracked: count(6)?,
+                    })
+                },
+            )
+            .doing("counting stored PRs")
     }
 
     /// Count of stored PRs whose file list GitHub truncated and that matched no
@@ -2026,6 +2094,45 @@ mod tests {
             ledger.get_meta(repo_id, "cursor").unwrap().as_deref(),
             Some("2026-08-05T13:00:00Z")
         );
+    }
+
+    #[test]
+    fn the_census_counts_rows_by_what_would_be_lost_with_them() {
+        let (ledger, repo_id) = ledger_with_repo();
+        // Tracked and open.
+        track(&ledger, repo_id, &pr(1));
+        // Untracked residue, of the kind a sweep leaves by the thousand.
+        let mut merged = pr(2);
+        merged.state = PrState::Merged;
+        ledger.upsert_pr(repo_id, &merged, None, now()).unwrap();
+        let mut closed = pr(3);
+        closed.state = PrState::Closed;
+        ledger.upsert_pr(repo_id, &closed, None, now()).unwrap();
+        // Untracked, but muted by hand — the row that cannot be re-fetched.
+        ledger.set_muted(repo_id, 3, true).unwrap();
+        // A `my_state` row that says nothing does not count as mine.
+        ledger.set_deferred_at(repo_id, 2, None).unwrap();
+
+        let census = ledger.census(repo_id).unwrap();
+
+        assert_eq!(
+            census,
+            Census {
+                total: 3,
+                tracked: 1,
+                open: 1,
+                merged: 1,
+                closed: 1,
+                mine: 1,
+                mine_untracked: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_repo_has_an_empty_census() {
+        let (ledger, repo_id) = ledger_with_repo();
+        assert_eq!(ledger.census(repo_id).unwrap(), Census::default());
     }
 
     #[test]

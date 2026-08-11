@@ -48,6 +48,12 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
             "  last sync",
             &last_sync_note(ledger.as_ref(), &repo.key(), &mut problems),
         );
+        for (index, line) in stored_notes(ledger.as_ref(), &repo.key(), &mut problems)
+            .iter()
+            .enumerate()
+        {
+            row(if index == 0 { "  stored" } else { "" }, line);
+        }
 
         let host = match loaded.config.forge_host_for(&repo.host) {
             Ok(host) => {
@@ -194,6 +200,63 @@ fn last_sync_note(
     }
 }
 
+/// What this repo has accumulated in the ledger, in the categories that decide
+/// what could ever be thrown away.
+///
+/// A sweep stores every PR it sees and tracks the few a rule matched, so the
+/// untracked rows outnumber the rest by an order of magnitude and grow with the
+/// repo rather than with the queue. Nothing deletes any of them, and this is here
+/// to show the shape of that before anything does — a stored row can be fetched
+/// again, so the count that matters is the one carrying something you set, which
+/// no forge can give back.
+///
+/// Never a problem in itself: a big ledger is not a fault, and reporting one as
+/// though it were would make a clean bill of health impossible to reach.
+fn stored_notes(
+    ledger: Option<&Ledger>,
+    repo: &reviewq_ledger::RepoKey,
+    problems: &mut u32,
+) -> Vec<String> {
+    let census = |ledger: &Ledger| -> Result<Option<reviewq_ledger::Census>> {
+        let Some((repo_id, _)) = ledger.repos()?.into_iter().find(|(_, key)| key == repo) else {
+            return Ok(None);
+        };
+        Ok(Some(ledger.census(repo_id)?))
+    };
+    let census = match ledger.map(census).transpose() {
+        Ok(census) => census.flatten(),
+        Err(err) => {
+            *problems += 1;
+            return vec![warn(&format!("unreadable: {err:#}"))];
+        }
+    };
+    let Some(census) = census.filter(|census| census.total > 0) else {
+        return vec!["nothing yet".to_string()];
+    };
+
+    let mut lines = vec![
+        format!(
+            "{} PRs: {} tracked, {} untracked",
+            census.total,
+            census.tracked,
+            census.total - census.tracked
+        ),
+        format!(
+            "{} open, {} merged, {} closed",
+            census.open, census.merged, census.closed
+        ),
+    ];
+    // The irreplaceable rows, and how many of them sit on a row that a
+    // "drop the untracked" policy would take with it.
+    if census.mine > 0 {
+        lines.push(format!(
+            "{} carry your own done/snooze/mute/defer ({} of them untracked)",
+            census.mine, census.mine_untracked
+        ));
+    }
+    lines
+}
+
 /// The review command, and whether it can actually name a PR.
 ///
 /// A `{number}` with no `{url}` only works run from inside a checkout of the
@@ -336,6 +399,82 @@ mod tests {
             ledger.repos().expect("repos").is_empty(),
             "doctor wrote a repo row while reporting on it"
         );
+    }
+
+    #[test]
+    fn a_repo_with_nothing_stored_says_so_without_counting_against_it() {
+        let ledger = ledger_with(&key(), None, false);
+        let mut problems = 0;
+
+        assert_eq!(
+            stored_notes(Some(&ledger), &key(), &mut problems),
+            ["nothing yet"]
+        );
+        assert_eq!(problems, 0);
+    }
+
+    #[test]
+    fn the_stored_rows_are_reported_by_category() {
+        // The shape worth seeing: a sweep leaves far more untracked rows than
+        // tracked ones, and only the ones carrying your own state are
+        // irreplaceable.
+        let ledger = ledger_with(&key(), None, false);
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let pr = |number: u64, state| reviewq_core::model::PrSnapshot {
+            number,
+            title: "a PR".into(),
+            author: "potiuk".into(),
+            author_association: "MEMBER".into(),
+            head_sha: "abc1234".into(),
+            base_ref: "main".into(),
+            is_draft: false,
+            state,
+            updated_at: "2026-08-11T09:00:00Z".parse().expect("timestamp"),
+            labels: vec![],
+            milestone: None,
+            files: None,
+            files_truncated: false,
+        };
+        let now = "2026-08-11T12:00:00Z".parse().expect("timestamp");
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(1, reviewq_core::model::PrState::Open),
+                Some(reviewq_ledger::TrackedReason::Involved("mention".into())),
+                now,
+            )
+            .expect("tracked");
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(2, reviewq_core::model::PrState::Merged),
+                None,
+                now,
+            )
+            .expect("residue");
+        ledger.set_muted(repo_id, 2, true).expect("muted by hand");
+        let mut problems = 0;
+
+        let notes = stored_notes(Some(&ledger), &key(), &mut problems);
+
+        assert_eq!(notes[0], "2 PRs: 1 tracked, 1 untracked");
+        assert_eq!(notes[1], "1 open, 1 merged, 0 closed");
+        assert!(notes[2].contains("1 carry your own"), "{:?}", notes[2]);
+        assert!(notes[2].contains("1 of them untracked"), "{:?}", notes[2]);
+        assert_eq!(problems, 0, "a full ledger is not a fault");
+    }
+
+    #[test]
+    fn a_repo_the_ledger_has_never_seen_is_not_registered_by_counting_it() {
+        // Same care as `last_sync_note`: diagnosing must not write.
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let mut problems = 0;
+
+        assert_eq!(
+            stored_notes(Some(&ledger), &key(), &mut problems),
+            ["nothing yet"]
+        );
+        assert!(ledger.repos().expect("repos").is_empty());
     }
 
     #[test]
