@@ -302,8 +302,13 @@ pub struct Ledger {
 /// both and is never downgraded back to interest on a later sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackedReason {
-    /// Matched an interest rule; carries the bare match, e.g. `label area:x`.
-    Interest(String),
+    /// Matched an interest rule.
+    Interest {
+        /// The bare match, e.g. `label area:x`.
+        rule: String,
+        /// The matching rule asked to keep this PR reviewable after it merges.
+        after_merge: bool,
+    },
     /// A relationship names me; carries the reason, e.g. `review_requested`.
     Involved(String),
 }
@@ -311,15 +316,27 @@ pub enum TrackedReason {
 impl TrackedReason {
     fn rank(&self) -> u8 {
         match self {
-            Self::Interest(_) => 1,
+            Self::Interest { .. } => 1,
             Self::Involved(_) => 2,
         }
+    }
+
+    /// Whether this reason keeps the PR reviewable past its merge. Only a rule
+    /// can ask for that; being involved in a PR that then merged does not.
+    fn after_merge(&self) -> bool {
+        matches!(
+            self,
+            Self::Interest {
+                after_merge: true,
+                ..
+            }
+        )
     }
 
     /// The string stored in `tracked_reason` and shown to the user.
     pub fn render(&self) -> String {
         match self {
-            Self::Interest(m) => format!("interest: {m}"),
+            Self::Interest { rule, .. } => format!("interest: {rule}"),
             Self::Involved(r) => format!("involved: {r}"),
         }
     }
@@ -332,6 +349,8 @@ pub struct TrackedPr {
     pub pr: PrSnapshot,
     /// The rendered `tracked_reason`.
     pub tracked_reason: String,
+    /// Whether the rule that tracked it keeps it reviewable after it merges.
+    pub after_merge: bool,
 }
 
 /// One stored attention reason, as read back from the `attention` table.
@@ -382,6 +401,8 @@ pub struct PrShow {
     pub body: Option<String>,
     /// The rendered `tracked_reason`, if tracked.
     pub tracked_reason: Option<String>,
+    /// Whether the rule that tracked it keeps it reviewable after it merges.
+    pub after_merge: bool,
     /// My history on the PR.
     pub my_state: MyState,
     /// Its review threads.
@@ -554,7 +575,7 @@ impl Ledger {
             r"
             SELECT number, title, author, author_association, head_sha, is_draft,
                    state, updated_at, labels, milestone, files, files_truncated,
-                   base_ref, tracked_reason
+                   base_ref, tracked_reason, after_merge
             FROM prs
             WHERE repo_id = ?1 AND tracked_reason IS NOT NULL
             ORDER BY number
@@ -593,29 +614,27 @@ impl Ledger {
     }
 
     /// Tracked PRs whose detail needs a (re-)fetch: never fetched, or fetched
-    /// before the last time the PR changed. Open PRs always; merged PRs only
-    /// when `include_merged` (the per-project post-merge-review opt-in);
-    /// closed-unmerged PRs never. Returns the full snapshot and tracked reason
-    /// so the caller can classify without a second read.
+    /// before the last time the PR changed. Open PRs always; a merged PR when
+    /// `include_merged` (the per-project post-merge-review opt-in) or when the
+    /// rule that tracked it said `after_merge`; closed-unmerged PRs never.
+    /// Returns the full snapshot and tracked reason so the caller can classify
+    /// without a second read.
     pub fn prs_needing_detail(&self, repo_id: i64, include_merged: bool) -> Result<Vec<TrackedPr>> {
         // Timestamps are stored as fixed-precision RFC3339 (see `commit_detail`
         // and the sweep), so this lexicographic `<` is a correct chronological
         // comparison.
-        let states = if include_merged {
-            "('OPEN', 'MERGED')"
-        } else {
-            "('OPEN')"
-        };
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason FROM prs p
-            WHERE p.repo_id = ?1 AND p.tracked_reason IS NOT NULL AND p.state IN {states}
+            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge FROM prs p
+            WHERE p.repo_id = ?1 AND p.tracked_reason IS NOT NULL
+              AND (p.state = 'OPEN'
+                   OR (p.state = 'MERGED' AND (?2 OR p.after_merge = 1)))
               AND (p.detail_synced_at IS NULL OR p.detail_synced_at < p.updated_at)
             ORDER BY p.number
             ",
         ))?;
         let rows = stmt
-            .query_map(params![repo_id], row_to_tracked)?
+            .query_map(params![repo_id, include_merged], row_to_tracked)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -884,23 +903,20 @@ impl Ledger {
     }
 
     /// Drop attention rows that no longer belong to a queued PR: closed-unmerged
-    /// PRs always, and merged PRs unless `include_merged`. Detail is never
-    /// re-fetched for these states (see [`prs_needing_detail`](Self::prs_needing_detail)),
-    /// so without this their stale rows would linger and show up in `show`. Run
-    /// once at the end of a sync.
+    /// PRs always, and merged PRs except the ones post-merge review keeps —
+    /// `include_merged` for the whole project, or the tracking rule's own
+    /// `after_merge`. Detail is never re-fetched for the rest (see
+    /// [`prs_needing_detail`](Self::prs_needing_detail)), so without this their
+    /// stale rows would linger and show up in `show`. Run once at the end of a
+    /// sync.
     pub fn clear_archived_attention(&self, repo_id: i64, include_merged: bool) -> Result<()> {
-        let keep = if include_merged {
-            "('OPEN', 'MERGED')"
-        } else {
-            "('OPEN')"
-        };
         self.conn
             .execute(
-                &format!(
-                    "DELETE FROM attention WHERE repo_id = ?1 AND pr_number IN
-                     (SELECT number FROM prs WHERE repo_id = ?1 AND state NOT IN {keep})"
-                ),
-                params![repo_id],
+                "DELETE FROM attention WHERE repo_id = ?1 AND pr_number IN
+                 (SELECT number FROM prs WHERE repo_id = ?1
+                    AND state <> 'OPEN'
+                    AND NOT (state = 'MERGED' AND (?2 OR after_merge = 1)))",
+                params![repo_id, include_merged],
             )
             .doing("clearing archived attention")?;
         Ok(())
@@ -979,7 +995,7 @@ impl Ledger {
     pub fn waiting(&self, repo_id: i64) -> Result<Vec<TrackedPr>> {
         let mut stmt = self.conn.prepare(&format!(
             r"
-            SELECT {PR_COLUMNS}, p.tracked_reason
+            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge
             FROM prs p
             WHERE p.repo_id = ?1 AND p.state = 'OPEN' AND p.tracked_reason IS NOT NULL
               AND NOT EXISTS (
@@ -990,12 +1006,7 @@ impl Ledger {
             ",
         ))?;
         let rows = stmt
-            .query_map(params![repo_id], |row| {
-                Ok(TrackedPr {
-                    pr: snapshot_from_row(row, 0)?,
-                    tracked_reason: row.get(13)?,
-                })
-            })?
+            .query_map(params![repo_id], row_to_tracked)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -1059,7 +1070,7 @@ impl Ledger {
             .conn
             .query_row(
                 &format!(
-                    "SELECT {PR_COLUMNS}, p.tracked_reason, p.body FROM prs p \
+                    "SELECT {PR_COLUMNS}, p.tracked_reason, p.body, p.after_merge FROM prs p \
                      WHERE p.repo_id = ?1 AND p.number = ?2"
                 ),
                 params![repo_id, number as i64],
@@ -1068,12 +1079,13 @@ impl Ledger {
                         snapshot_from_row(row, 0)?,
                         row.get::<_, Option<String>>(13)?,
                         row.get::<_, Option<String>>(14)?,
+                        row.get::<_, i64>(15)? != 0,
                     ))
                 },
             )
             .optional()
             .doing(format!("reading PR #{number}"))?;
-        let Some((pr, tracked_reason, body)) = base else {
+        let Some((pr, tracked_reason, body, after_merge)) = base else {
             return Ok(None);
         };
 
@@ -1085,6 +1097,7 @@ impl Ledger {
             pr,
             body,
             tracked_reason,
+            after_merge,
             my_state,
             threads,
             reviewers,
@@ -1171,7 +1184,7 @@ fn upsert_row(
     reason: Option<&TrackedReason>,
     now: Timestamp,
 ) -> Result<bool> {
-    let merged = merge_reason(tracked_reason(conn, repo_id, pr.number)?.as_deref(), reason);
+    let merged = merge_tracking(stored_tracking(conn, repo_id, pr.number)?, reason);
     let is_new = existing_row(conn, repo_id, pr.number)?.is_none();
 
     let labels = serde_json::to_string(&pr.labels).encoding("a label list")?;
@@ -1187,8 +1200,8 @@ fn upsert_row(
         INSERT INTO prs (
           repo_id, number, title, author, author_association, head_sha, is_draft,
           state, updated_at, labels, milestone, files, files_truncated,
-          tracked_reason, first_seen_at, base_ref
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+          tracked_reason, first_seen_at, base_ref, after_merge
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
         ON CONFLICT(repo_id, number) DO UPDATE SET
           title=excluded.title,
           author=excluded.author,
@@ -1202,7 +1215,8 @@ fn upsert_row(
           files=excluded.files,
           files_truncated=excluded.files_truncated,
           tracked_reason=excluded.tracked_reason,
-          base_ref=excluded.base_ref
+          base_ref=excluded.base_ref,
+          after_merge=excluded.after_merge
         ",
         params![
             repo_id,
@@ -1218,9 +1232,10 @@ fn upsert_row(
             pr.milestone,
             files,
             pr.files_truncated as i64,
-            merged,
+            merged.reason,
             now.to_string(),
             pr.base_ref,
+            merged.after_merge as i64,
         ],
     )
     .doing(format!("upserting PR #{}", pr.number))?;
@@ -1238,14 +1253,25 @@ fn set_meta_row(conn: &Connection, repo_id: i64, key: &str, value: &str) -> Resu
 }
 
 fn tracked_reason(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<String>> {
+    Ok(stored_tracking(conn, repo_id, number)?.reason)
+}
+
+/// What the row already says about why this PR is tracked. All-default when
+/// there is no row yet.
+fn stored_tracking(conn: &Connection, repo_id: i64, number: u64) -> Result<Tracking> {
     conn.query_row(
-        "SELECT tracked_reason FROM prs WHERE repo_id = ?1 AND number = ?2",
+        "SELECT tracked_reason, after_merge FROM prs WHERE repo_id = ?1 AND number = ?2",
         params![repo_id, number as i64],
-        |row| row.get::<_, Option<String>>(0),
+        |row| {
+            Ok(Tracking {
+                reason: row.get(0)?,
+                after_merge: row.get::<_, i64>(1)? != 0,
+            })
+        },
     )
     .optional()
     .doing(format!("reading tracked_reason for #{number}"))
-    .map(Option::flatten)
+    .map(Option::unwrap_or_default)
 }
 
 fn existing_row(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<u64>> {
@@ -1259,17 +1285,33 @@ fn existing_row(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<u
     .map(|opt| opt.map(|n| n as u64))
 }
 
-/// Merge a stored reason with an incoming one by precedence: keep the stronger,
-/// refresh on a tie, never downgrade. `None` incoming leaves the stored value.
-fn merge_reason(existing: Option<&str>, incoming: Option<&TrackedReason>) -> Option<String> {
-    match (existing, incoming) {
-        (existing, None) => existing.map(str::to_string),
-        (None, Some(new)) => Some(new.render()),
+/// Why a PR is tracked as the row holds it: the rendered reason, and whether it
+/// survives the PR merging.
+///
+/// The two travel together because the second is a property of the first — only
+/// the reason that won gets to say whether it keeps the PR past its merge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Tracking {
+    reason: Option<String>,
+    after_merge: bool,
+}
+
+/// Merge stored tracking with an incoming reason by precedence: keep the
+/// stronger, refresh on a tie, never downgrade. `None` incoming leaves the
+/// stored value.
+fn merge_tracking(stored: Tracking, incoming: Option<&TrackedReason>) -> Tracking {
+    let adopt = |new: &TrackedReason| Tracking {
+        reason: Some(new.render()),
+        after_merge: new.after_merge(),
+    };
+    match (stored.reason.as_deref(), incoming) {
+        (_, None) => stored,
+        (None, Some(new)) => adopt(new),
         (Some(old), Some(new)) => {
             if new.rank() >= stored_rank(old) {
-                Some(new.render())
+                adopt(new)
             } else {
-                Some(old.to_string())
+                stored
             }
         }
     }
@@ -1344,6 +1386,7 @@ fn row_to_tracked(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedPr> {
     Ok(TrackedPr {
         pr: snapshot_from_row(row, 0)?,
         tracked_reason: row.get(13)?,
+        after_merge: row.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -1571,6 +1614,14 @@ mod tests {
         "2026-08-05T12:00:00Z".parse().unwrap()
     }
 
+    /// A rule match that lets the PR go once it merges — the ordinary case.
+    fn interest(rule: &str) -> TrackedReason {
+        TrackedReason::Interest {
+            rule: rule.into(),
+            after_merge: false,
+        }
+    }
+
     /// A ready-to-use ledger and the id of one repo already registered in it —
     /// what almost every test below needs and doesn't care to set up itself.
     fn ledger_with_repo() -> (Ledger, i64) {
@@ -1612,12 +1663,7 @@ mod tests {
             .unwrap();
 
         ledger
-            .upsert_pr(
-                a,
-                &pr(1),
-                Some(TrackedReason::Interest("label x".into())),
-                now(),
-            )
+            .upsert_pr(a, &pr(1), Some(interest("label x")), now())
             .unwrap();
         ledger.upsert_pr(b, &pr(1), None, now()).unwrap();
         ledger.set_muted(b, 1, true).unwrap();
@@ -1761,7 +1807,7 @@ mod tests {
     #[test]
     fn upsert_reports_new_then_not_new_and_round_trips() {
         let (ledger, repo_id) = ledger_with_repo();
-        let reason = TrackedReason::Interest("label area:task-sdk".into());
+        let reason = interest("label area:task-sdk");
 
         assert!(
             ledger
@@ -1864,10 +1910,7 @@ mod tests {
     fn commit_sweep_page_persists_prs_and_cursor_atomically_and_resumes() {
         let (ledger, repo_id) = ledger_with_repo();
         let page = vec![
-            (
-                pr(1),
-                Some(TrackedReason::Interest("label area:task-sdk".into())),
-            ),
+            (pr(1), Some(interest("label area:task-sdk"))),
             (pr(2), None),
         ];
 
@@ -1940,9 +1983,9 @@ mod tests {
     #[test]
     fn involvement_beats_interest_and_is_not_downgraded() {
         let (ledger, repo_id) = ledger_with_repo();
-        let interest = || TrackedReason::Interest("label area:task-sdk".into());
+        let matched = || interest("label area:task-sdk");
         ledger
-            .upsert_pr(repo_id, &pr(1), Some(interest()), now())
+            .upsert_pr(repo_id, &pr(1), Some(matched()), now())
             .unwrap();
 
         // The involvement search upserts the same PR as involved.
@@ -1961,7 +2004,7 @@ mod tests {
 
         // A later sweep re-asserting interest must not clobber involvement.
         ledger
-            .upsert_pr(repo_id, &pr(1), Some(interest()), now())
+            .upsert_pr(repo_id, &pr(1), Some(matched()), now())
             .unwrap();
         assert_eq!(
             ledger.list_tracked(repo_id).unwrap()[0].tracked_reason,
@@ -1996,26 +2039,51 @@ mod tests {
     }
 
     #[test]
-    fn merge_reason_keeps_the_stronger() {
-        let interest = TrackedReason::Interest("label x".into());
+    fn merge_tracking_keeps_the_stronger_reason() {
+        let matched = interest("label x");
         let involved = TrackedReason::Involved("mention".into());
+        let stored = |reason: &str| Tracking {
+            reason: Some(reason.to_string()),
+            after_merge: false,
+        };
+        let merged = |stored, incoming| merge_tracking(stored, incoming).reason;
 
-        assert_eq!(merge_reason(None, None), None);
+        assert_eq!(merged(Tracking::default(), None), None);
         assert_eq!(
-            merge_reason(None, Some(&interest)).as_deref(),
+            merged(Tracking::default(), Some(&matched)).as_deref(),
             Some("interest: label x")
         );
         assert_eq!(
-            merge_reason(Some("involved: review_requested"), Some(&interest)).as_deref(),
+            merged(stored("involved: review_requested"), Some(&matched)).as_deref(),
             Some("involved: review_requested")
         );
         assert_eq!(
-            merge_reason(Some("interest: label x"), Some(&involved)).as_deref(),
+            merged(stored("interest: label x"), Some(&involved)).as_deref(),
             Some("involved: mention")
         );
         assert_eq!(
-            merge_reason(Some("involved: old"), None).as_deref(),
+            merged(stored("involved: old"), None).as_deref(),
             Some("involved: old")
+        );
+    }
+
+    #[test]
+    fn the_after_merge_flag_follows_the_reason_that_won() {
+        // It is the rule's property, so it can only arrive and leave with the
+        // reason that carried it — an involvement upsert overwriting an
+        // interest match takes the flag down with it.
+        let keeps = TrackedReason::Interest {
+            rule: "path task-sdk/**".into(),
+            after_merge: true,
+        };
+        let kept = merge_tracking(Tracking::default(), Some(&keeps));
+        assert!(kept.after_merge);
+
+        let involved = TrackedReason::Involved("mention".into());
+        assert!(!merge_tracking(kept.clone(), Some(&involved)).after_merge);
+        assert!(
+            merge_tracking(kept, None).after_merge,
+            "a sweep that says nothing leaves the stored answer alone"
         );
     }
 
@@ -2032,12 +2100,7 @@ mod tests {
 
     fn track(ledger: &Ledger, repo_id: i64, p: &PrSnapshot) {
         ledger
-            .upsert_pr(
-                repo_id,
-                p,
-                Some(TrackedReason::Interest("label area:task-sdk".into())),
-                now(),
-            )
+            .upsert_pr(repo_id, p, Some(interest("label area:task-sdk")), now())
             .unwrap();
     }
 
@@ -2762,6 +2825,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_merged_pr_whose_rule_asked_for_it_is_fetched_without_the_project_opt_in() {
+        let (ledger, repo_id) = ledger_with_repo();
+        let mut merged = pr(1);
+        merged.state = PrState::Merged;
+        ledger
+            .upsert_pr(
+                repo_id,
+                &merged,
+                Some(TrackedReason::Interest {
+                    rule: "path task-sdk/**".into(),
+                    after_merge: true,
+                }),
+                now(),
+            )
+            .unwrap();
+
+        let need = ledger.prs_needing_detail(repo_id, false).unwrap();
+        assert_eq!(need.len(), 1);
+        assert!(need[0].after_merge, "and it says why it is still here");
+    }
+
     fn mention(by: &str, since: &str) -> Attention {
         attn(AttentionReason::Mention { by: by.into() }, since)
     }
@@ -2851,6 +2936,47 @@ mod tests {
                 .attention
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn clearing_archived_attention_spares_the_merged_prs_a_rule_keeps() {
+        // The per-rule half: this project keeps nothing after merge, but the rule
+        // that tracked #1 asked for it, so its attention survives while #2's goes.
+        let (ledger, repo_id) = ledger_with_repo();
+        for (number, after_merge) in [(1, true), (2, false)] {
+            let mut merged = pr(number);
+            merged.state = PrState::Merged;
+            ledger
+                .upsert_pr(
+                    repo_id,
+                    &merged,
+                    Some(TrackedReason::Interest {
+                        rule: "path task-sdk/**".into(),
+                        after_merge,
+                    }),
+                    now(),
+                )
+                .unwrap();
+            ledger
+                .commit_detail(
+                    repo_id,
+                    number,
+                    &MyState::default(),
+                    &[],
+                    &[],
+                    &[mention("potiuk", "2026-08-05T09:00:00Z")],
+                    None,
+                    now(),
+                )
+                .unwrap()
+                .expect_applied();
+        }
+
+        ledger.clear_archived_attention(repo_id, false).unwrap();
+
+        let queue = ledger.queue(repo_id).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].pr.number, 1);
     }
 
     #[test]
@@ -2951,7 +3077,7 @@ mod tests {
             .upsert_pr(
                 repo_id,
                 &pr(1),
-                Some(TrackedReason::Interest("label area:task-sdk".into())),
+                Some(interest("label area:task-sdk")),
                 now(),
             )
             .unwrap();

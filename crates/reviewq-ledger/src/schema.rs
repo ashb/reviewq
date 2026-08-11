@@ -14,7 +14,7 @@ use rusqlite_migration::{M, MigrationDefinitionError, Migrations};
 use crate::{LedgerError, Result};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 7;
+pub const SCHEMA_VERSION: usize = 8;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -285,6 +285,18 @@ const MIGRATION_7: &str = r"
 ALTER TABLE prs ADD COLUMN base_ref TEXT NOT NULL DEFAULT '';
 ";
 
+/// Whether the interest rule that tracked this PR keeps it reviewable after it
+/// merges — the per-rule half of post-merge review, beside the per-project
+/// `include_merged`. Stored rather than recomputed because the queries that
+/// decide which merged PRs still get a detail pass, and whose attention rows are
+/// cleared, are the ledger's own and cannot evaluate a glob.
+///
+/// Nought on an existing row, which is what every rule meant until now. The next
+/// sweep rewrites it for anything a rule still matches.
+const MIGRATION_8: &str = r"
+ALTER TABLE prs ADD COLUMN after_merge INTEGER NOT NULL DEFAULT 0;
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -294,6 +306,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(MIGRATION_5),
         M::up(MIGRATION_6),
         M::up(MIGRATION_7),
+        M::up(MIGRATION_8),
     ])
 });
 

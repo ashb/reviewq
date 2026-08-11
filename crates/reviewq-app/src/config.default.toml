@@ -25,10 +25,11 @@ repos = [{ owner = "apache", name = "airflow" }]
 # `wiff forge pull {url}` mirrors the PR fine and then refuses to publish:
 # "publishing a forge review pulled outside its repository is not supported".
 #   repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
-# Keep surfacing a PR after it merges, so a post-merge reply or mention can flag
-# something that shipped broken. Off by default — the queue normally ends at
-# merge. Turn it on per project if you review post-merge:
+# Keep surfacing every one of this project's PRs after it merges, so a post-merge
+# reply or mention can flag something that shipped broken. Off by default — the
+# queue normally ends at merge. Turn it on per project if you review post-merge:
 #   include_merged = true
+# For one rule's PRs rather than all of them, see `after_merge` on a rule below.
 
 # Interest rules. A PR is interesting if ANY rule matches. Within a rule, any
 # listed value of a dimension matches — and a rule setting several dimensions
@@ -57,6 +58,14 @@ author_associations = ["FIRST_TIME_CONTRIBUTOR"]
 # Logins, matched however GitHub happens to capitalise them:
 #   [[project.interest]]
 #   authors = ["potiuk"]
+
+# A rule may also keep its own PRs on the queue after they merge, without the
+# whole project doing so — a change in these paths, by someone whose work you
+# check, is worth a look even once it has shipped:
+#   [[project.interest]]
+#   authors     = ["a-new-name"]
+#   paths       = ["airflow-core/src/airflow/serialization/**"]
+#   after_merge = true
 
 # Milestones I'm watching (substring match against the milestone title).
 [[project.interest]]

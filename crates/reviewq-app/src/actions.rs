@@ -194,7 +194,10 @@ mod tests {
             .upsert_pr(
                 repo_id,
                 &pr(1),
-                Some(TrackedReason::Interest("label x".into())),
+                Some(TrackedReason::Interest {
+                    rule: "label x".into(),
+                    after_merge: false,
+                }),
                 now,
             )
             .expect("upsert");

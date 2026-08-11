@@ -22,9 +22,10 @@ use crate::model::PrSnapshot;
 pub struct RuleInput {
     /// Optional label; when set it is the rule's reason string.
     pub name: Option<String>,
-    /// Conditions, all of which must match. Today the caller supplies exactly
-    /// one.
+    /// Conditions, all of which must match.
     pub conditions: Vec<ConditionInput>,
+    /// This rule's PRs stay worth reviewing after they merge.
+    pub after_merge: bool,
 }
 
 /// One condition of a rule, before compilation. Each carries the set of values
@@ -69,6 +70,7 @@ pub struct Interest {
 struct Rule {
     name: Option<String>,
     conditions: Vec<Condition>,
+    after_merge: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +111,7 @@ impl Interest {
             compiled.push(Rule {
                 name: rule.name,
                 conditions,
+                after_merge: rule.after_merge,
             });
         }
         Ok(Self { rules: compiled })
@@ -140,6 +143,20 @@ impl Interest {
         } else {
             Evaluation::NoMatch
         }
+    }
+
+    /// Whether any rule that matches `pr` asks to keep it reviewable after it
+    /// merges.
+    ///
+    /// Asked separately from [`evaluate`](Self::evaluate), and of *every*
+    /// matching rule rather than the first: interest is a disjunction, so a rule
+    /// saying "these paths, this author, still worth a look post-merge" must be
+    /// heard even when a broader rule happened to name the PR first.
+    pub fn keeps_after_merge(&self, pr: &PrSnapshot) -> bool {
+        self.rules
+            .iter()
+            .filter(|rule| rule.after_merge)
+            .any(|rule| matches!(rule.evaluate(pr), RuleOutcome::Match(_)))
     }
 }
 
@@ -268,18 +285,20 @@ mod tests {
         }
     }
 
-    fn labels_rule() -> RuleInput {
+    fn rule(conditions: Vec<ConditionInput>) -> RuleInput {
         RuleInput {
             name: None,
-            conditions: vec![ConditionInput::Labels(vec!["area:task-sdk".into()])],
+            conditions,
+            after_merge: false,
         }
     }
 
+    fn labels_rule() -> RuleInput {
+        rule(vec![ConditionInput::Labels(vec!["area:task-sdk".into()])])
+    }
+
     fn paths_rule() -> RuleInput {
-        RuleInput {
-            name: None,
-            conditions: vec![ConditionInput::Paths(vec!["task-sdk/**".into()])],
-        }
+        rule(vec![ConditionInput::Paths(vec!["task-sdk/**".into()])])
     }
 
     fn interest(rules: Vec<RuleInput>) -> Interest {
@@ -302,7 +321,7 @@ mod tests {
         pr.labels = vec!["area:task-sdk".into()];
         let rule = RuleInput {
             name: Some("task-sdk".into()),
-            conditions: vec![ConditionInput::Labels(vec!["area:task-sdk".into()])],
+            ..labels_rule()
         };
         assert_eq!(
             interest(vec![rule]).evaluate(&pr),
@@ -314,25 +333,19 @@ mod tests {
     fn author_and_milestone_rules_match() {
         let mut author_pr = pr();
         author_pr.author_association = "FIRST_TIME_CONTRIBUTOR".into();
-        let rule = RuleInput {
-            name: None,
-            conditions: vec![ConditionInput::AuthorAssociations(vec![
-                "FIRST_TIME_CONTRIBUTOR".into(),
-            ])],
-        };
+        let associations = rule(vec![ConditionInput::AuthorAssociations(vec![
+            "FIRST_TIME_CONTRIBUTOR".into(),
+        ])]);
         assert_eq!(
-            interest(vec![rule]).evaluate(&author_pr),
+            interest(vec![associations]).evaluate(&author_pr),
             Evaluation::Match("author FIRST_TIME_CONTRIBUTOR".into())
         );
 
         let mut pr = pr();
         pr.milestone = Some("3.2.0".into());
-        let rule = RuleInput {
-            name: None,
-            conditions: vec![ConditionInput::Milestones(vec!["3.2".into()])],
-        };
+        let milestones = rule(vec![ConditionInput::Milestones(vec!["3.2".into()])]);
         assert_eq!(
-            interest(vec![rule]).evaluate(&pr),
+            interest(vec![milestones]).evaluate(&pr),
             Evaluation::Match("milestone 3.2".into())
         );
     }
@@ -341,19 +354,16 @@ mod tests {
     fn an_author_rule_names_a_login_and_ignores_its_casing() {
         // What `author_associations` cannot express: GitHub's relationship
         // classes say nothing about *which* person opened the PR.
-        let rule = RuleInput {
-            name: None,
-            conditions: vec![ConditionInput::Authors(vec!["OctoCat".into()])],
-        };
+        let mine = rule(vec![ConditionInput::Authors(vec!["OctoCat".into()])]);
         assert_eq!(
-            interest(vec![rule.clone()]).evaluate(&pr()),
+            interest(vec![mine.clone()]).evaluate(&pr()),
             Evaluation::Match("author @octocat".into())
         );
 
         let mut someone_else = pr();
         someone_else.author = "potiuk".into();
         assert_eq!(
-            interest(vec![rule]).evaluate(&someone_else),
+            interest(vec![mine]).evaluate(&someone_else),
             Evaluation::NoMatch
         );
     }
@@ -400,23 +410,65 @@ mod tests {
     }
 
     #[test]
+    fn only_a_rule_that_asks_for_it_keeps_a_pr_after_it_merges() {
+        let keeps = RuleInput {
+            after_merge: true,
+            ..paths_rule()
+        };
+        let mut in_task_sdk = pr();
+        in_task_sdk.files = Some(vec!["task-sdk/x.py".into()]);
+
+        assert!(interest(vec![keeps.clone()]).keeps_after_merge(&in_task_sdk));
+        assert!(
+            !interest(vec![paths_rule()]).keeps_after_merge(&in_task_sdk),
+            "the same rule without the flag lets it go at merge"
+        );
+
+        let mut elsewhere = pr();
+        elsewhere.files = Some(vec!["docs/x.rst".into()]);
+        assert!(
+            !interest(vec![keeps]).keeps_after_merge(&elsewhere),
+            "a rule only keeps the PRs it matches"
+        );
+    }
+
+    #[test]
+    fn a_later_rule_can_keep_a_pr_an_earlier_one_named_first() {
+        // Interest is a disjunction, so every matching rule is asked. Only
+        // consulting the rule that produced the reason would silently ignore the
+        // post-merge one whenever a broader rule happened to match too.
+        let mut pr = pr();
+        pr.labels = vec!["area:task-sdk".into()];
+        pr.files = Some(vec!["task-sdk/x.py".into()]);
+        let rules = interest(vec![
+            labels_rule(),
+            RuleInput {
+                after_merge: true,
+                ..paths_rule()
+            },
+        ]);
+
+        assert_eq!(
+            rules.evaluate(&pr),
+            Evaluation::Match("label area:task-sdk".into()),
+            "the first rule still names it"
+        );
+        assert!(rules.keeps_after_merge(&pr));
+    }
+
+    #[test]
     fn no_rules_is_never_interesting() {
         let interest = interest(vec![]);
         assert!(interest.is_empty());
         assert_eq!(interest.evaluate(&pr()), Evaluation::NoMatch);
     }
 
-    // The conjunction machinery is exercised directly, though config does not
-    // yet let a rule carry two conditions.
     #[test]
     fn conjunction_requires_every_condition() {
-        let both = RuleInput {
-            name: None,
-            conditions: vec![
-                ConditionInput::AuthorAssociations(vec!["FIRST_TIME_CONTRIBUTOR".into()]),
-                ConditionInput::Paths(vec!["task-sdk/**".into()]),
-            ],
-        };
+        let both = rule(vec![
+            ConditionInput::AuthorAssociations(vec!["FIRST_TIME_CONTRIBUTOR".into()]),
+            ConditionInput::Paths(vec!["task-sdk/**".into()]),
+        ]);
         let mut pr = pr();
         pr.author_association = "FIRST_TIME_CONTRIBUTOR".into();
         pr.files = Some(vec!["docs/x.rst".into()]);

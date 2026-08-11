@@ -107,9 +107,14 @@ async fn sync_repo(
         let mut watermark: Option<Timestamp> = None;
         for pr in page.prs {
             let reason = match rules.evaluate(&pr) {
-                Evaluation::Match(detail) => {
+                Evaluation::Match(rule) => {
                     stats.interest += 1;
-                    Some(TrackedReason::Interest(detail))
+                    // Asked of every matching rule, not just the one that named
+                    // it — see `Interest::keeps_after_merge`.
+                    Some(TrackedReason::Interest {
+                        rule,
+                        after_merge: rules.keeps_after_merge(&pr),
+                    })
                 }
                 Evaluation::Unknown => {
                     stats.truncated_unknown += 1;
@@ -176,7 +181,8 @@ async fn sync_repo(
     .await?;
 
     // Merged/closed PRs are not re-fetched, so drop any attention they still
-    // carry (unless this project keeps merged PRs on the queue).
+    // carry — bar the merged ones post-merge review keeps, whether that is this
+    // project's `include_merged` or their own rule's `after_merge`.
     ledger.clear_archived_attention(repo_id, project.include_merged)?;
 
     let (tracked, total) = ledger.counts(repo_id)?;
@@ -360,7 +366,9 @@ async fn detail_pass(
             repo,
             login,
             bots,
-            include_merged,
+            // Either the project keeps every merged PR, or this one's own rule
+            // asked to keep it.
+            include_merged || tracked.after_merge,
             review_requested,
             &tracked.pr,
             &tracked.tracked_reason,
@@ -452,7 +460,7 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         &repo,
         &cfg.identity.login,
         &cfg.bots.logins,
-        project.include_merged,
+        project.include_merged || show.after_merge,
         // No involvement search has run, so a review requested of a *team* isn't
         // known here. A full sync is what resolves those; this only refreshes
         // what one PR's own detail can say.
@@ -1208,6 +1216,37 @@ mod engine_tests {
             "the repo still finished"
         );
         let _ = &cfg;
+    }
+
+    #[tokio::test]
+    async fn a_rule_asking_for_post_merge_review_keeps_its_own_prs_after_they_merge() {
+        // The targeted opt-in: this project does not set `include_merged`, so
+        // everything else still leaves the queue at merge — but the rule that
+        // tracked this PR asked to keep it, and a review request on it survives.
+        let cfg: Config = toml::from_str(
+            r#"
+            [identity]
+            login = "ashb"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            labels = ["area:task-sdk"]
+            after_merge = true
+            [involvement]
+            reasons = []
+            "#,
+        )
+        .expect("config parses");
+        let mut merged = pr(4, "2026-08-09T09:00:00Z");
+        merged.state = PrState::Merged;
+        let forge = FakeForge::new(vec![Page::of(vec![merged])]).with_review_request(4, 4900);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        assert!(!cfg.projects[0].include_merged, "no blunt opt-in here");
+        let queue = ledger.queue(repo_id).expect("queue");
+        assert_eq!(queue.len(), 1, "the rule kept it");
+        assert_eq!(queue[0].pr.number, 4);
     }
 
     #[tokio::test]

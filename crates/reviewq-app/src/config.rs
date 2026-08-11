@@ -77,9 +77,11 @@ pub struct Project {
     /// `[involvement].reasons` when set; inherits it when omitted.
     #[serde(default)]
     pub involvement: Option<Vec<String>>,
-    /// Keep surfacing a PR after it merges, so post-merge activity (a reply, a
-    /// mention) can flag something that shipped broken. Off by default — most
-    /// people want the queue to end at merge.
+    /// Keep surfacing every one of this project's PRs after it merges, so
+    /// post-merge activity (a reply, a mention) can flag something that shipped
+    /// broken. Off by default — most people want the queue to end at merge, and
+    /// [`InterestRule::after_merge`] says the same thing of one rule's PRs
+    /// rather than all of them.
     #[serde(default)]
     pub include_merged: bool,
 }
@@ -157,10 +159,19 @@ pub struct InterestRule {
     pub author_associations: Vec<String>,
     /// Match a PR in any of these milestones.
     pub milestones: Vec<String>,
+    /// Keep the PRs this rule matches on the queue after they merge, so a
+    /// post-merge reply or mention still surfaces.
+    ///
+    /// The targeted half of post-merge review: a change under certain paths, or
+    /// by an author you don't know, is worth a look even once it has shipped,
+    /// while the rest of the project's PRs are done at merge.
+    /// [`Project::include_merged`] is the blunt instrument that says it of
+    /// everything.
+    pub after_merge: bool,
 }
 
 impl InterestRule {
-    /// Convert to a core rule input, enforcing the one-dimension-per-rule gate.
+    /// Convert to a core rule input, refusing a rule that matches nothing.
     fn to_input(&self) -> Result<RuleInput> {
         let mut conditions = Vec::new();
         if !self.labels.is_empty() {
@@ -193,6 +204,7 @@ impl InterestRule {
         Ok(RuleInput {
             name: self.name.clone(),
             conditions,
+            after_merge: self.after_merge,
         })
     }
 }
@@ -710,6 +722,33 @@ mod tests {
             rules.evaluate(&first_timer_elsewhere),
             reviewq_core::rules::Evaluation::NoMatch,
             "one dimension is not enough"
+        );
+    }
+
+    #[test]
+    fn post_merge_review_is_a_rule_of_its_own_and_off_by_default() {
+        let config: Config = toml::from_str(&minimal(
+            r#"
+            [[project.interest]]
+            authors = ["potiuk"]
+            paths = ["task-sdk/**"]
+            after_merge = true
+            "#,
+        ))
+        .expect("parses");
+        config.validate(Path::new("cfg")).expect("validates");
+
+        let rules = config.interest_for(&config.projects[0]).expect("compiles");
+        let mut theirs = pr();
+        theirs.author = "potiuk".into();
+        theirs.files = Some(vec!["task-sdk/thing.py".into()]);
+        assert!(rules.keeps_after_merge(&theirs));
+
+        let mut labelled = pr();
+        labelled.labels = vec!["area:task-sdk".into()];
+        assert!(
+            !rules.keeps_after_merge(&labelled),
+            "the project's other rule said nothing about merges"
         );
     }
 

@@ -436,6 +436,7 @@ mod tests {
             pr,
             body: None,
             tracked_reason: Some("interest: label x".into()),
+            after_merge: false,
             my_state: MyState::default(),
             threads: vec![],
             reviewers: vec![],

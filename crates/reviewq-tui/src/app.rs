@@ -1412,7 +1412,10 @@ pub(super) mod tests {
             .upsert_pr(
                 repo_id,
                 &pr_snapshot(70201),
-                Some(TrackedReason::Interest("label x".into())),
+                Some(TrackedReason::Interest {
+                    rule: "label x".into(),
+                    after_merge: false,
+                }),
                 now,
             )
             .expect("upsert");
@@ -1472,7 +1475,10 @@ pub(super) mod tests {
             .upsert_pr(
                 repo_id,
                 &pr,
-                Some(TrackedReason::Interest("label x".into())),
+                Some(TrackedReason::Interest {
+                    rule: "label x".into(),
+                    after_merge: false,
+                }),
                 now,
             )
             .expect("upsert");
@@ -1659,7 +1665,10 @@ mod scroll_tests {
                 .upsert_pr(
                     repo_id,
                     &pr_snapshot(number),
-                    Some(TrackedReason::Interest("label x".into())),
+                    Some(TrackedReason::Interest {
+                        rule: "label x".into(),
+                        after_merge: false,
+                    }),
                     now,
                 )
                 .expect("upsert");
@@ -2421,7 +2430,10 @@ mod loop_tests {
             .upsert_pr(
                 repo_id,
                 &merged,
-                Some(reviewq_ledger::TrackedReason::Interest("label x".into())),
+                Some(reviewq_ledger::TrackedReason::Interest {
+                    rule: "label x".into(),
+                    after_merge: false,
+                }),
                 ts("2026-08-11T12:00:00Z"),
             )
             .expect("stored");

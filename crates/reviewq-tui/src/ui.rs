@@ -881,7 +881,10 @@ sensor = S3KeySensor(deferrable=True)
                 .upsert_pr(
                     repo_id,
                     &pr(number, title),
-                    Some(TrackedReason::Interest("label area:async".into())),
+                    Some(TrackedReason::Interest {
+                        rule: "label area:async".into(),
+                        after_merge: false,
+                    }),
                     now,
                 )
                 .expect("upsert");
@@ -913,7 +916,10 @@ sensor = S3KeySensor(deferrable=True)
             .upsert_pr(
                 repo_id,
                 pr,
-                Some(TrackedReason::Interest("label x".into())),
+                Some(TrackedReason::Interest {
+                    rule: "label x".into(),
+                    after_merge: false,
+                }),
                 now,
             )
             .expect("upsert");
@@ -1180,7 +1186,10 @@ sensor = S3KeySensor(deferrable=True)
             .upsert_pr(
                 repo_id,
                 &pr(1, "No body yet"),
-                Some(TrackedReason::Interest("label area:async".into())),
+                Some(TrackedReason::Interest {
+                    rule: "label area:async".into(),
+                    after_merge: false,
+                }),
                 now,
             )
             .expect("upsert");
