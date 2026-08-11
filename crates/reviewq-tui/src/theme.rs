@@ -87,6 +87,12 @@ const LIGHT_TEXT_CONTRAST: f64 = 7.0;
 /// See [`LIGHT_TEXT_CONTRAST`].
 const LIGHT_DIM_CONTRAST: f64 = 4.5;
 
+/// The two inks a chip can carry. Which one a label gets is whichever reads
+/// better on the colour the forge chose — the same choice GitHub makes.
+const BLACK: Rgb = rgb(0x00, 0x00, 0x00);
+/// See [`BLACK`].
+const WHITE: Rgb = rgb(0xff, 0xff, 0xff);
+
 /// The dark palette's background: painted, and the reference every accent in that
 /// palette is made legible against.
 const DARK_BG: Rgb = rgb(0x1e, 0x1e, 0x1e);
@@ -247,19 +253,25 @@ fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
 /// so on a dark terminal most accents come through exactly as base16-ocean
 /// specifies them.
 impl Theme {
-    /// A colour from somewhere else, made legible here without losing its hue.
+    /// A label drawn the way the forge draws it: its colour behind, and text in
+    /// front picked to be legible on it.
     ///
-    /// For the labels: GitHub picks those to sit on its own chips, so plenty of
-    /// them are unreadable as text on this background — `000000` is a real label
-    /// colour. Lightness moves until it clears the same threshold the palette's
-    /// own accents do, which keeps `area:Scheduler` recognisably the green the
-    /// forge shows while keeping it readable.
-    pub fn adapt(&self, colour: Rgb) -> Rgb {
-        let min = match self.mode {
-            Mode::Dark => DIM_CONTRAST,
-            Mode::Light => LIGHT_DIM_CONTRAST,
+    /// Returns `(background, foreground)`.
+    ///
+    /// The colour is used *exactly*, which is the whole point — GitHub picks
+    /// these to be a chip's background, and reading one as text instead means
+    /// bending it until it is legible on ours. That was the first attempt, and
+    /// on a light background it dragged `e8b955` to `996e15`: still gold by the
+    /// numbers, nothing like the label on the forge. Contrast has to come from
+    /// somewhere, and the only thing here that can give it up without losing
+    /// information is the text on top.
+    pub fn chip(&self, colour: Rgb) -> (Rgb, Rgb) {
+        let ink = if contrast(BLACK, colour) >= contrast(WHITE, colour) {
+            BLACK
+        } else {
+            WHITE
         };
-        readable(colour, self.bg, min)
+        (colour, ink)
     }
 }
 
@@ -478,36 +490,39 @@ mod tests {
     }
 
     #[test]
-    fn a_label_colour_is_made_legible_without_losing_its_hue() {
-        // GitHub picks these to sit on its own chips: `000000` is a real label
-        // colour, and unreadable as text on a dark background.
+    fn a_chip_keeps_the_forge_s_colour_exactly() {
+        // The reason for a chip at all. Read as text, `e8b955` had to become
+        // `996e15` to be legible on white — gold by the numbers and nothing like
+        // the label GitHub shows.
         for mode in [Mode::Dark, Mode::Light] {
             let theme = Theme::new(mode);
-            let black = from_hex("000000").expect("parses");
-            let adapted = theme.adapt(black);
+            for label in ["e8b955", "0e8a16", "000000", "ffffff", "d73a4a"] {
+                let colour = from_hex(label).expect("parses");
+                let (bg, _) = theme.chip(colour);
+                assert_eq!(hex(bg), format!("#{label}"), "{mode:?} moved {label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_chip_picks_ink_that_can_be_read_on_it() {
+        let theme = Theme::default();
+        for label in ["e8b955", "0e8a16", "000000", "ffffff", "d73a4a", "5319e7"] {
+            let colour = from_hex(label).expect("parses");
+            let (bg, ink) = theme.chip(colour);
 
             assert!(
-                contrast(adapted, theme.bg) >= 3.0,
-                "{mode:?}: {} on {}",
-                hex(adapted),
-                hex(theme.bg)
+                contrast(ink, bg) >= 4.5,
+                "{label}: {} on {} is {:.2}",
+                hex(ink),
+                hex(bg),
+                contrast(ink, bg)
             );
         }
 
-        // One that already reads is left exactly as the forge chose it.
-        let dark = Theme::new(Mode::Dark);
-        let green = from_hex("0e8a16").expect("parses");
-        assert_eq!(dark.adapt(green), dark.adapt(dark.adapt(green)));
-
-        // And a hue survives being made legible: airflow's blue stays blue.
-        let blue = from_hex("1d76db").expect("parses");
-        let adapted = Theme::new(Mode::Light).adapt(blue);
-        assert!(
-            (to_hsl(adapted).h - to_hsl(blue).h).abs() < 1.0,
-            "hue moved from {} to {}",
-            to_hsl(blue).h,
-            to_hsl(adapted).h
-        );
+        // Light labels take dark ink and vice versa, as they do on the forge.
+        assert_eq!(hex(theme.chip(from_hex("e8b955").unwrap()).1), "#000000");
+        assert_eq!(hex(theme.chip(from_hex("5319e7").unwrap()).1), "#ffffff");
     }
 
     #[test]

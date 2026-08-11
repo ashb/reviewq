@@ -282,17 +282,31 @@ fn queue_row(
             continue;
         }
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            label.clone(),
-            // The forge's own colour where it has told us one, adapted only as
-            // far as legibility here needs — a label you recognise by its colour
-            // is no use in a colour you cannot read.
-            Style::default().fg(color(colour.map_or(t.dim, |c| t.adapt(c)))),
-        ));
+        spans.push(chip(label, *colour, t));
     }
     spans.push(Span::raw("  "));
     spans.push(Span::styled(q.pr.title.clone(), style));
     Line::from(spans)
+}
+
+/// A label as the forge draws it: its own colour behind, ink picked to be read
+/// on it, and a space either side so the colour is a chip rather than a stain on
+/// the row.
+///
+/// A label whose colour we have not learnt yet is drawn as plain dim text — no
+/// chip, because inventing a colour for it would be worse than admitting we do
+/// not know it.
+fn chip(label: &str, colour: Option<Rgb>, t: &Theme) -> Span<'static> {
+    match colour {
+        None => Span::styled(label.to_string(), Style::default().fg(color(t.dim))),
+        Some(colour) => {
+            let (bg, ink) = t.chip(colour);
+            Span::styled(
+                format!(" {label} "),
+                Style::default().bg(color(bg)).fg(color(ink)),
+            )
+        }
+    }
 }
 
 /// The one column in front of a queue row saying where I stand with the PR — see
@@ -456,10 +470,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
             let colour = colours
                 .and_then(|colours| colours.get(label))
                 .and_then(|hex| crate::theme::from_hex(hex));
-            spans.push(Span::styled(
-                label.clone(),
-                Style::default().fg(color(colour.map_or(t.dim, |c| t.adapt(c)))),
-            ));
+            spans.push(chip(label, colour, t));
         }
         lines.push(Line::from(spans));
     }
@@ -1694,6 +1705,39 @@ sensor = S3KeySensor(deferrable=True)
             !row.contains("kind:bug"),
             "a label the project did not ask for: {row}"
         );
+    }
+
+    #[test]
+    fn a_label_is_drawn_in_exactly_the_colour_the_forge_gave_it() {
+        // The whole point of a chip. Read as text, `e8b955` had to be dragged to
+        // `996e15` to be legible on a light background — a colour that is gold by
+        // the numbers and nothing like the label on the forge.
+        for mode in [Mode::Dark, Mode::Light] {
+            let ledger = fixture();
+            let repo_id = ledger.repos().expect("repos")[0].0;
+            let mut stale = pr(68293, "Something nobody has touched in months");
+            stale.labels = vec!["backport".into()];
+            queue_only(&ledger, repo_id, &stale);
+            ledger
+                .set_label_colours(repo_id, &[("backport".into(), "e8b955".into())])
+                .expect("colours");
+            let mut app = App::with_ledger(Theme::new(mode), ledger, test_config()).expect("app");
+
+            let mut terminal = Terminal::new(TestBackend::new(200, 24)).expect("terminal");
+            terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+
+            let painted: std::collections::BTreeSet<String> = (0..24)
+                .flat_map(|y| (0..200).map(move |x| (x, y)))
+                .filter(|&(x, y)| buffer[(x, y)].symbol() == "b" && y > 0)
+                .map(|(x, y)| format!("{:?}", buffer[(x, y)].bg))
+                .collect();
+
+            assert!(
+                painted.contains("Rgb(232, 185, 85)"),
+                "{mode:?}: the forge's own colour is nowhere on screen: {painted:?}"
+            );
+        }
     }
 
     #[test]

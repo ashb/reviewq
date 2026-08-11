@@ -14,7 +14,8 @@
 <text x="33.6" y="49.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="49.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70135</text>
 <text x="117.6" y="49.5" fill="#c36b73" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">@kaxil mentioned you</text>
-<text x="294.0" y="49.5" fill="#0e8a16" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">area</text>
+<rect x="294.0" y="36.0" width="33.6" height="18" fill="#0e8a16"/>
+<text x="294.0" y="49.5" fill="#000000" textLength="33.6" lengthAdjust="spacing" xml:space="preserve"> are</text>
 <text x="327.6" y="49.5" fill="#96b5b4" textLength="512.4" lengthAdjust="spacing" xml:space="preserve">╭ Reference ────────────────────────────────────────────────╮</text>
 <text x="1167.6" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -43,7 +44,8 @@
 <text x="344.4" y="103.5" fill="#9a9a9a" textLength="117.6" lengthAdjust="spacing" xml:space="preserve">  ✓           </text>
 <text x="462.0" y="103.5" fill="#ffffff" textLength="369.6" lengthAdjust="spacing" xml:space="preserve">…and the PR has moved on since              </text>
 <text x="831.6" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
-<text x="840.0" y="103.5" fill="#6c6c6c" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">view</text>
+<rect x="840.0" y="90.0" width="84.0" height="18" fill="#000000"/>
+<text x="840.0" y="103.5" fill="#ffffff" textLength="84.0" lengthAdjust="spacing" xml:space="preserve">ds-review </text>
 <text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="121.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
