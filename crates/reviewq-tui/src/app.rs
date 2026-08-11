@@ -22,7 +22,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -31,6 +31,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
 use reviewq_app::config::Config;
+use reviewq_app::peek::Peeked;
 use reviewq_app::sync::Refreshed;
 use reviewq_core::model::PrState;
 use reviewq_forge::ForgeError;
@@ -125,6 +126,9 @@ pub struct App {
     /// `None` when the queue is empty, or when the row somehow has no stored
     /// detail.
     pub detail: Option<PrShow>,
+    /// A PR being looked at that is not on the queue. While one is, it is what
+    /// the detail pane shows and the panes are read-only; Esc puts it away.
+    pub peek: Option<Peeked>,
     /// How many repos the ledger knows about. More than one, and rows carry
     /// `owner/name#N` rather than a bare `#N` — matching what `list` does.
     pub repo_count: usize,
@@ -150,6 +154,8 @@ pub struct App {
     /// Likewise for a PR to fetch, which is also a network call worth announcing
     /// before it blocks.
     pending_fetch: Option<u64>,
+    /// And for a PR to look at, which may have to be fetched to show at all.
+    pending_peek: Option<u64>,
     /// A PR whose forge notifications should be marked read, recorded once the
     /// local `done` is committed. Fire-and-forget, so the loop needs no draw
     /// first — it is held only so that acting on an overlay's keys needs no
@@ -258,6 +264,10 @@ pub struct Hooks {
     /// the handoff, because the interface has nothing to show until it returns
     /// and the notice explains the wait.
     pub fetch: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
+    /// Read a PR for display without tracking it — from the ledger where it is
+    /// stored, from the forge where it isn't. Blocks for the same reason
+    /// [`fetch`](Self::fetch) does, and may not have to touch the network at all.
+    pub peek: Box<dyn Fn(u64) -> Result<Peeked> + Send + Sync>,
     /// Show a PR's page in whatever the desktop opens URLs with.
     ///
     /// Takes the PR rather than a URL because working out the URL is itself
@@ -277,16 +287,46 @@ pub struct Hooks {
     pub review: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
 }
 
-/// What the ledger holds for a PR that isn't on the queue.
+/// Why a PR you asked for isn't on the queue.
 ///
 /// Stored and tracked are different things: a sweep stores every PR it sees, and
-/// tracks only the ones a rule matched or that name you. There are usually far more
-/// of the former, and they are the ones worth offering to track.
-struct Stored {
-    /// A rule matched it, or an involvement search did.
-    tracked: bool,
-    /// Open, merged or closed — a closed one has left the queue for good.
-    state: PrState,
+/// tracks only the ones a rule matched or that name you. There are usually far
+/// more of the former, and they are the ones worth offering to track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unqueued {
+    /// The ledger has never seen it, so only the forge can say anything.
+    Unknown,
+    /// A sweep stored it and no rule matched — the commonest case by far.
+    Untracked,
+    /// Tracked, but merged or closed: it left the queue and no listing brings it
+    /// back.
+    Archived(PrState),
+    /// Tracked and open, and simply wants nothing right now.
+    Quiet,
+}
+
+impl Unqueued {
+    /// Whether tracking it is worth offering. An already-tracked PR is off the
+    /// queue for a reason tracking it again would not touch.
+    pub fn trackable(self) -> bool {
+        matches!(self, Self::Unknown | Self::Untracked)
+    }
+
+    /// The one line explaining why it isn't on the queue.
+    pub fn reason(self) -> String {
+        match self {
+            Self::Unknown => "Not in your ledger.".to_string(),
+            Self::Untracked => "Stored by a sweep, but no rule matched it.".to_string(),
+            Self::Archived(state) => format!(
+                "It {} — so it left the queue.",
+                match state {
+                    PrState::Merged => "merged",
+                    _ => "was closed",
+                }
+            ),
+            Self::Quiet => "Tracked, and wants nothing right now.".to_string(),
+        }
+    }
 }
 
 /// Whether [`App::update`] dealt with an action, or handed it back.
@@ -343,19 +383,26 @@ pub enum Overlay {
         /// The PR it would snooze.
         number: u64,
     },
-    /// A PR asked for by number that the ledger has never seen — offering to
-    /// fetch it rather than refusing.
+    /// A PR asked for by number that isn't on the queue — offering what can be
+    /// done with it rather than refusing.
     ///
-    /// A number you typed is a number you meant, and it not being here is more
-    /// often "my sweep hasn't reached it" than a mistake. Offering the fetch
-    /// turns a dead end into the thing you were going to do next anyway.
-    OfferFetch {
-        /// The PR to fetch.
+    /// A number you typed is a number you meant. Showing it always works and
+    /// changes nothing, so that is the offer every case gets; tracking it is
+    /// offered on top where it would mean something.
+    Unqueued {
+        /// The PR asked for.
         number: u64,
+        /// Why it isn't on the queue, which is what the offer explains.
+        why: Unqueued,
     },
-    /// Fetching a PR the ledger had never seen.
+    /// Fetching a PR the ledger had never seen, to track it.
     Fetching {
         /// The PR being fetched.
+        number: u64,
+    },
+    /// Reading a PR for display, which may mean fetching it first.
+    Peeking {
+        /// The PR being read.
         number: u64,
     },
     /// Typing a PR number to jump to.
@@ -431,6 +478,7 @@ impl App {
             queue: Vec::new(),
             selected: 0,
             detail: None,
+            peek: None,
             repo_count: 0,
             focus: Focus::default(),
             detail_scroll: 0,
@@ -438,6 +486,7 @@ impl App {
             queue_scroll: 0,
             pending_review: None,
             pending_fetch: None,
+            pending_peek: None,
             pending_mark_read: None,
             repaint: false,
             dirty: true,
@@ -626,6 +675,10 @@ impl App {
                 self.fetch_unknown(number, hooks);
                 continue;
             }
+            if let Some(number) = self.pending_peek.take() {
+                self.show_anyway(number, hooks);
+                continue;
+            }
             // Nothing waits on this one, so it needs no draw of its own.
             if let Some(number) = self.pending_mark_read.take() {
                 (hooks.mark_read)(number);
@@ -679,6 +732,9 @@ impl App {
     fn dispatch(&mut self, key: KeyEvent, channel: &Channel, hooks: &Hooks) -> Result<()> {
         if self.overlay != Overlay::None {
             return self.on_overlay_key(key);
+        }
+        if self.peek.is_some() {
+            return self.on_peek_key(key, hooks);
         }
         let Some(action) = keys::action_for(key) else {
             return Ok(());
@@ -735,6 +791,91 @@ impl App {
                 | Action::Last,
             ) => unreachable!("update handles these and returns Handled"),
         }
+    }
+
+    /// Handle a keystroke while a PR is being looked at.
+    ///
+    /// A peeked PR may be merged, closed, or not tracked at all, so nothing that
+    /// writes is offered for it: `done` on a PR with no ledger row has nothing to
+    /// write to, and acting on the row *behind* the view would be worse. The keys
+    /// that only read are all here — scroll it, open it, copy its URL — and Esc
+    /// puts it away.
+    fn on_peek_key(&mut self, key: KeyEvent, hooks: &Hooks) -> Result<()> {
+        if key.code == KeyCode::Esc {
+            self.stop_peeking();
+            return Ok(());
+        }
+        let page = self.page() as isize;
+        let Some(action) = keys::action_for(key) else {
+            return Ok(());
+        };
+        match action {
+            Action::Quit => {
+                self.quit = true;
+                Ok(())
+            }
+            Action::Help => {
+                self.overlay = Overlay::Help { scroll: 0 };
+                Ok(())
+            }
+            Action::ToggleTheme => {
+                self.theme = self.theme.toggled();
+                Ok(())
+            }
+            // Always the description: the queue is still drawn, but it is not
+            // what you are reading, and moving its selection under a view of
+            // something else would be a change you cannot see.
+            Action::Down => self.scroll_peek(1),
+            Action::Up => self.scroll_peek(-1),
+            Action::PageDown => self.scroll_peek(page),
+            Action::PageUp => self.scroll_peek(-page),
+            Action::First => self.scroll_peek(isize::MIN),
+            Action::Last => self.scroll_peek(isize::MAX),
+            Action::OpenInBrowser => {
+                let Some(peek) = &self.peek else {
+                    return Ok(());
+                };
+                let (repo, number) = (peek.repo.clone(), peek.show.pr.number);
+                self.status = Some(match (hooks.open_url)(&repo, number) {
+                    Ok(()) => format!("#{number} opened"),
+                    Err(err) => format!("#{number} could not be opened: {err:#}"),
+                });
+                Ok(())
+            }
+            Action::CopyUrl => {
+                let Some(peek) = &self.peek else {
+                    return Ok(());
+                };
+                let (repo, number) = (peek.repo.clone(), peek.show.pr.number);
+                self.status = Some(match (hooks.copy_url)(&repo, number) {
+                    Ok(()) => format!("#{number}'s URL copied"),
+                    Err(err) => format!("#{number}'s URL could not be copied: {err:#}"),
+                });
+                Ok(())
+            }
+            Action::Jump
+            | Action::SwitchPane
+            | Action::RefreshSelected
+            | Action::Review
+            | Action::Done
+            | Action::Snooze
+            | Action::ToggleMute
+            | Action::ToggleDefer => {
+                let number = self.peek.as_ref().map_or(0, |peek| peek.show.pr.number);
+                self.status = Some(format!(
+                    "#{number} is only being shown — Esc returns to the queue"
+                ));
+                Ok(())
+            }
+        }
+    }
+
+    /// Scroll the peeked description, saturating at both ends.
+    fn scroll_peek(&mut self, delta: isize) -> Result<()> {
+        let target = (self.detail_scroll as isize).saturating_add(delta);
+        self.detail_scroll = target.max(0).try_into().unwrap_or(u16::MAX);
+        self.clamp_detail_scroll();
+        Ok(())
     }
 
     /// The selected PR's number, or `None` on an empty queue.
@@ -802,6 +943,17 @@ impl App {
         } else {
             return Ok(());
         };
+
+        // A peeked PR owns the screen the way the keyboard sees it, so the wheel
+        // scrolls what is being read wherever the pointer is, and a click on a
+        // queue row — which is not what is on show — does nothing.
+        if self.peek.is_some() {
+            return match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_peek(-WHEEL_ROWS),
+                MouseEventKind::ScrollDown => self.scroll_peek(WHEEL_ROWS),
+                _ => Ok(()),
+            };
+        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -871,20 +1023,24 @@ impl App {
                 };
                 Ok(())
             }
-            Overlay::OfferFetch { number } => {
-                let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
-                if confirmed {
-                    // Held for the loop, so the notice is drawn before the fetch
-                    // blocks on the forge — same reason as the handoff.
-                    self.overlay = Overlay::Fetching { number };
-                    self.pending_fetch = Some(number);
-                } else {
-                    self.overlay = Overlay::None;
+            Overlay::Unqueued { number, why } => {
+                // Both are held for the loop, so the notice is drawn before
+                // either blocks on the forge — same reason as the handoff.
+                match key.code {
+                    KeyCode::Char('s') | KeyCode::Enter => {
+                        self.overlay = Overlay::Peeking { number };
+                        self.pending_peek = Some(number);
+                    }
+                    KeyCode::Char('t') if why.trackable() => {
+                        self.overlay = Overlay::Fetching { number };
+                        self.pending_fetch = Some(number);
+                    }
+                    _ => self.overlay = Overlay::None,
                 }
                 Ok(())
             }
-            // Nothing to accept: the loop replaces it when the fetch returns.
-            Overlay::Fetching { .. } => Ok(()),
+            // Nothing to accept: the loop replaces these when the work returns.
+            Overlay::Fetching { .. } | Overlay::Peeking { .. } => Ok(()),
             Overlay::ConfirmDone { number } => {
                 let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
                 self.overlay = Overlay::None;
@@ -1010,12 +1166,12 @@ impl App {
         self.reload()
     }
 
-    /// Select the PR `text` names, if it's on the queue.
+    /// Select the PR `text` names, or offer what else can be done with it.
     ///
-    /// The distinction between "not on the queue" and "never heard of it" is
-    /// worth drawing: the first means the PR is tracked and simply wants nothing
-    /// — muted, snoozed, or waiting on someone else — and `list --all` will show
-    /// it. A flat "not found" would send you looking for the wrong problem.
+    /// A number that isn't on the queue is never a refusal: showing a PR is
+    /// read-only and always possible, whatever state it is in and whether or not
+    /// the ledger has ever seen it. Why it isn't queued still decides what the
+    /// offer says, and whether tracking it would mean anything.
     fn jump_to(&mut self, text: &str) -> Result<()> {
         let number = self
             .pr_number_in(text)
@@ -1030,30 +1186,11 @@ impl App {
             return self.move_to(index);
         }
 
-        // Why it isn't on the queue decides what to offer, and the three reasons
-        // want different answers. "Tracked but not on the queue — try `list --all`"
-        // was one message for all of them, and wrong for two: `--all` lists only
-        // *tracked* PRs, so it cannot show an untracked one, and a merged PR left
-        // the queue for a reason no amount of listing changes.
-        match self.stored(number)? {
-            // Never seen, or seen and never tracked. Both are the same offer:
-            // tracking an already-stored PR needs no network, and `track_one`
-            // reaches the forge only if it has to.
-            None | Some(Stored { tracked: false, .. }) => {
-                self.overlay = Overlay::OfferFetch { number };
-                Ok(())
-            }
-            Some(Stored { state, .. }) if !state.is_open() => {
-                bail!(
-                    "#{number} is {} — it left the queue when it closed",
-                    state.as_str().to_lowercase()
-                )
-            }
-            Some(_) => bail!(
-                "#{number} is tracked and wants nothing right now — it may be \
-                 muted, snoozed, or simply quiet"
-            ),
-        }
+        self.overlay = Overlay::Unqueued {
+            number,
+            why: self.why_unqueued(number)?,
+        };
+        Ok(())
     }
 
     /// The PR number `text` names — a bare number, `#number`, or a pasted URL.
@@ -1070,17 +1207,21 @@ impl App {
             .map(|pr| pr.number)
     }
 
-    /// What the ledger holds for this PR, if anything.
-    fn stored(&self, number: u64) -> Result<Option<Stored>> {
+    /// Why a PR that isn't on the queue isn't, as far as the ledger knows.
+    fn why_unqueued(&self, number: u64) -> Result<Unqueued> {
         for (repo_id, _) in self.ledger.repos()? {
-            if let Some(show) = self.ledger.show(repo_id, number)? {
-                return Ok(Some(Stored {
-                    tracked: show.tracked_reason.is_some(),
-                    state: show.pr.state,
-                }));
-            }
+            let Some(show) = self.ledger.show(repo_id, number)? else {
+                continue;
+            };
+            return Ok(if show.tracked_reason.is_none() {
+                Unqueued::Untracked
+            } else if !show.pr.state.is_open() {
+                Unqueued::Archived(show.pr.state)
+            } else {
+                Unqueued::Quiet
+            });
         }
-        Ok(None)
+        Ok(Unqueued::Unknown)
     }
 
     /// Snooze the PR for a duration in the CLI's syntax.
@@ -1213,6 +1354,32 @@ impl App {
             }
             Err(err) => self.status = Some(format!("#{number} could not be fetched: {err:#}")),
         }
+    }
+
+    /// Read `number` for display, and show it if it could be read.
+    fn show_anyway(&mut self, number: u64, hooks: &Hooks) {
+        let outcome = (hooks.peek)(number);
+        self.overlay = Overlay::None;
+        self.dirty = true;
+        match outcome {
+            Ok(peeked) => {
+                // The description is the point of looking, so the pane it scrolls
+                // in gets the keyboard and starts at the top.
+                self.focus = Focus::Detail;
+                self.detail_scroll = 0;
+                self.status = Some(format!("showing #{number} — Esc returns to the queue"));
+                self.peek = Some(peeked);
+            }
+            Err(err) => self.status = Some(format!("#{number} could not be shown: {err:#}")),
+        }
+    }
+
+    /// Put a peeked PR away, back to the queue as it was.
+    fn stop_peeking(&mut self) {
+        self.peek = None;
+        self.focus = Focus::Queue;
+        self.detail_scroll = 0;
+        self.status = None;
     }
 
     /// Hand `number` to the review command, then take the terminal back.
@@ -1824,8 +1991,10 @@ fn short(sha: &str) -> &str {
 mod loop_tests {
     use super::tests::{add_queued, app, fixture, pr_snapshot, seed, ts, two_queued};
     use super::*;
+    use anyhow::bail;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use reviewq_core::model::MyState;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -1860,8 +2029,32 @@ mod loop_tests {
         marked: Seen,
         reviewed: Seen,
         fetched: Seen,
+        peeked: Seen,
         opened: Seen,
         copied: Seen,
+    }
+
+    /// What the peek hook hands back: a PR that exists on the forge and nowhere
+    /// else, which is the case the real one has to fetch.
+    fn scratch_peek(number: u64) -> Peeked {
+        Peeked {
+            repo: RepoKey {
+                host: "github.com".into(),
+                owner: "apache".into(),
+                name: "airflow".into(),
+            },
+            show: PrShow {
+                pr: pr_snapshot(number),
+                body: Some("a description".into()),
+                tracked_reason: None,
+                after_merge: false,
+                my_state: MyState::default(),
+                threads: vec![],
+                reviewers: vec![],
+                attention: vec![],
+            },
+            scratch: true,
+        }
     }
 
     /// Hooks over `script`. `answer` is what a refresh reports back, if anything;
@@ -1876,6 +2069,7 @@ mod loop_tests {
             marked: Arc::new(Mutex::new(Vec::new())),
             reviewed: Arc::new(Mutex::new(Vec::new())),
             fetched: Arc::new(Mutex::new(Vec::new())),
+            peeked: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(Vec::new())),
             copied: Arc::new(Mutex::new(Vec::new())),
         };
@@ -1883,12 +2077,17 @@ mod loop_tests {
         let marked = Arc::clone(&recorded.marked);
         let reviewed = Arc::clone(&recorded.reviewed);
         let fetched = Arc::clone(&recorded.fetched);
+        let peeked = Arc::clone(&recorded.peeked);
         let opened = Arc::clone(&recorded.opened);
         let copied = Arc::clone(&recorded.copied);
         let hooks = Hooks {
             fetch: Box::new(move |number| {
                 fetched.lock().expect("lock").push(number);
                 Ok(())
+            }),
+            peek: Box::new(move |number| {
+                peeked.lock().expect("lock").push(number);
+                Ok(scratch_peek(number))
             }),
             next_event: scripted(script),
             refresh: Box::new(move |number, tx| {
@@ -2374,15 +2573,13 @@ mod loop_tests {
             ],
         );
 
-        match &app.overlay {
-            Overlay::JumpPrompt { input, error } => {
-                assert_eq!(input, "70201", "what was typed survives");
-                let error = error.clone().expect("a reason");
-                assert!(error.contains("wants nothing right now"), "{error}");
-                assert!(error.contains("muted"), "{error}");
+        assert_eq!(
+            app.overlay,
+            Overlay::Unqueued {
+                number: 70201,
+                why: Unqueued::Quiet
             }
-            other => panic!("should still be prompting, was {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -2415,13 +2612,19 @@ mod loop_tests {
             ],
         );
 
-        assert_eq!(app.overlay, Overlay::OfferFetch { number: 70999 });
+        assert_eq!(
+            app.overlay,
+            Overlay::Unqueued {
+                number: 70999,
+                why: Unqueued::Untracked
+            }
+        );
     }
 
     #[test]
     fn going_to_a_merged_pr_says_it_left_the_queue() {
-        // Tracked, so no offer helps: it is off the queue because it merged, and
-        // nothing about listing changes that.
+        // Tracking it again would change nothing — it is off the queue because it
+        // merged — so the only thing offered is to show it.
         let ledger = two_queued();
         let repo_id = ledger.repos().expect("repos")[0].0;
         let mut merged = pr_snapshot(70777);
@@ -2454,14 +2657,13 @@ mod loop_tests {
             ],
         );
 
-        match &app.overlay {
-            Overlay::JumpPrompt { error, .. } => {
-                let error = error.clone().expect("a reason");
-                assert!(error.contains("merged"), "{error}");
-                assert!(!error.contains("list --all"), "{error}");
+        assert_eq!(
+            app.overlay,
+            Overlay::Unqueued {
+                number: 70777,
+                why: Unqueued::Archived(PrState::Merged)
             }
-            other => panic!("should still be prompting, was {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -2477,7 +2679,13 @@ mod loop_tests {
             &[KeyCode::Char(':'), KeyCode::Char('9'), KeyCode::Enter],
         );
 
-        assert_eq!(app.overlay, Overlay::OfferFetch { number: 9 });
+        assert_eq!(
+            app.overlay,
+            Overlay::Unqueued {
+                number: 9,
+                why: Unqueued::Unknown
+            }
+        );
         assert!(
             recorded.fetched.lock().expect("lock").is_empty(),
             "asking is not fetching"
@@ -2519,7 +2727,7 @@ mod loop_tests {
                 KeyCode::Char(':'),
                 KeyCode::Char('9'),
                 KeyCode::Enter,
-                KeyCode::Char('y'),
+                KeyCode::Char('t'),
             ],
         );
 
@@ -2555,7 +2763,7 @@ mod loop_tests {
                 press('0'),
                 press('1'),
                 special(KeyCode::Enter),
-                press('y'),
+                press('t'),
                 press('q'),
             ]),
             fetch: Box::new(move |number| {
@@ -2564,6 +2772,7 @@ mod loop_tests {
                 add_queued(&other, repo_id, number);
                 Ok(())
             }),
+            peek: Box::new(|number| Ok(scratch_peek(number))),
             refresh: Box::new(|_, _| {}),
             mark_read: Box::new(|_| {}),
             review: Box::new(|_| Ok(())),
@@ -2581,6 +2790,97 @@ mod loop_tests {
         );
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70201 tracked"), "{status}");
+    }
+
+    /// Go to #9 — which nothing knows about — and take the offer to show it.
+    fn showing_nine(extra: &[Event]) -> (App, Recorded) {
+        let mut app = app();
+        let mut script = vec![press(':'), press('9'), special(KeyCode::Enter), press('s')];
+        script.extend_from_slice(extra);
+        script.push(press('q'));
+        let (hooks, recorded) = fake_hooks(script, None, false);
+        drive(&mut app, &hooks);
+        (app, recorded)
+    }
+
+    #[test]
+    fn showing_an_unqueued_pr_displays_it_without_tracking_it() {
+        // The whole point of the offer: reading a PR that is merged, closed or
+        // unknown must not mean committing to keep it.
+        let (app, recorded) = showing_nine(&[]);
+
+        assert_eq!(*recorded.peeked.lock().expect("lock"), vec![9]);
+        assert!(
+            recorded.fetched.lock().expect("lock").is_empty(),
+            "showing it is not tracking it"
+        );
+        let peek = app.peek.as_ref().expect("it is on show");
+        assert_eq!(peek.show.pr.number, 9);
+        assert_eq!(
+            app.focus,
+            Focus::Detail,
+            "the keys should scroll what you asked to read"
+        );
+        assert_eq!(
+            app.current().map(|item| item.item.pr.number),
+            Some(70135),
+            "and the queue's selection is where it was"
+        );
+    }
+
+    #[test]
+    fn escape_puts_a_shown_pr_away_rather_than_quitting() {
+        let (app, _) = showing_nine(&[special(KeyCode::Esc)]);
+
+        assert!(app.peek.is_none());
+        assert_eq!(app.focus, Focus::Queue);
+        assert!(app.status.is_none(), "and says nothing about it afterwards");
+    }
+
+    #[test]
+    fn a_key_that_writes_is_refused_while_a_pr_is_only_being_shown() {
+        // A shown PR may have no ledger row at all, so `done` has nothing to
+        // write to — and writing to the row *behind* the view would be worse.
+        let (app, _) = showing_nine(&[press('d')]);
+
+        assert_eq!(app.overlay, Overlay::None, "no confirmation was opened");
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("only being shown"), "{status}");
+        assert!(app.peek.is_some(), "and it is still on show");
+    }
+
+    #[test]
+    fn opening_a_shown_pr_opens_that_one_and_not_the_selected_row() {
+        let (_, recorded) = showing_nine(&[press('o')]);
+
+        assert_eq!(*recorded.opened.lock().expect("lock"), vec![9]);
+    }
+
+    #[test]
+    fn a_pr_that_cannot_be_read_says_so_and_leaves_the_queue_alone() {
+        let mut app = app();
+        let (hooks, _) = fake_hooks(
+            vec![
+                press(':'),
+                press('9'),
+                special(KeyCode::Enter),
+                press('s'),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+        let hooks = Hooks {
+            peek: Box::new(|_| bail!("no such pull request")),
+            ..hooks
+        };
+
+        drive(&mut app, &hooks);
+
+        assert!(app.peek.is_none());
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("could not be shown"), "{status}");
+        assert!(!app.queue.is_empty(), "the queue survives");
     }
 
     #[test]

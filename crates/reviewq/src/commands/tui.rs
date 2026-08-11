@@ -61,6 +61,7 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
 fn live_hooks(config: Arc<Config>) -> Hooks {
     let for_refresh = Arc::clone(&config);
     let for_fetch = Arc::clone(&config);
+    let for_peek = Arc::clone(&config);
     let for_review = Arc::clone(&config);
     let for_mark_read = Arc::clone(&config);
     let for_open = Arc::clone(&config);
@@ -95,6 +96,9 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             Handle::current()
                 .block_on(reviewq_app::sync::track_one(&for_fetch, None, number))
                 .map(|_| ())
+        }),
+        peek: Box::new(move |number| {
+            Handle::current().block_on(reviewq_app::peek::peek_one(&for_peek, number))
         }),
         open_url: Box::new(move |repo, number| {
             let url = pr_url(&for_open, repo, number)?;

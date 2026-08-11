@@ -200,13 +200,24 @@ fn queue_row(item: &Located<QueueItem>, selected: bool, multi: bool, t: &Theme) 
 /// caller can bound scrolling — and the area it drew them in.
 fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     let t = &app.theme;
-    let title = match app.current() {
-        Some(item) => number_label(app.repo_count > 1, &item.repo, item.item.pr.number),
-        None => "Detail".to_string(),
+    // A peeked PR is what the pane is for while there is one, and its title says
+    // so: it is not the highlighted queue row, and the two must not be confusable.
+    let title = match (&app.peek, app.current()) {
+        (Some(peek), _) => format!(
+            "{} · showing",
+            number_label(true, &peek.repo, peek.show.pr.number)
+        ),
+        (None, Some(item)) => number_label(app.repo_count > 1, &item.repo, item.item.pr.number),
+        (None, None) => "Detail".to_string(),
     };
     let inner = panel(frame, area, &title, app.focus == Focus::Detail, t);
 
-    let Some(show) = &app.detail else {
+    let Some(show) = app
+        .peek
+        .as_ref()
+        .map(|peek| &peek.show)
+        .or(app.detail.as_ref())
+    else {
         frame.render_widget(
             Paragraph::new("Select a PR to see its detail.")
                 .style(Style::default().fg(color(t.dim))),
@@ -264,6 +275,15 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         lines.push(Line::from(Span::styled(
             "draft",
             Style::default().fg(color(t.warn)),
+        )));
+    }
+
+    // Said outright, because everything else in the pane looks exactly like a
+    // stored PR: this one was fetched to be read and is not in the ledger.
+    if app.peek.as_ref().is_some_and(|peek| peek.scratch) {
+        lines.push(Line::from(Span::styled(
+            "fetched for this look only — nothing stored",
+            Style::default().fg(color(t.quiet)),
         )));
     }
 
@@ -428,6 +448,23 @@ fn section(name: &str, t: &Theme) -> Line<'static> {
 
 fn footer(frame: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
+    // While a PR is being shown the usual row would advertise keys that are
+    // deliberately refused, so the footer lists what actually works instead.
+    if app.peek.is_some() {
+        frame.render_widget(
+            Paragraph::new(keyed_hint(
+                &[
+                    ("Esc", "back to the queue"),
+                    ("jk", "scroll"),
+                    ("o", "open"),
+                    ("c / y", "copy URL"),
+                ],
+                t,
+            )),
+            area,
+        );
+        return;
+    }
     let mut spans = Vec::new();
     for binding in keys::described().filter(|b| b.footer) {
         if !spans.is_empty() {
@@ -493,34 +530,47 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
             ))],
             t,
         ),
-        Overlay::OfferFetch { number } => modal(
-            frame,
-            area,
-            &format!(" #{number} "),
-            vec![
+        Overlay::Unqueued { number, why } => {
+            let mut lines = vec![
                 Line::from(Span::styled(
-                    "Not tracked. Track it now?",
+                    why.reason(),
                     Style::default().fg(color(t.text)),
                 )),
                 Line::from(""),
-                // Deliberately not "not in your ledger": most of these *are*
-                // stored, swept and left untracked because no rule matched, and
-                // tracking one of those needs no forge at all.
                 Line::from(Span::styled(
-                    "Fetched first if the ledger has never seen it, as `reviewq track` would.",
+                    "Showing it changes nothing and stores nothing.",
                     Style::default().fg(color(t.dim)),
                 )),
-                Line::from(""),
-                keyed_hint(&[("y / ⏎", "track"), ("any other key", "cancel")], t),
-            ],
-            t,
-        ),
+            ];
+            let mut hints = vec![("s / ⏎", "show it")];
+            if why.trackable() {
+                lines.push(Line::from(Span::styled(
+                    "Tracking it puts it on the queue, fetching it first if need be.",
+                    Style::default().fg(color(t.dim)),
+                )));
+                hints.push(("t", "track it"));
+            }
+            hints.push(("any other key", "cancel"));
+            lines.push(Line::from(""));
+            lines.push(keyed_hint(&hints, t));
+            modal(frame, area, &format!(" #{number} "), lines, t)
+        }
         Overlay::Fetching { number } => modal(
             frame,
             area,
             &format!(" #{number} "),
             vec![Line::from(Span::styled(
                 "Fetching from the forge…",
+                Style::default().fg(color(t.text)),
+            ))],
+            t,
+        ),
+        Overlay::Peeking { number } => modal(
+            frame,
+            area,
+            &format!(" #{number} "),
+            vec![Line::from(Span::styled(
+                "Reading it…",
                 Style::default().fg(color(t.text)),
             ))],
             t,
@@ -1142,6 +1192,38 @@ sensor = S3KeySensor(deferrable=True)
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         insta::assert_snapshot!(screen(&mut app, 80, 12));
+    }
+
+    #[test]
+    fn a_shown_pr_takes_over_the_detail_pane_and_says_it_is_not_stored() {
+        // The pane otherwise looks exactly like a queued PR's, and the two must
+        // not be confusable: this one is a look at the forge, nothing more.
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.peek = Some(reviewq_app::peek::Peeked {
+            repo: repo(),
+            show: reviewq_ledger::PrShow {
+                pr: pr(70777, "A merged change"),
+                body: Some("what it did".into()),
+                tracked_reason: None,
+                after_merge: false,
+                my_state: MyState::default(),
+                threads: vec![],
+                reviewers: vec![],
+                attention: vec![],
+            },
+            scratch: true,
+        });
+        app.focus = Focus::Detail;
+
+        let shown = screen(&mut app, 100, 24);
+
+        assert!(shown.contains("A merged change"), "{shown}");
+        assert!(shown.contains("showing"), "{shown}");
+        assert!(shown.contains("nothing stored"), "{shown}");
+        assert!(
+            shown.contains("back to the queue"),
+            "the footer offers the way out: {shown}"
+        );
     }
 
     #[test]
