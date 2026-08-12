@@ -78,25 +78,49 @@ A mute is not one of these: it is a statement about what you want shown rather
 than about the PR, so the reasons stay computed while it hides them — see
 [the interface](#the-interface).
 
-### Saying you are finished with one
+### Which verb, and when
 
-Five verbs, and the difference between them is how long you mean it for.
+Two families. Most of them **suppress** — they hide a row, and differ only in
+what brings it back. `done` **acknowledges**: it hides nothing and moves your
+watermark, saying you have accounted for the PR as it stands. It is still yours,
+still watched, still there in the waiting list; it just stops being new to you
+until it moves.
 
-| | Means | Comes back |
-|---|---|---|
-| `done` | handled at *this head* | when the head moves, or somebody replies |
-| `defer` | not before the rest of these | as soon as anything new happens |
-| `snooze` | not for a while | when the duration lapses, reasons intact |
-| `mute` | not until I say | `unmute`, and it is listed under `M` meanwhile |
-| `untrack` | I am finished with it | `track`, and nothing else — not even a rule |
+| You want to say | Verb |
+|---|---|
+| I am up to date with this PR | `done` |
+| I am waiting on them | *nothing* — that is where a PR goes by itself |
+| Not now, ask me later | `snooze <dur>` |
+| This matters less than the rest | `defer` |
+| Stop showing me this | `mute` |
+| I am not reviewing this, ever | `untrack` |
 
-`done` is the one that gets mistaken for the last: it says the current head is
-dealt with, which leaves the PR *waiting on somebody else* rather than gone, and
-that is where it will sit until they push. `untrack` is what says you want no
-more of it — it drops the reason the PR was watched at all, so it leaves the
-queue, the waiting list and the muted list together, and a rule that still
-matches may not quietly take it back. A closed or merged PR needs none of them:
-it leaves by itself once a sync or a refresh (`r`) learns what happened to it.
+**`done` — I have accounted for this PR as it stands.** The forge already knows
+what you did in public: your comments, your reviews, your resolutions. It cannot
+know that you read a mention and had nothing to add, checked somebody's fix and
+were satisfied, or skimmed a PR a rule surfaced and decided it was not yours.
+`done` is how you record a decision that left no trace. Anything new on the PR
+brings it back.
+
+Which is why you will not reach for it often — you review on the forge, and the
+forge tells reviewq for you. It is for the times you looked and did nothing:
+
+- Someone @mentioned you and no answer is needed.
+- Someone replied *"fixed"* in a thread of yours and you have verified it.
+- New commits landed; you have looked and do not need to re-review.
+- A rule surfaced a PR; you skimmed it and it is not yours.
+- Someone resolved your thread without answering; you checked the fix.
+
+`done` is not "I am not interested" — that is `mute` for now, or `untrack` for
+good, and only `untrack` drops the reason the PR was watched at all, so that
+neither the queue nor the waiting list nor a rule that still matches will bring
+it back. A closed or merged PR needs none of them: it leaves by itself once a
+sync or a refresh (`r`) learns what happened to it.
+
+One case none of these covers: a review somebody asked you for and you do not
+intend to give. "Up to date" is untrue, and hiding it says nothing to the person
+waiting — so take yourself off the reviewer list on the forge, and reviewq will
+stop asking at the next sync.
 
 ## Commands
 
@@ -106,7 +130,7 @@ it leaves by itself once a sync or a refresh (`r`) learns what happened to it.
 | `list [--all\|--waiting\|--muted] [--json]` | The queue, everything tracked, what waits on someone else, or what you have silenced — each row with the mark and any live snooze |
 | `next [--json]` | Just the most urgent one |
 | `show <N\|url> [--json]` | Everything known about one PR and why it is on the queue |
-| `done <N>` | Record the current head as handled, and mark its notifications read |
+| `done <N>` | Say you have accounted for the PR as it stands, and mark its notifications read |
 | `snooze <N> <dur>` / `mute` / `unmute` | Suppress a PR for a while, or until told otherwise |
 | `defer <N>` / `undefer` | Sink it to the bottom without hiding it |
 | `track <N\|url>` | Track a PR a rule didn't match, fetching it if the ledger has never seen it |
