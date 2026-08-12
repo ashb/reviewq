@@ -2468,7 +2468,7 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "reviewq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "reviewq-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "reviewq-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "globset",
  "insta",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "reviewq-forge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "jiff",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "reviewq-ledger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "reviewq-core",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "reviewq-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossterm",
