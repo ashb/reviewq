@@ -62,6 +62,21 @@ impl Handoff {
     }
 }
 
+/// The program that opens a URL in whatever the desktop uses for one.
+///
+/// Every platform spells its own differently and none of them is worth a
+/// dependency: this is one argument and one process. It is the default
+/// [`Handoff`](crate::config::Handoff) as well as what the interface's `o` key
+/// runs, which is why it lives here rather than in a frontend.
+#[cfg(target_os = "macos")]
+pub const URL_OPENER: &str = "open";
+/// The program that opens a URL, on Windows.
+#[cfg(target_os = "windows")]
+pub const URL_OPENER: &str = "explorer";
+/// The program that opens a URL, everywhere else.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const URL_OPENER: &str = "xdg-open";
+
 /// Work out how to hand `number` off.
 ///
 /// This is where a handoff's requirements are actually enforced, rather than at

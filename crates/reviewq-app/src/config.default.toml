@@ -113,7 +113,11 @@ logins = ["boring-cyborg[bot]", "github-actions[bot]", "codecov[bot]"]
 # URL) are substituted in every element. Prefer "{url}" where the tool
 # supports it — a bare number only works run from inside a checkout of the
 # right repo, since that's the only way to infer which one.
-review_command = ["wiff", "forge", "pull", "{url}"]
+#
+# The default opens the PR in a browser, which needs nothing installed and no
+# checkout. Point it at a review tool to review in the terminal instead:
+#   review_command = ["wiff", "forge", "pull", "{url}"]
+review_command = ["open", "{url}"]
 
 [sync]
 # How far back the first-ever sync reaches.

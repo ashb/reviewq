@@ -18,6 +18,7 @@ use crossterm::event;
 use crossterm::execute;
 use jiff::Timestamp;
 use reviewq_app::config::{Config, Loaded, ThemeMode};
+use reviewq_app::review::URL_OPENER;
 use reviewq_app::sync::RepoSummary;
 use reviewq_ledger::RepoKey;
 use reviewq_tui::{Hooks, Message};
@@ -29,17 +30,6 @@ use tokio::runtime::Handle;
 /// Short enough that a refresh landing feels immediate, long enough that an idle
 /// interface is not busy.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// The program that opens a URL in whatever the desktop uses for one.
-///
-/// Every platform spells its own differently and none of them is worth a
-/// dependency: this is one argument and one process.
-#[cfg(target_os = "macos")]
-const URL_OPENER: &str = "open";
-#[cfg(target_os = "windows")]
-const URL_OPENER: &str = "explorer";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const URL_OPENER: &str = "xdg-open";
 
 pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
     let theme = reviewq_tui::Theme::new(match loaded.config.output.theme {

@@ -342,15 +342,18 @@ a thread you own, is noise rather than someone waiting on you.
 
 ```toml
 [handoff]
-review_command = ["wiff", "forge", "pull", "{url}"]
+review_command = ["open", "{url}"]          # `xdg-open` off macOS
+# review_command = ["wiff", "forge", "pull", "{url}"]
 ```
 
 `reviewq review N` (and `⏎` in the interface) execs this with `{number}` and
 `{url}` substituted in every element, in the repo's checkout, with the host's
 token forwarded in its environment so the tool need not resolve one of its own.
-reviewq reviews nothing itself. Prefer `{url}` where the tool supports it — a bare
-number only resolves from inside a checkout of the right repo, since that is the
-only way to know which one you meant.
+reviewq reviews nothing itself, and by default hands the PR to a browser —
+nothing to install, and no checkout needed. Point it at a review tool to review
+in the terminal instead. Prefer `{url}` where the tool supports it: a bare number
+only resolves from inside a checkout of the right repo, since that is the only
+way to know which one you meant.
 
 ### Several repos, and a host of your own
 

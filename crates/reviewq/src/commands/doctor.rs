@@ -42,7 +42,10 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
 
     for repo in loaded.config.repos() {
         row("repo", &repo.slug());
-        row("  checkout", &checkout_note(repo, &mut problems));
+        row(
+            "  checkout",
+            &checkout_note(repo, &loaded.config.handoff, &mut problems),
+        );
 
         row(
             "  last sync",
@@ -301,14 +304,20 @@ fn handoff_note(config: &config::Config, problems: &mut u32) -> String {
 /// reported here, because the alternative is finding out from the review tool
 /// after you have written the review. wiff, for one, will not publish a review it
 /// mirrored by URL from outside the repository it belongs to.
-fn checkout_note(repo: &config::RepoRef, problems: &mut u32) -> String {
-    match &repo.path {
-        Some(path) if path.is_dir() => path.display().to_string(),
-        Some(path) => {
+///
+/// Unless the handoff is the default, which opens the PR in a browser and has
+/// no use for a checkout. Counting that as a problem would put a clean bill of
+/// health out of reach of anybody who had not configured their way back to it.
+fn checkout_note(repo: &config::RepoRef, handoff: &config::Handoff, problems: &mut u32) -> String {
+    let wanted = handoff.review_command != config::Handoff::default().review_command;
+    match (&repo.path, wanted) {
+        (Some(path), _) if path.is_dir() => path.display().to_string(),
+        (Some(path), _) => {
             *problems += 1;
             warn(&format!("{} is not a directory", path.display()))
         }
-        None => {
+        (None, false) => "none — the handoff opens the PR in a browser".to_string(),
+        (None, true) => {
             *problems += 1;
             warn(
                 "none — set `path` to the local checkout, or a review cannot be \
@@ -337,6 +346,17 @@ fn warn(text: &str) -> String {
 mod tests {
     use super::*;
     use reviewq_ledger::Ledger;
+
+    /// A handoff that hands off to a review tool, which is what makes a
+    /// checkout worth having.
+    fn reviewing() -> config::Handoff {
+        config::Handoff {
+            review_command: ["wiff", "forge", "pull", "{url}"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
 
     fn config_with(review_command: &[&str]) -> config::Config {
         let mut config: config::Config =
@@ -552,13 +572,31 @@ mod tests {
         };
         let mut problems = 0;
 
-        let note = checkout_note(&repo, &mut problems);
+        let note = checkout_note(&repo, &reviewing(), &mut problems);
 
         assert!(note.contains("set `path`"), "{note}");
         assert_eq!(
             problems, 1,
             "it should count against a clean bill of health"
         );
+    }
+
+    #[test]
+    fn no_checkout_is_no_problem_when_the_handoff_is_the_browser() {
+        // The default hands the PR to a browser, which has no use for a working
+        // tree — so a fresh install can reach a clean bill of health.
+        let repo = config::RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: None,
+        };
+        let mut problems = 0;
+
+        let note = checkout_note(&repo, &config::Handoff::default(), &mut problems);
+
+        assert!(note.contains("browser"), "{note}");
+        assert_eq!(problems, 0);
     }
 
     #[test]
@@ -573,7 +611,7 @@ mod tests {
         let mut problems = 0;
 
         assert_eq!(
-            checkout_note(&repo, &mut problems),
+            checkout_note(&repo, &reviewing(), &mut problems),
             dir.path().display().to_string()
         );
         assert_eq!(problems, 0);
@@ -589,7 +627,7 @@ mod tests {
         };
         let mut problems = 0;
 
-        let note = checkout_note(&repo, &mut problems);
+        let note = checkout_note(&repo, &reviewing(), &mut problems);
 
         assert!(note.contains("not a directory"), "{note}");
         assert_eq!(problems, 1);

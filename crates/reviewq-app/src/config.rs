@@ -400,11 +400,18 @@ impl Default for Bots {
 }
 
 impl Default for Handoff {
+    /// Open the PR in a browser.
+    ///
+    /// Not a review tool: reviewq reviews nothing itself, and a default naming
+    /// somebody's own would be a command most people do not have — a queue
+    /// whose `⏎` fails until it is configured. Opening the page is the one
+    /// answer that works on a fresh install, and anybody with a review tool
+    /// says so in four words of config.
     fn default() -> Self {
         Self {
-            review_command: ["wiff", "forge", "pull", "{url}"]
+            review_command: [crate::review::URL_OPENER, "{url}"]
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| (*s).to_string())
                 .collect(),
         }
     }
@@ -815,7 +822,11 @@ mod tests {
         config.validate(Path::new("cfg")).expect("validates");
 
         assert_eq!(config.sync.bootstrap_days, 14);
-        assert_eq!(config.handoff.review_command[0], "wiff");
+        assert_eq!(
+            config.handoff.review_command,
+            [crate::review::URL_OPENER, "{url}"],
+            "a fresh install opens the PR in a browser"
+        );
         assert!(config.bots.logins.contains(&"codecov[bot]".to_string()));
         assert!(config.output.underline_links);
 
