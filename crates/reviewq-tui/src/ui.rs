@@ -15,7 +15,7 @@ use ratatui::widgets::{
 use reviewq_app::config::Marks;
 use reviewq_app::present::{self, Handled, Mark};
 use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
-use reviewq_ledger::{Located, RepoKey};
+use reviewq_ledger::{AttentionRow, Located, RepoKey};
 
 use crate::app::{App, Focus, Listing, Overlay, Row, SNOOZE_PRESETS};
 use crate::keys::{self, Action};
@@ -239,17 +239,14 @@ fn queue_row(
     if selected {
         style = style.add_modifier(Modifier::BOLD);
     }
-    // Deferred and silenced PRs are still listed, so they need to read as
-    // set-aside rather than simply less urgent.
-    // A row with no reason at the top of its pile says why it is watched at all
-    // instead — quietly, since it is here to be seen rather than acted on.
-    let reason_colour = if q.deferred || q.top.is_none() {
-        t.quiet
-    } else if q.priority() <= 2 {
-        t.urgent
-    } else {
-        t.focus
-    };
+    // Which rows shout is `present`'s call, shared with `reviewq list`; what
+    // that looks like is this palette's.
+    let reason_colour =
+        match present::emphasis(q.top.as_ref().map(AttentionRow::priority), q.deferred) {
+            present::Emphasis::Urgent => t.urgent,
+            present::Emphasis::Normal => t.focus,
+            present::Emphasis::Quiet => t.quiet,
+        };
 
     let reason = q.top_text();
     let mut spans = vec![
@@ -391,6 +388,17 @@ fn my_standing(pr: &PrSnapshot, my: &MyState, t: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
+/// `icon value`, or the value alone when the icon is configured away — the same
+/// rule the CLI's `show` follows, so a glyph nobody's font can draw costs
+/// nothing but the glyph in either frontend.
+fn labelled(icon: &str, value: &str) -> String {
+    if icon.is_empty() {
+        value.to_string()
+    } else {
+        format!("{icon} {value}")
+    }
+}
+
 /// Draw the detail pane, returning how many lines its content came to — so the
 /// caller can bound scrolling — and the area it drew them in.
 fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
@@ -448,18 +456,28 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
             ),
         ]),
         Line::from(vec![
+            // Opened, where the row knows it — a row stored before the date was
+            // captured has none until the next sweep, and this pane says nothing
+            // rather than guessing at one.
+            Span::styled(
+                match pr.created_at {
+                    Some(created) => format!("opened {} · ", present::day(created)),
+                    None => String::new(),
+                },
+                Style::default().fg(color(t.dim)),
+            ),
             Span::styled(
                 format!("updated {}", present::stamp(pr.updated_at)),
                 Style::default().fg(color(t.dim)),
             ),
             // Which branch the change is aimed at, where it is known — a row
-            // stored before it was captured has it empty until the next sync, and
-            // an arrow pointing at nothing would read as a bug.
+            // stored before it was captured has it empty until the next sync,
+            // and an icon labelling nothing would read as a bug.
             Span::styled(
                 if pr.base_ref.is_empty() {
                     String::new()
                 } else {
-                    format!(" · → {}", pr.base_ref)
+                    format!(" · {}", labelled(&app.icons().branch, &pr.base_ref))
                 },
                 Style::default().fg(color(t.dim)),
             ),
@@ -541,7 +559,13 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
             ),
             Span::styled(
                 a.reason.to_string(),
-                Style::default().fg(color(if a.priority() <= 2 { t.urgent } else { t.focus })),
+                // The same call the rows make, so this pane cannot come to
+                // disagree with the list it is beside about what is urgent.
+                Style::default().fg(color(match present::emphasis(Some(a.priority()), false) {
+                    present::Emphasis::Urgent => t.urgent,
+                    present::Emphasis::Normal => t.focus,
+                    present::Emphasis::Quiet => t.quiet,
+                })),
             ),
         ]));
     }
@@ -1234,6 +1258,7 @@ mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-10T09:00:00Z"),
+            created_at: Some(ts("2026-07-30T14:20:00Z")),
             labels: vec!["area:async".into()],
             milestone: None,
             files: None,
@@ -1547,6 +1572,78 @@ sensor = S3KeySensor(deferrable=True)
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
 
         insta::assert_snapshot!(screen(&mut app, 100, 22));
+    }
+
+    #[test]
+    fn the_detail_pane_says_when_the_pr_was_opened_as_well_as_last_touched() {
+        // Two dates that answer different questions: how long the author has
+        // been waiting, and whether anything has happened lately.
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+        queue_only(&ledger, repo_id, &pr(70135, "Add deferrable mode"));
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let shown = screen(&mut app, 100, 22);
+
+        assert!(shown.contains("opened 2026-07-30"), "{shown}");
+        assert!(shown.contains("updated 2026-08-10"), "{shown}");
+    }
+
+    #[test]
+    fn the_detail_pane_says_nothing_about_an_opening_date_it_has_not_synced_yet() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+        let mut unknown = pr(70135, "Stored before the date was captured");
+        unknown.created_at = None;
+        queue_only(&ledger, repo_id, &unknown);
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        let shown = screen(&mut app, 100, 22);
+
+        assert!(
+            !shown.contains("opened"),
+            "no date, so nothing said: {shown}"
+        );
+        assert!(shown.contains("updated 2026-08-10"), "{shown}");
+    }
+
+    #[test]
+    fn the_branch_carries_the_configured_icon() {
+        // An app over one backported PR, drawn with whatever config it is given.
+        fn drawn(config: crate::app::HeldConfig) -> String {
+            let ledger = Ledger::open_in_memory().expect("ledger");
+            let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+            let mut backport = pr(70135, "Fix the thing on 3.1");
+            backport.base_ref = "v3-1-test".into();
+            queue_only(&ledger, repo_id, &backport);
+            let mut app = App::with_ledger(Theme::default(), ledger, config).expect("app");
+            screen(&mut app, 100, 22)
+        }
+
+        // The default is a Nerd Font codepoint, which the terminal buffer holds
+        // as the character whether or not a font could draw it.
+        let shown = drawn(test_config());
+        assert!(shown.contains("\u{f419} v3-1-test"), "{shown}");
+
+        // A terminal without the font says so in config, down to dropping the
+        // glyph and keeping the branch it labelled.
+        let plain = drawn(std::sync::Arc::new(
+            toml::from_str(
+                r#"
+                [identity]
+                login = "ashb"
+                [[project]]
+                repos = [{ owner = "apache", name = "airflow" }]
+                [[project.interest]]
+                labels = ["area:async"]
+                [output.icons]
+                branch = ""
+                "#,
+            )
+            .expect("config parses"),
+        ));
+        assert!(!plain.contains('\u{f419}'), "{plain}");
+        assert!(plain.contains("v3-1-test"), "the branch stays: {plain}");
     }
 
     #[test]

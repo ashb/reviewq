@@ -615,7 +615,7 @@ impl Ledger {
             r"
             SELECT number, title, author, author_association, head_sha, is_draft,
                    state, updated_at, labels, milestone, files, files_truncated,
-                   base_ref, tracked_reason, after_merge,
+                   base_ref, created_at, tracked_reason, after_merge,
                    last_reviewed_sha, last_verdict, last_action_at, done_sha,
                    snoozed_until, muted, deferred_at, done_at
             FROM prs
@@ -1135,9 +1135,9 @@ impl Ledger {
         let rows = stmt
             .query_map(params![repo_id, muted], |row| {
                 let pr = snapshot_from_row(row, 0)?;
-                let tracked_reason: String = row.get(13)?;
-                let attention = attention_from_row(row, 14)?;
-                let my_state = my_state_from_row(row, 16)?;
+                let tracked_reason: String = row.get(14)?;
+                let attention = attention_from_row(row, 15)?;
+                let my_state = my_state_from_row(row, 17)?;
                 Ok((pr, tracked_reason, attention, my_state))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1284,9 +1284,9 @@ impl Ledger {
                 |row| {
                     Ok((
                         snapshot_from_row(row, 0)?,
-                        row.get::<_, Option<String>>(13)?,
                         row.get::<_, Option<String>>(14)?,
-                        row.get::<_, i64>(15)? != 0,
+                        row.get::<_, Option<String>>(15)?,
+                        row.get::<_, i64>(16)? != 0,
                     ))
                 },
             )
@@ -1407,8 +1407,8 @@ fn upsert_row(
         INSERT INTO prs (
           repo_id, number, title, author, author_association, head_sha, is_draft,
           state, updated_at, labels, milestone, files, files_truncated,
-          tracked_reason, first_seen_at, base_ref, after_merge
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+          tracked_reason, first_seen_at, base_ref, after_merge, created_at
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
         ON CONFLICT(repo_id, number) DO UPDATE SET
           title=excluded.title,
           author=excluded.author,
@@ -1423,7 +1423,11 @@ fn upsert_row(
           files_truncated=excluded.files_truncated,
           tracked_reason=excluded.tracked_reason,
           base_ref=excluded.base_ref,
-          after_merge=excluded.after_merge
+          after_merge=excluded.after_merge,
+          -- Never back to unknown: a snapshot from a caller that has no opening
+          -- date (a fixture, or a response captured before the query asked for
+          -- it) must not erase one an earlier sweep learnt.
+          created_at=COALESCE(excluded.created_at, prs.created_at)
         ",
         params![
             repo_id,
@@ -1443,6 +1447,7 @@ fn upsert_row(
             now.to_string(),
             pr.base_ref,
             merged.after_merge as i64,
+            pr.created_at.map(|at| at.to_string()),
         ],
     )
     .doing(format!("upserting PR #{}", pr.number))?;
@@ -1562,7 +1567,7 @@ fn stored_rank(reason: &str) -> u8 {
 /// reconstructs a [`PrSnapshot`], so column order and reader cannot drift.
 const PR_COLUMNS: &str = "p.number, p.title, p.author, p.author_association, \
      p.head_sha, p.is_draft, p.state, p.updated_at, p.labels, p.milestone, \
-     p.files, p.files_truncated, p.base_ref";
+     p.files, p.files_truncated, p.base_ref, p.created_at";
 
 /// The `my_state` columns, `ms.`-qualified and in the order
 /// [`my_state_from_row`] reads them — the same single-source arrangement as
@@ -1616,15 +1621,19 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<P
         files,
         files_truncated: row.get::<_, i64>(base + 11)? != 0,
         base_ref: row.get(base + 12)?,
+        created_at: row
+            .get::<_, Option<String>>(base + 13)?
+            .map(|at| parse_ts(&at))
+            .transpose()?,
     })
 }
 
 fn row_to_tracked(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedPr> {
     Ok(TrackedPr {
         pr: snapshot_from_row(row, 0)?,
-        tracked_reason: row.get(13)?,
-        after_merge: row.get::<_, i64>(14)? != 0,
-        my_state: my_state_from_row(row, 15)?,
+        tracked_reason: row.get(14)?,
+        after_merge: row.get::<_, i64>(15)? != 0,
+        my_state: my_state_from_row(row, 16)?,
     })
 }
 
@@ -1849,6 +1858,7 @@ mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),
+            created_at: None,
             labels: vec!["area:task-sdk".into()],
             milestone: Some("3.2.0".into()),
             files: None,
@@ -2126,6 +2136,101 @@ mod tests {
             ledger.queue(repo_id).unwrap()[0].pr.base_ref,
             "v3-1-test",
             "and through the queue, whose row carries attention columns after it"
+        );
+    }
+
+    /// The same hazard as the target branch, and the same shape of test: one
+    /// column list, one positional reader, so an index off by one shows up in
+    /// some reads and not others.
+    #[test]
+    fn when_a_pr_was_opened_reads_back_from_every_snapshot_query() {
+        let (ledger, repo_id) = ledger_with_repo();
+        let opened: Timestamp = "2026-05-04T08:30:00Z".parse().unwrap();
+        let mut old = pr(1);
+        old.created_at = Some(opened);
+        track(&ledger, repo_id, &old);
+
+        assert_eq!(
+            ledger.list_tracked(repo_id).unwrap()[0].pr.created_at,
+            Some(opened)
+        );
+        assert_eq!(
+            ledger.waiting(repo_id).unwrap()[0].pr.created_at,
+            Some(opened),
+            "waiting: tracked, open, no attention"
+        );
+        assert_eq!(
+            ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
+            Some(opened)
+        );
+        assert_eq!(
+            ledger.prs_needing_detail(repo_id, false).unwrap()[0]
+                .pr
+                .created_at,
+            Some(opened)
+        );
+
+        ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[attn(
+                    AttentionReason::Mention { by: "kaxil".into() },
+                    "2026-08-05T11:00:00Z",
+                )],
+                None,
+                now(),
+            )
+            .unwrap()
+            .expect_applied();
+        assert_eq!(
+            ledger.queue(repo_id).unwrap()[0].pr.created_at,
+            Some(opened),
+            "and through the queue, whose row carries attention columns after it"
+        );
+    }
+
+    #[test]
+    fn a_later_write_without_an_opening_date_keeps_the_one_already_stored() {
+        // A PR is opened once. Anything writing a snapshot that doesn't know
+        // when — an older capture, a caller that built one by hand — must not
+        // be able to erase what a sweep learnt.
+        let (ledger, repo_id) = ledger_with_repo();
+        let opened: Timestamp = "2026-05-04T08:30:00Z".parse().unwrap();
+        let mut swept = pr(1);
+        swept.created_at = Some(opened);
+        ledger.upsert_pr(repo_id, &swept, None, now()).unwrap();
+
+        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+
+        assert_eq!(
+            ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
+            Some(opened)
+        );
+    }
+
+    /// A ledger written before the opening date was captured must still open,
+    /// with its rows saying "unknown" rather than a date nobody stored.
+    #[test]
+    fn an_existing_row_has_no_opening_date_until_a_sweep_learns_one() {
+        let (ledger, repo_id) = ledger_with_repo();
+        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+
+        assert_eq!(
+            ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
+            None,
+            "unknown, not the epoch and not first_seen_at"
+        );
+
+        let mut swept = pr(1);
+        swept.created_at = Some("2026-05-04T08:30:00Z".parse().unwrap());
+        ledger.upsert_pr(repo_id, &swept, None, now()).unwrap();
+        assert_eq!(
+            ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
+            swept.created_at
         );
     }
 

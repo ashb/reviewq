@@ -193,6 +193,7 @@ mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-11T09:00:00Z"),
+            created_at: None,
             labels: vec![],
             milestone: None,
             files: None,

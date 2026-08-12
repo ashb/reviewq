@@ -18,7 +18,9 @@ asked to see — as chips, in the colours the repo paints them, which `reviewq s
 review you submitted on the forge, `·` a `done` of your own — dimmed once the PR
 has moved past the head that mark names — and `󰒲` for one you deferred. The
 pictures on this page are generated from a fixture by the interface itself, so
-they cannot drift from what it draws.
+they cannot drift from what it draws. `reviewq list` marks its rows with the same
+glyphs, from the same `[output.marks]`, and tags a PR whose snooze is still
+running — so a row at the bottom of either says why it is down there.
 
 ## Getting started
 
@@ -57,8 +59,13 @@ reproduces a queue exactly.
 | 6 | `needs_first_look` | *matches label area:task-sdk* | anything at all — it only ever fires once |
 
 Reasons 1–3 come from what people said, 4–5 from what the forge asked of you, and
-6 from your own interest rules. A reason answers a question the forge cannot: not
-*did something happen*, but *has something happened since I last looked*.
+6 from your own interest rules. Bands 1 and 2 — where a person is waiting on a
+reply from you — are coloured apart from the rest in both `list` and the
+interface, and a deferred row is quieted in both; which rows shout is one
+decision, though each paints it in its own palette.
+
+A reason answers a question the forge cannot: not *did something happen*, but
+*has something happened since I last looked*.
 
 Some states silence a PR before any of that is computed. A snooze suppresses
 everything until it lapses, mentions included, and consumes nothing — the same
@@ -96,7 +103,7 @@ it leaves by itself once a sync or a refresh (`r`) learns what happened to it.
 | | |
 |---|---|
 | `sync [N] [--labels]` | Fetch from the forge and rebuild the ledger, refresh one PR, or bring in each repo's label palette |
-| `list [--all\|--waiting\|--muted] [--json]` | The queue, everything tracked, what waits on someone else, or what you have silenced |
+| `list [--all\|--waiting\|--muted] [--json]` | The queue, everything tracked, what waits on someone else, or what you have silenced — each row with the mark and any live snooze |
 | `next [--json]` | Just the most urgent one |
 | `show <N\|url> [--json]` | Everything known about one PR and why it is on the queue |
 | `done <N>` | Record the current head as handled, and mark its notifications read |
@@ -134,6 +141,15 @@ review command, and `r` refetches just that PR. `S` sweeps every configured repo
 readable while it runs and takes up what the sweep committed once it lands.
 
 ![Snoozing the selected PR](docs/imgs/snooze.svg)
+
+The branch a PR targets is drawn behind a  icon; `[output.icons] branch` names
+the glyph, and `""` drops it for a terminal whose font cannot draw one.
+
+The detail pane dates a PR twice, because the two answer different questions:
+*opened* is how long its author has been waiting, *updated* whether anything has
+happened lately. Neither is when reviewq first saw it. A row swept by a build
+before the opening date was captured has none, and says nothing rather than
+guessing; `show --json` keeps both to the second.
 
 `W` shows what you are waiting on: tracked, open, wanting nothing — where a PR
 goes the moment you review it, since the ball is then in the author's court. It

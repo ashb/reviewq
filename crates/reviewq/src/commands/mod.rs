@@ -38,8 +38,8 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
     let logging = cli.verbose > 0;
     match cli.command {
         Command::Sync(args) => sync::run(cfg, &args, logging).await,
-        Command::List(args) => list::run(&args),
-        Command::Next(args) => list::next(&args),
+        Command::List(args) => list::run(cfg, &args),
+        Command::Next(args) => list::next(cfg, &args),
         Command::Show(args) => show::run(cfg, &args),
         Command::Done(args) => actions::done(cfg, &args).await,
         Command::Snooze(args) => actions::snooze(&args),

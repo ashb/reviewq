@@ -26,6 +26,16 @@ pub fn stamp(ts: Timestamp) -> String {
     ts.round(jiff::Unit::Second).unwrap_or(ts).to_string()
 }
 
+/// A timestamp as the day it fell on.
+///
+/// For the dates that answer a day-scale question — when a PR was opened, which
+/// is how long its author has been waiting. The hour is real and `--json` keeps
+/// it; a pane with two full RFC 3339 stamps on one line has no room for the
+/// second, and the minute a PR was opened has never decided anything.
+pub fn day(ts: Timestamp) -> String {
+    ts.strftime("%Y-%m-%d").to_string()
+}
+
 /// A head SHA at GitHub's own abbreviation length, so it can be pasted into
 /// `git show`.
 pub fn short_sha(sha: &str) -> &str {
@@ -48,6 +58,54 @@ pub fn silenced(my: &MyState) -> Vec<String> {
         bits.push(format!("deferred since {}", stamp(at)));
     }
     bits
+}
+
+/// A live snooze, as a row-width tag: `snoozed until 2026-08-15`.
+///
+/// `None` once it has lapsed, which is the whole of what makes it a *live*
+/// snooze — a date in the past is history, and a row is not the place for that.
+/// The day rather than the instant: a snooze is set in days, and a list row has
+/// no column to spare on the minute one runs out.
+///
+/// Separate from [`silenced`], which is `show`'s roomier account of everything
+/// keeping a PR quiet and says so whether or not it still applies.
+pub fn snoozed_tag(my: &MyState, now: Timestamp) -> Option<String> {
+    let until = my.snoozed_until?;
+    (now < until).then(|| format!("snoozed until {}", day(until)))
+}
+
+/// How loudly a row's reason should read.
+///
+/// The classification, not the colour: the two frontends paint it differently on
+/// purpose — one has a ratatui theme and one has whatever the terminal's palette
+/// is — but *which* rows shout has to be one decision, or a mention looks like a
+/// first look in one of them. It did: `list` painted every reason the same cyan
+/// while the interface had been telling them apart all along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emphasis {
+    /// Somebody is waiting on a reply from you — a mention, or a thread you own.
+    Urgent,
+    /// A reason worth acting on, in its turn.
+    Normal,
+    /// Set aside, or not a reason at all: a deferred row, and one that is only
+    /// saying why reviewq watches it. Listed to be seen, not to be acted on.
+    Quiet,
+}
+
+/// How a row's reason should read, from its priority band and whether it has
+/// been deferred.
+///
+/// `priority` is `None` for a row with no attention at all — a waiting or
+/// tracked row, which says why it is watched instead.
+pub fn emphasis(priority: Option<u8>, deferred: bool) -> Emphasis {
+    match priority {
+        _ if deferred => Emphasis::Quiet,
+        None => Emphasis::Quiet,
+        // Bands 1 and 2 are the mention and the reply in a thread you own: the
+        // two where a person is waiting on you rather than a rule pointing.
+        Some(p) if p <= 2 => Emphasis::Urgent,
+        Some(_) => Emphasis::Normal,
+    }
 }
 
 /// What I have already done to a PR — the fact a queue wants to show in one
@@ -175,6 +233,7 @@ mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-11T09:00:00Z"),
+            created_at: None,
             labels: vec![],
             milestone: None,
             files: None,
@@ -187,6 +246,80 @@ mod tests {
         assert_eq!(
             stamp(ts("2026-08-11T09:00:00.123456Z")),
             "2026-08-11T09:00:00Z"
+        );
+    }
+
+    #[test]
+    fn emphasis_shouts_only_where_a_person_is_waiting_on_you() {
+        use reviewq_core::model::AttentionReason;
+
+        // Read off the reason table rather than hardcoded numbers, so a reason
+        // that changes band changes this with it.
+        let band = |reason: AttentionReason| reason.priority();
+        assert_eq!(
+            emphasis(
+                Some(band(AttentionReason::Mention { by: "kaxil".into() })),
+                false
+            ),
+            Emphasis::Urgent
+        );
+        assert_eq!(
+            emphasis(
+                Some(band(AttentionReason::ThreadReply {
+                    by: "kaxil".into(),
+                    threads: 1
+                })),
+                false
+            ),
+            Emphasis::Urgent
+        );
+        assert_eq!(
+            emphasis(
+                Some(band(AttentionReason::ReviewRequested { team: None })),
+                false
+            ),
+            Emphasis::Normal
+        );
+        assert_eq!(
+            emphasis(
+                Some(band(AttentionReason::NeedsFirstLook {
+                    rule: "label x".into()
+                })),
+                false
+            ),
+            Emphasis::Normal
+        );
+    }
+
+    #[test]
+    fn a_set_aside_row_is_quiet_however_urgent_its_reason() {
+        // Deferring says "not before the others"; a row that then shouted would
+        // be arguing with the person who deferred it.
+        assert_eq!(emphasis(Some(1), true), Emphasis::Quiet);
+        // And a row with no reason at all is saying why it is watched, which is
+        // an answer to a question nobody asked yet.
+        assert_eq!(emphasis(None, false), Emphasis::Quiet);
+    }
+
+    #[test]
+    fn a_snooze_tag_lasts_exactly_as_long_as_the_snooze() {
+        let my = MyState {
+            snoozed_until: Some(ts("2026-08-15T09:00:00Z")),
+            ..MyState::default()
+        };
+
+        assert_eq!(
+            snoozed_tag(&my, ts("2026-08-13T10:00:00Z")).as_deref(),
+            Some("snoozed until 2026-08-15")
+        );
+        assert_eq!(
+            snoozed_tag(&my, ts("2026-08-15T09:00:00Z")),
+            None,
+            "the instant it lapses it is history, which a row does not carry"
+        );
+        assert_eq!(
+            snoozed_tag(&MyState::default(), ts("2026-08-13T10:00:00Z")),
+            None
         );
     }
 

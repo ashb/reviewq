@@ -33,6 +33,18 @@ pub struct PrSnapshot {
     pub state: PrState,
     /// GitHub's `updatedAt`; drives whether a detail fetch is needed.
     pub updated_at: Timestamp,
+    /// GitHub's `createdAt` — when the PR was opened on the forge.
+    ///
+    /// Distinct from the ledger's `first_seen_at`, which is when *this* ledger
+    /// first swept it: a PR opened last year and swept this morning has both,
+    /// and only one of them says how long its author has been waiting.
+    ///
+    /// `None` on a row written before this was captured, until the next sweep
+    /// rewrites it — the same treatment `base_ref` gets, and for the same
+    /// reason: an unknown date is not a date, and display says nothing rather
+    /// than inventing one.
+    #[serde(default)]
+    pub created_at: Option<Timestamp>,
     /// Label names.
     #[serde(default)]
     pub labels: Vec<String>,

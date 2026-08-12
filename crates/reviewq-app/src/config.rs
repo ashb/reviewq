@@ -271,6 +271,9 @@ pub struct Output {
     pub theme: ThemeMode,
     /// The glyphs a queue row is marked with. `[output.marks]` in TOML.
     pub marks: Marks,
+    /// The glyphs that stand in for a word beside a fact about the PR.
+    /// `[output.icons]` in TOML.
+    pub icons: Icons,
     /// How a saved screen is drawn. `[output.svg]` in TOML.
     pub svg: Svg,
 }
@@ -352,6 +355,28 @@ impl Marks {
     }
 }
 
+/// The glyphs that label a fact rather than a decision.
+///
+/// Separate from [`Marks`], which says what *you* did to a PR; these say what
+/// the PR *is*. Configurable for the same reason: the default is a Nerd Font
+/// codepoint, and a terminal without a patched font draws a box. Set one to an
+/// empty string to drop the glyph and keep the value it labels.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Icons {
+    /// Before the branch a PR would merge into.
+    pub branch: String,
+}
+
+impl Default for Icons {
+    fn default() -> Self {
+        Self {
+            // U+F419, Nerd Fonts' git-branch.
+            branch: "\u{f419}".into(),
+        }
+    }
+}
+
 /// The background the palette is adapted for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -401,6 +426,7 @@ impl Default for Output {
             underline_links: true,
             theme: ThemeMode::default(),
             marks: Marks::default(),
+            icons: Icons::default(),
             svg: Svg::default(),
         }
     }
@@ -671,6 +697,7 @@ mod tests {
             is_draft: false,
             state: reviewq_core::model::PrState::Open,
             updated_at: "2026-08-11T09:00:00Z".parse().expect("timestamp"),
+            created_at: None,
             labels: vec![],
             milestone: None,
             files: Some(vec![]),
@@ -740,6 +767,32 @@ mod tests {
             "z",
             "and the override is what a row would draw"
         );
+    }
+
+    #[test]
+    fn the_branch_icon_defaults_to_a_nerd_font_glyph_and_is_replaceable() {
+        // The same bargain the marks strike: a patched font draws it, and
+        // anything else needs a way out that isn't editing the binary.
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        assert_eq!(config.output.icons.branch, "\u{f419}");
+
+        let plain: Config = toml::from_str(&minimal(
+            r#"
+            [output.icons]
+            branch = "->"
+            "#,
+        ))
+        .expect("parses");
+        assert_eq!(plain.output.icons.branch, "->");
+
+        let none: Config = toml::from_str(&minimal(
+            r#"
+            [output.icons]
+            branch = ""
+            "#,
+        ))
+        .expect("parses");
+        assert_eq!(none.output.icons.branch, "", "dropping it is allowed");
     }
 
     #[test]

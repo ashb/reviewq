@@ -14,7 +14,7 @@ use rusqlite_migration::{M, MigrationDefinitionError, Migrations};
 use crate::{LedgerError, Result};
 
 /// The schema version this build expects — the number of migrations defined.
-pub const SCHEMA_VERSION: usize = 10;
+pub const SCHEMA_VERSION: usize = 11;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE prs (
@@ -330,6 +330,16 @@ const MIGRATION_10: &str = r"
 ALTER TABLE prs ADD COLUMN untracked_at TEXT;
 ";
 
+/// When the PR was opened on the forge, which is not `first_seen_at` — that is
+/// when this ledger first swept it. A PR opened last year and swept this
+/// morning has both, and only one of them says how long its author has waited.
+///
+/// Null on an existing row: the sweep that wrote it never asked. The next sweep
+/// fills it in, and display says nothing about a date it does not have.
+const MIGRATION_11: &str = r"
+ALTER TABLE prs ADD COLUMN created_at TEXT;
+";
+
 static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -342,6 +352,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(MIGRATION_8),
         M::up(MIGRATION_9),
         M::up(MIGRATION_10),
+        M::up(MIGRATION_11),
     ])
 });
 

@@ -588,12 +588,6 @@ impl Row {
             None => self.tracked_reason.clone(),
         }
     }
-
-    /// How urgent it is, for ordering and colour. A row with no reason sorts
-    /// after every row that has one.
-    pub fn priority(&self) -> u8 {
-        self.top.as_ref().map_or(u8::MAX, AttentionRow::priority)
-    }
 }
 
 impl From<QueueItem> for Row {
@@ -918,6 +912,11 @@ impl App {
     /// The glyphs to mark queue rows with, as configured.
     pub(crate) fn marks(&self) -> &reviewq_app::config::Marks {
         &self.config.output.marks
+    }
+
+    /// The glyphs that label a fact about the PR, as configured.
+    pub(crate) fn icons(&self) -> &reviewq_app::config::Icons {
+        &self.config.output.icons
     }
 
     /// Record how far the key reference can usefully scroll, and hold it there.
@@ -2122,6 +2121,7 @@ pub(super) mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-11T09:00:00Z"),
+            created_at: None,
             labels: vec![],
             milestone: None,
             files: None,
@@ -2221,6 +2221,7 @@ pub(super) mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-11T09:00:00Z"),
+            created_at: None,
             labels: vec![],
             milestone: None,
             files: None,

@@ -30,6 +30,7 @@ pub(crate) fn pr(number: u64, updated: &str) -> PrSnapshot {
         is_draft: false,
         state: PrState::Open,
         updated_at: ts(updated),
+        created_at: Some(ts("2026-07-28T11:00:00Z")),
         labels: vec!["area:task-sdk".into()],
         milestone: None,
         files: Some(vec!["task-sdk/src/thing.py".into()]),

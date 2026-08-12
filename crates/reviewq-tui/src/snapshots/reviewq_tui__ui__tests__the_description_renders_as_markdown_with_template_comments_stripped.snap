@@ -6,7 +6,8 @@ reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
 │ ▸   #70135  @kaxil mentioned you area:asy ││ Add deferrable mode to S3KeySensor                  │
 │     #70201  matches label area:async  Tid ││ OPEN · @potiuk · interest: label area:async         │
-│                                           ││ updated 2026-08-10T09:00:00Z · → main               │
+│                                           ││ opened 2026-07-30 · updated 2026-08-10T09:00:00Z ·  │
+│                                           ││  main                                              │
 │                                           ││ area:async                                          │
 │                                           ││                                                     │
 │                                           ││ You                                                 │
@@ -26,7 +27,6 @@ reviewq  2 on the queue
 │                                           ││ ```python                                           │
 │                                           ││ sensor = S3KeySensor(deferrable=True)               │
 │                                           ││ ```                                                 │
-│                                           ││                                                     │
 │                                           ││                                                     │
 │                                           ││                                                     │
 │                                           ││                                                     │

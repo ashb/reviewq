@@ -88,6 +88,10 @@ struct Fixture {
     /// a PR you have reviewed looks like until the author moves.
     reason: Option<AttentionReason>,
     since: &'static str,
+    /// When it was opened on the forge, which is not when it was last touched
+    /// and not when this ledger first saw it. Lower numbers are older PRs, as
+    /// they are on a real forge.
+    opened: &'static str,
     mine: MyState,
     deferred: bool,
     body: Option<&'static str>,
@@ -118,6 +122,7 @@ fn fixtures() -> Vec<Fixture> {
             tracked: interest("label area:task-sdk"),
             reason: Some(AttentionReason::Mention { by: "kaxil".into() }),
             since: "2026-08-12T07:05:00Z",
+            opened: "2026-08-04T09:12:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("4b71e08".into()),
                 last_verdict: Some(Verdict::ChangesRequested),
@@ -151,6 +156,7 @@ fn fixtures() -> Vec<Fixture> {
                 threads: 2,
             }),
             since: "2026-08-12T07:55:00Z",
+            opened: "2026-08-06T15:40:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("c1d9a77".into()),
                 last_verdict: Some(Verdict::Approved),
@@ -177,6 +183,7 @@ fn fixtures() -> Vec<Fixture> {
                 since_sha: "5e14b22".into(),
             }),
             since: "2026-08-12T06:30:00Z",
+            opened: "2026-07-28T11:05:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("5e14b22".into()),
                 last_verdict: Some(Verdict::Approved),
@@ -203,6 +210,7 @@ fn fixtures() -> Vec<Fixture> {
                 threads: 1,
             }),
             since: "2026-08-12T07:20:00Z",
+            opened: "2026-08-01T08:25:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("e40b1a9".into()),
                 last_verdict: Some(Verdict::Commented),
@@ -230,6 +238,7 @@ fn fixtures() -> Vec<Fixture> {
                 by: "o-nikolas".into(),
             }),
             since: "2026-08-12T08:55:00Z",
+            opened: "2026-08-11T16:30:00Z",
             mine: MyState::default(),
             deferred: false,
             body: None,
@@ -251,6 +260,7 @@ fn fixtures() -> Vec<Fixture> {
             tracked: interest("label area:Scheduler"),
             reason: None,
             since: "2026-08-11T14:10:00Z",
+            opened: "2026-07-31T13:50:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("8ae7c31".into()),
                 last_verdict: Some(Verdict::ChangesRequested),
@@ -274,6 +284,7 @@ fn fixtures() -> Vec<Fixture> {
             tracked: interest("path airflow-core/src/airflow/models/**"),
             reason: None,
             since: "2026-08-10T16:45:00Z",
+            opened: "2026-07-24T10:20:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("24c9f70".into()),
                 last_verdict: Some(Verdict::Approved),
@@ -302,6 +313,7 @@ fn fixtures() -> Vec<Fixture> {
                 threads: 4,
             }),
             since: "2026-08-12T06:05:00Z",
+            opened: "2026-08-07T18:02:00Z",
             mine: MyState {
                 last_reviewed_sha: Some("6b1fa02".into()),
                 last_verdict: Some(Verdict::Commented),
@@ -327,6 +339,7 @@ fn fixtures() -> Vec<Fixture> {
                 team: Some("apache/airflow-committers".into()),
             }),
             since: "2026-08-11T18:05:00Z",
+            opened: "2026-08-09T12:45:00Z",
             mine: MyState::default(),
             deferred: false,
             body: None,
@@ -347,6 +360,7 @@ fn fixtures() -> Vec<Fixture> {
                 rule: "author FIRST_TIME_CONTRIBUTOR".into(),
             }),
             since: "2026-08-11T12:00:00Z",
+            opened: "2026-08-10T09:30:00Z",
             mine: MyState::default(),
             deferred: false,
             body: None,
@@ -367,6 +381,7 @@ fn fixtures() -> Vec<Fixture> {
                 rule: "label area:Executors-core".into(),
             }),
             since: "2026-08-09T10:15:00Z",
+            opened: "2026-08-03T14:15:00Z",
             mine: MyState {
                 deferred_at: Some(ts("2026-08-11T09:00:00Z")),
                 ..MyState::default()
@@ -393,6 +408,7 @@ fn fixtures() -> Vec<Fixture> {
                 by: "dstandish".into(),
             }),
             since: "2026-08-12T08:05:00Z",
+            opened: "2026-07-16T08:40:00Z",
             mine: MyState {
                 done_sha: Some("b62ff31".into()),
                 done_at: Some(ts("2026-08-11T17:40:00Z")),
@@ -465,6 +481,7 @@ fn ledger() -> Ledger {
             is_draft: f.draft,
             state: f.state,
             updated_at: ts(f.since),
+            created_at: Some(ts(f.opened)),
             labels: f.labels.iter().map(|l| (*l).to_string()).collect(),
             milestone: None,
             files: None,
@@ -603,6 +620,7 @@ fn peeked() -> reviewq_app::peek::Peeked {
                 is_draft: false,
                 state: PrState::Merged,
                 updated_at: ts("2026-08-04T15:30:00Z"),
+                created_at: Some(ts("2026-07-16T08:40:00Z")),
                 labels: vec![],
                 milestone: None,
                 files: None,
@@ -706,8 +724,12 @@ mod tests {
         // What makes the picture worth taking: every urgency band, so the
         // colours and the ordering both have something to say.
         let app = app(Mode::Dark);
-        let bands: std::collections::BTreeSet<u8> =
-            app.queue.iter().map(|item| item.item.priority()).collect();
+        let bands: std::collections::BTreeSet<u8> = app
+            .queue
+            .iter()
+            .filter_map(|item| item.item.top.as_ref())
+            .map(reviewq_ledger::AttentionRow::priority)
+            .collect();
 
         assert_eq!(
             bands.len(),

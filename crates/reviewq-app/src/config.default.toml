@@ -143,6 +143,13 @@ theme = "dark"
 #   done     = "·"   # you marked it done here
 #   deferred = "z"   # you deferred it to the bottom
 
+# The glyphs that stand in for a word beside a fact about the PR. `branch`
+# defaults to a Nerd Font codepoint (U+F419, git-branch), which a terminal
+# without a patched font draws as a box — override it with anything yours can
+# draw, or with "" to show the branch name on its own.
+#   [output.icons]
+#   branch = "->"
+
 # How a saved screen is drawn. An SVG names fonts, it cannot carry them, so what
 # a viewer sees depends on what it can resolve: the text face comes from Bunny (a
 # Google Fonts mirror that sets no cookies), and the symbol face is only named —

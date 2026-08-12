@@ -495,6 +495,10 @@ struct PrNode {
     head_ref_oid: String,
     base_ref_name: String,
     updated_at: jiff::Timestamp,
+    /// When the PR was opened. Optional so a captured response from before the
+    /// query asked for it still parses, which is what the fixtures are.
+    #[serde(default)]
+    created_at: Option<jiff::Timestamp>,
     labels: LabelConn,
     milestone: Option<Milestone>,
     files: FilesConn,
@@ -568,6 +572,7 @@ impl PrNode {
             is_draft: self.is_draft,
             state,
             updated_at: self.updated_at,
+            created_at: self.created_at,
             labels: self.labels.nodes.into_iter().map(|l| l.name).collect(),
             milestone: self.milestone.map(|m| m.title),
             files: Some(paths),
@@ -619,6 +624,7 @@ query($q: String!, $size: Int!, $after: String) {
       headRefOid
       baseRefName
       updatedAt
+      createdAt
       labels(first: 30) { nodes { name } }
       milestone { title }
       files(first: 100) { totalCount nodes { path } }
@@ -638,6 +644,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       headRefOid
       baseRefName
       updatedAt
+      createdAt
       labels(first: 30) { nodes { name color } }
       milestone { title }
       files(first: 100) { totalCount nodes { path } }
@@ -1304,6 +1311,13 @@ mod tests {
         let first = data.search.nodes.into_iter().next().expect("a node");
         let snapshot = first.into_snapshot().expect("converts");
         assert_eq!(snapshot.number, 71196);
+        // Opened long before it was last touched, which is the pair worth
+        // keeping apart — and neither is when this ledger first saw it.
+        assert_eq!(
+            snapshot.created_at,
+            Some("2026-07-22T09:14:00Z".parse().unwrap())
+        );
+        assert_eq!(snapshot.updated_at, "2026-08-05T18:04:01Z".parse().unwrap());
         assert!(snapshot.is_draft);
         assert_eq!(snapshot.state, PrState::Open);
         assert_eq!(snapshot.author, "rjgoyln");

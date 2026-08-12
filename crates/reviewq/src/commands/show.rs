@@ -61,7 +61,7 @@ pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&json(&show, url))?);
     } else {
         let underline = link.as_ref().is_none_or(|l| l.underline_links);
-        print_human(&show, url, underline);
+        print_human(&show, url, underline, &loaded.config.output.icons.branch);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -110,6 +110,16 @@ fn render_hyperlink(text: &str, url: Option<&str>, is_terminal: bool) -> String 
 /// Style `text`, optionally bold and/or underlined. Each call produces one
 /// self-contained styled span (its own reset), so callers can concatenate
 /// several without one span's reset clobbering another's still-open style.
+/// `icon value`, or the value alone when the icon is configured away — so a
+/// glyph nobody's font can draw costs nothing but the glyph.
+fn labelled(icon: &str, value: &str) -> String {
+    if icon.is_empty() {
+        value.to_string()
+    } else {
+        format!("{icon} {value}")
+    }
+}
+
 fn styled(text: &str, bold: bool, underline: bool) -> String {
     text.if_supports_color(Stdout, |s| match (bold, underline) {
         (true, true) => s.bold().underline().to_string(),
@@ -120,7 +130,7 @@ fn styled(text: &str, bold: bool, underline: bool) -> String {
     .to_string()
 }
 
-fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
+fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool, branch_icon: &str) {
     let pr = &show.pr;
     // Underlining a plain (non-hyperlinked) title would suggest it's
     // clickable when it isn't, so it's tied to whether there's a url at all.
@@ -139,12 +149,22 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool) {
         draft_tag(pr.is_draft),
     );
     // Only once it's known: a row written before the target branch was captured
-    // has it empty until the next sync, and "→ " with nothing after it would
+    // has it empty until the next sync, and an icon with nothing after it would
     // read as a bug rather than as missing data.
     if !pr.base_ref.is_empty() {
-        println!("  → {}", pr.base_ref);
+        println!("  {}", labelled(branch_icon, &pr.base_ref));
     }
-    println!("  updated {}", present::stamp(pr.updated_at));
+    // Opened first, then updated: the pair reads as the PR's life, and the one
+    // that says how long somebody has been waiting comes first. Silent about an
+    // opening date a row predating its capture does not have.
+    match pr.created_at {
+        Some(created) => println!(
+            "  opened {} · updated {}",
+            present::day(created),
+            present::stamp(pr.updated_at)
+        ),
+        None => println!("  updated {}", present::stamp(pr.updated_at)),
+    }
 
     if !pr.labels.is_empty() || pr.milestone.is_some() {
         let mut bits = pr.labels.clone();
@@ -286,6 +306,11 @@ struct ShowJson<'a> {
     base_ref: Option<&'a str>,
     is_draft: bool,
     updated_at: String,
+    /// When the PR was opened on the forge. Omitted, like `base_ref`, when the
+    /// row predates its capture and no sync has refreshed it — an absent date
+    /// is not the epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
     labels: &'a [String],
     milestone: Option<&'a str>,
     tracked_reason: Option<&'a str>,
@@ -337,6 +362,7 @@ fn json<'a>(show: &'a PrShow, url: Option<&'a str>) -> ShowJson<'a> {
         base_ref: Some(show.pr.base_ref.as_str()).filter(|b| !b.is_empty()),
         is_draft: show.pr.is_draft,
         updated_at: show.pr.updated_at.to_string(),
+        created_at: show.pr.created_at.map(|at| at.to_string()),
         labels: &show.pr.labels,
         milestone: show.pr.milestone.as_deref(),
         tracked_reason: show.tracked_reason.as_deref(),
@@ -402,6 +428,7 @@ mod tests {
             is_draft: false,
             state: PrState::Open,
             updated_at: ts("2026-08-05T09:00:00Z"),
+            created_at: None,
             labels: vec![],
             milestone: None,
             files: None,
@@ -460,6 +487,33 @@ mod tests {
         unknown.base_ref = String::new();
 
         assert_eq!(json(&show_of(unknown), None).base_ref, None);
+    }
+
+    #[test]
+    fn json_reports_when_the_pr_was_opened_to_the_second() {
+        // The human line shows the day; the machine one keeps the instant,
+        // which is what anything computing an age off this would want.
+        let mut opened = pr();
+        opened.created_at = Some(ts("2026-07-22T09:14:33Z"));
+
+        assert_eq!(
+            json(&show_of(opened), None).created_at.as_deref(),
+            Some("2026-07-22T09:14:33Z")
+        );
+    }
+
+    #[test]
+    fn json_omits_an_opening_date_that_is_not_known_yet() {
+        assert_eq!(json(&show_of(pr()), None).created_at, None);
+    }
+
+    #[test]
+    fn a_labelled_value_drops_the_icon_when_there_is_none() {
+        // Both frontends follow this rule, so a config that says a font cannot
+        // draw the glyph reads the same wherever the branch is shown.
+        assert_eq!(labelled("\u{f419}", "v3-1-test"), "\u{f419} v3-1-test");
+        assert_eq!(labelled("->", "main"), "-> main");
+        assert_eq!(labelled("", "main"), "main");
     }
 
     #[test]
