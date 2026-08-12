@@ -1,5 +1,6 @@
 mod actions;
 mod doctor;
+mod help;
 mod list;
 mod review;
 mod show;
@@ -25,6 +26,16 @@ pub const EXIT_EMPTY: u8 = 2;
 /// that carried on regardless would be showing a queue it can no longer explain.
 /// It costs a file read and a parse, which is nothing next to opening the ledger.
 pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
+    // Before the config, and deliberately: the documentation is most wanted by
+    // somebody whose config does not work, and a help page that refused to
+    // print until the config parsed would be missing exactly then. It reads the
+    // config only for the palette, so not having one costs a colour scheme.
+    if let Command::Help(args) = &cli.command {
+        let theme = config::load(cli.config.as_deref())
+            .map_or(Default::default(), |loaded| loaded.config.output.theme);
+        return help::run(theme, args);
+    }
+
     let loaded = config::load(cli.config.as_deref())?;
     if loaded.created {
         println!(
@@ -52,5 +63,9 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Review(args) => review::run(cfg, &args).await,
         Command::Tui => tui::run(cfg).await,
         Command::Doctor => doctor::run(cfg).await,
+        // Taken above, before the config was loaded — matched here so that
+        // adding a command and forgetting to dispatch it still fails to
+        // compile.
+        Command::Help(_) => unreachable!("help is served before the config"),
     }
 }

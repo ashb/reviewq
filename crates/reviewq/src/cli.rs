@@ -63,7 +63,9 @@ fn pr_number_or_url(s: &str) -> Result<PrTarget, String> {
 ///
 /// Every queue item names the rule that produced it.
 #[derive(Debug, Parser)]
-#[command(name = "reviewq", version, about, long_about = None)]
+// Clap's own `help` subcommand is off, because reviewq has a better one: the
+// documentation rather than a flag list. `--help` on any command is untouched.
+#[command(name = "reviewq", version, about, long_about = None, disable_help_subcommand = true)]
 pub struct Cli {
     /// Config file to use (default: $XDG_CONFIG_HOME/reviewq/config.toml).
     #[arg(long, global = true, value_name = "PATH")]
@@ -93,9 +95,10 @@ pub enum Command {
     /// reasons and its threads.
     Show(ShowArgs),
 
-    /// Record the current head as handled and mark matching GitHub
-    /// notifications read. Drops the PR off the queue until something new
-    /// happens on it.
+    /// Say you have accounted for the PR as it stands: the record of a decision
+    /// that left no trace on the forge, for when you looked and did nothing.
+    /// Marks its notifications read, and asks again the moment the PR moves.
+    /// Not "I am not interested" — that is `mute`, or `untrack`.
     Done(NumberArgs),
 
     /// Suppress everything on a PR — including mentions — until `duration` has
@@ -133,6 +136,17 @@ pub enum Command {
 
     /// Check the token, the rate-limit budget and where things live on disk.
     Doctor,
+
+    /// The documentation, in the terminal: `reviewq help` lists the pages, and
+    /// a verb goes straight to its own — `reviewq help done`.
+    Help(HelpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HelpArgs {
+    /// The page to print — a topic (`verbs`, `config`) or anything that leads
+    /// to one (`done`, `interest`). Omit it for the list of pages.
+    pub topic: Option<String>,
 }
 
 #[derive(Debug, Args)]

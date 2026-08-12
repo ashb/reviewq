@@ -17,12 +17,12 @@ jiff.workspace = true
 ratatui.workspace = true
 tracing.workspace = true
 tui-markdown.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
-toml.workspace = true
 
 [lints]
 workspace = true

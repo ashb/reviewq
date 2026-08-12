@@ -22,15 +22,22 @@ they cannot drift from what it draws. `reviewq list` marks its rows with the sam
 glyphs, from the same `[output.marks]`, and tags a PR whose snooze is still
 running — so a row at the bottom of either says why it is down there.
 
+<!-- help:start -->
+
 ## Getting started
 
 ```sh
 cargo install --path crates/reviewq
-reviewq sync      # writes a documented default config on first run
+reviewq sync      # fetch from the forge, and work out what wants you
 reviewq doctor    # token, budget, checkout, where things live
 reviewq list      # the queue, most-urgent first
 reviewq tui       # the same queue, browsable
 ```
+
+Everything below is also in the terminal: `reviewq help` lists the pages and
+`reviewq help done` goes straight to one, rendered the way the interface draws
+markdown — screenshots included, drawn live rather than linked. They are slices
+of this file, so the two cannot drift.
 
 The config lives at `$XDG_CONFIG_HOME/reviewq/config.toml` and is written for you,
 comments and all, the first time it is needed. `reviewq doctor` reports on
@@ -41,6 +48,10 @@ config and the ledger (`reviewq.db`); `REVIEWQ_CONFIG` and `REVIEWQ_DB` name eit
 one outright, and `--config PATH` does the same for a single run. A path named
 explicitly is never created for you — asking for a specific file and silently
 getting a fresh default would hide a typo.
+
+<!-- /help:start -->
+
+<!-- help:reasons -->
 
 ## Why a PR is on the queue
 
@@ -77,6 +88,8 @@ which is how a post-merge reply gets to flag something that shipped broken.
 A mute is not one of these: it is a statement about what you want shown rather
 than about the PR, so the reasons stay computed while it hides them — see
 [the interface](#the-interface).
+
+<!-- help:verbs -->
 
 ### Which verb, and when
 
@@ -122,6 +135,12 @@ intend to give. "Up to date" is untrue, and hiding it says nothing to the person
 waiting — so take yourself off the reviewer list on the forge, and reviewq will
 stop asking at the next sync.
 
+<!-- /help:verbs -->
+
+<!-- /help:reasons -->
+
+<!-- help:commands -->
+
 ## Commands
 
 | | |
@@ -138,6 +157,11 @@ stop asking at the next sync.
 | `review <N>` | Hand off to your review command; does not imply `done` |
 | `tui` | The interactive queue; `?` lists the keys |
 | `doctor` | What is wrong, and where things live |
+| `help [topic]` | These pages, in the terminal — `reviewq help done`, `reviewq help config` |
+
+<!-- /help:commands -->
+
+<!-- help:keys -->
 
 ## The interface
 
@@ -199,6 +223,10 @@ nothing left to leave and it quits, which `q` does from anywhere.
 The palette adapts to a light terminal with `t`, or `[output] theme = "light"`.
 
 ![The same queue on a light background](docs/imgs/queue-light.svg)
+
+<!-- /help:keys -->
+
+<!-- help:config -->
 
 ## Configuring it
 
@@ -406,6 +434,8 @@ so what a viewer sees is whatever it can resolve: the text face comes from Bunny
 (a Google Fonts mirror that sets no cookies), and the symbol face is only named,
 since a font already installed needs no fetching and no privacy-preserving CDN
 carries one. `font_css = []` gives a file that fetches nothing at all.
+
+<!-- /help:config -->
 
 ## How it fits together
 

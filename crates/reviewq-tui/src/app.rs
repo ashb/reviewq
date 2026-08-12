@@ -42,12 +42,11 @@ use reviewq_ledger::{
 };
 use std::sync::mpsc;
 
-#[cfg(test)]
 /// A minimal valid config naming the fixture's repo.
 ///
 /// Parsed rather than built field by field, so it goes through the same
 /// deserialisation and validation a real one does.
-pub(crate) fn test_config() -> HeldConfig {
+pub(crate) fn fixture_config() -> HeldConfig {
     Arc::new(
         toml::from_str(
             r#"
@@ -108,6 +107,12 @@ fn synced_note(summaries: &[RepoSummary]) -> String {
         many => format!("synced {} repos", many.len()),
     };
     format!("{what} — {new} new, {queued} on the queue")
+}
+
+/// The fixture's config, as the tests have always called it.
+#[cfg(test)]
+pub(crate) fn test_config() -> HeldConfig {
+    fixture_config()
 }
 
 /// Refuse, in a test build, the paths that reach what the developer actually uses.
@@ -781,18 +786,15 @@ impl App {
 
     /// Show one of the other lists, for a caller arranging a screen rather than
     /// pressing a key.
-    #[cfg(test)]
     pub(crate) fn show_muted(&mut self) {
         self.show(Listing::Muted);
     }
 
     /// Show what is waiting on somebody else.
-    #[cfg(test)]
     pub(crate) fn show_waiting(&mut self) {
         self.show(Listing::Waiting);
     }
 
-    #[cfg(test)]
     fn show(&mut self, listing: Listing) {
         self.listing = listing;
         self.reload().expect("reading the list");

@@ -9,9 +9,11 @@
 //! an explicit keystroke, and how stale the ledger is stays on screen so the
 //! choice is informed.
 
+mod ansi;
 mod app;
 #[cfg(test)]
 mod docs;
+mod fixture;
 mod svg;
 mod ui;
 
@@ -33,6 +35,27 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use reviewq_app::config::Config;
 
+pub use ansi::markdown as markdown_to_ansi;
+
+/// Draw one of the documentation's screens, as text a terminal can print.
+///
+/// The pictures in `docs/imgs` are this same fixture through the SVG renderer,
+/// so what `reviewq help` shows and what the project page shows are one screen
+/// drawn twice — and neither can go stale while the other is checked.
+///
+/// `None` for a name no screen answers to. `width` is the reader's, so the
+/// interface is drawn at the size they will actually run it at rather than
+/// scaled from a picture taken at somebody else's.
+pub fn shot(name: &str, width: u16, mode: Mode, colour: bool) -> Option<String> {
+    let shot = fixture::shot(name)?;
+    let (buffer, theme) = fixture::draw(shot, width.max(60), mode);
+    Some(ansi::buffer(&buffer, &theme, colour))
+}
+
+/// Every screen `shot` knows, in the order the documentation uses them.
+pub fn shots() -> impl Iterator<Item = &'static str> {
+    fixture::SHOTS.iter().map(|shot| shot.name)
+}
 pub use app::{Channel, Hooks, Message, PrHook};
 pub use theme::{Mode, Theme};
 

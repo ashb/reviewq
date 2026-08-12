@@ -109,7 +109,7 @@ fn help_and_version_succeed() {
 fn every_subcommand_is_reachable() {
     for name in [
         "sync", "list", "next", "show", "done", "snooze", "mute", "unmute", "defer", "undefer",
-        "track", "untrack", "review", "doctor",
+        "track", "untrack", "review", "doctor", "help",
     ] {
         let output = run(&[name, "--help"]);
         assert!(
@@ -127,6 +127,59 @@ fn every_subcommand_is_reachable() {
 ///
 /// `track` is not in the list: it fetches what the ledger doesn't have, so an
 /// unknown number is the normal case rather than an error.
+/// The documentation has to reach somebody whose config is broken — that is
+/// when it is most wanted, and every other command refuses to run.
+#[test]
+fn help_is_readable_without_a_working_config() {
+    let (_dir, config, db) = workspace();
+    std::fs::write(&config, "this is not toml [[[").expect("write a broken config");
+
+    let index = run_in(&config, &db, &["help"]);
+    assert!(index.status.success(), "{}", stderr(&index));
+    let listing = String::from_utf8_lossy(&index.stdout);
+    assert!(listing.contains("reviewq help verbs"), "{listing}");
+
+    // And a verb reaches its page without knowing which page it is on.
+    let page = run_in(&config, &db, &["help", "done"]);
+    assert!(page.status.success(), "{}", stderr(&page));
+    let shown = String::from_utf8_lossy(&page.stdout);
+    assert!(shown.contains("accounted for"), "{shown}");
+    assert!(shown.contains("mute"), "{shown}");
+    // Piped, so no escapes: the colour is for a terminal, not for a file.
+    assert!(!shown.contains('\x1b'), "{shown:?}");
+}
+
+/// A picture in the documentation is a screenshot of a text interface, so in
+/// the terminal it is drawn rather than linked.
+#[test]
+fn a_help_page_draws_the_interface_rather_than_naming_a_file() {
+    let (_dir, config, db) = workspace();
+
+    let output = run_in(&config, &db, &["help", "keys"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let page = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        page.contains("on the queue"),
+        "the header of a drawn screen"
+    );
+    assert!(page.contains('╭'), "and its panes: {page}");
+    assert!(!page.contains(".svg"), "no file paths: {page}");
+    assert!(!page.contains("[img]"), "and no placeholders: {page}");
+}
+
+#[test]
+fn an_unknown_help_topic_says_what_there_is() {
+    let (_dir, config, db) = workspace();
+
+    let output = run_in(&config, &db, &["help", "nonesuch"]);
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("no help topic"), "{err}");
+    assert!(err.contains("verbs"), "it lists them: {err}");
+}
+
 #[test]
 fn an_action_on_an_unknown_pr_is_a_clear_error() {
     let (_dir, config, db) = workspace();

@@ -639,7 +639,7 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
 /// It reads `tui-markdown`'s own scheme to know which is which, so a change there
 /// would need a change here; [`markdown_keeps_its_structure_in_our_colours`] fails
 /// if that scheme moves.
-fn themed_markdown<'a>(mut line: Line<'a>, t: &Theme) -> Line<'a> {
+pub(crate) fn themed_markdown<'a>(mut line: Line<'a>, t: &Theme) -> Line<'a> {
     let heading = line.style.fg.is_some();
     let fenced = line.style.bg.is_some();
     let modifiers = line.style.add_modifier;
@@ -873,12 +873,19 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
             &format!(" Done #{number} "),
             vec![
                 Line::from(Span::styled(
-                    "Mark it handled at its current head?",
+                    "Accounted for as it stands?",
                     Style::default().fg(color(t.text)),
                 )),
                 Line::from(""),
+                // Two lines rather than one: `modal` sizes itself to its widest
+                // line and does not wrap, so a long one stretches the box across
+                // the screen and loses its ends on a narrow terminal.
                 Line::from(Span::styled(
-                    "New commits bring it back. A review requested of you stays.",
+                    "For when you looked and did nothing — the forge cannot know that.",
+                    Style::default().fg(color(t.dim)),
+                )),
+                Line::from(Span::styled(
+                    "Anything new brings it back; a review requested of you stays.",
                     Style::default().fg(color(t.dim)),
                 )),
                 Line::from(""),
