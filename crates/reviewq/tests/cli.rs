@@ -192,6 +192,65 @@ fn a_setting_reviewq_does_not_read_is_named_on_every_command() {
     assert!(shown.contains("is not a setting reviewq reads"), "{shown}");
 }
 
+/// The version says where the build sits, not just which release it followed —
+/// a binary reporting the last tag while running code from past it is how a
+/// missing feature looks like a broken one.
+#[test]
+fn the_version_describes_the_build_it_came_from() {
+    let output = run(&["--version"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let shown = String::from_utf8_lossy(&output.stdout);
+    let version = shown
+        .split_whitespace()
+        .nth(1)
+        .expect("a version after the name");
+
+    assert!(
+        !version.starts_with('v'),
+        "the tag's `v` is the tag's: {shown:?}"
+    );
+
+    // Built from a tarball, or from a tag, the version is the release itself —
+    // give or take a `+dirty` for a modified tree, which semver reads as the
+    // same version and a human reads as the warning it is.
+    let manifest = env!("CARGO_PKG_VERSION");
+    if version.split('+').next() == Some(manifest) {
+        return;
+    }
+
+    // Otherwise this build is past the release, and must say so in the one way
+    // semver can order: a *higher* version, qualified. `0.2.0-10-gdeadbee`
+    // would sort below 0.2.0, which is the whole thing being avoided.
+    let (heading_for, qualifier) = version.split_once('-').unwrap_or_else(|| {
+        panic!("a build past {manifest} says which release it is heading for: {shown:?}")
+    });
+    assert!(
+        release(heading_for) > release(manifest),
+        "{heading_for} does not sort above the release behind it: {shown:?}"
+    );
+    assert!(
+        qualifier.starts_with("dev"),
+        "and that it has not got there yet: {shown:?}"
+    );
+    assert!(
+        qualifier.contains("+g"),
+        "and which commit it is: {shown:?}"
+    );
+}
+
+/// `0.2.1` as something orderable.
+fn release(version: &str) -> (u64, u64, u64) {
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(|part| part.parse().expect("a numeric version part"))
+        .collect();
+    match parts[..] {
+        [major, minor, patch] => (major, minor, patch),
+        _ => panic!("a three-part version, not {version:?}"),
+    }
+}
+
 #[test]
 fn an_unknown_help_topic_says_what_there_is() {
     let (_dir, config, db) = workspace();

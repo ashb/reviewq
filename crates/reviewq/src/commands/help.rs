@@ -354,7 +354,7 @@ fn man_page(
 
     out.push('\n');
     out.push_str(&banner(
-        &format!("reviewq {}", env!("CARGO_PKG_VERSION")),
+        &format!("reviewq {}", crate::VERSION),
         "",
         &heading,
         width,

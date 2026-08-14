@@ -30,3 +30,7 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+semver = "1.0.28"
+semvertag-shell = "0.2.3"

@@ -6,6 +6,11 @@
 mod cli;
 mod commands;
 
+/// What this build is, as `git describe` saw it — the released version at a
+/// tagged build, and the tag plus its distance, commit and dirtiness anywhere
+/// else. See `build.rs`; the manifest's version is the fallback.
+pub const VERSION: &str = env!("REVIEWQ_VERSION");
+
 use std::process::ExitCode;
 
 use clap::Parser as _;

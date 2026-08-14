@@ -65,7 +65,7 @@ fn pr_number_or_url(s: &str) -> Result<PrTarget, String> {
 #[derive(Debug, Parser)]
 // Clap's own `help` subcommand is off, because reviewq has a better one: the
 // documentation rather than a flag list. `--help` on any command is untouched.
-#[command(name = "reviewq", version, about, long_about = None, disable_help_subcommand = true)]
+#[command(name = "reviewq", version = crate::VERSION, about, long_about = None, disable_help_subcommand = true)]
 pub struct Cli {
     /// Config file to use (default: $XDG_CONFIG_HOME/reviewq/config.toml).
     #[arg(long, global = true, value_name = "PATH")]
