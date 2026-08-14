@@ -43,6 +43,25 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
             loaded.path.display()
         );
     }
+    // Every command, not just `doctor`: a key nobody reads is usually a typo,
+    // and a typo in a rule changes what you track. Said once, briefly, with the
+    // command that can say more.
+    if !loaded.unknown.is_empty() {
+        eprintln!(
+            "warning: {} in {} {} not read: {} — see `reviewq doctor`",
+            match loaded.unknown.len() {
+                1 => "one setting".to_string(),
+                n => format!("{n} settings"),
+            },
+            loaded.path.display(),
+            match loaded.unknown.len() {
+                1 => "is",
+                _ => "are",
+            },
+            loaded.unknown.join(", ")
+        );
+    }
+
     let cfg = &loaded;
     // Logging shares stderr with sync's progress line; the in-place rewrite is
     // only tidy when nothing else is writing there.

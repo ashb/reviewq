@@ -490,6 +490,16 @@ pub struct Loaded {
     /// This load just wrote the default config, so nothing in it reflects any
     /// choice the user has made yet.
     pub created: bool,
+    /// Keys the file carries and this build does not read, in the file's own
+    /// dotted spelling — `project.0.interest.0.show_label` for a mistyped key,
+    /// and `identity` for a whole table nothing reads, which is named as the
+    /// table rather than key by key.
+    ///
+    /// Not an error: a typo and a setting from a newer reviewq are the same
+    /// thing to a parser, and only one of them is worth refusing to start over.
+    /// `doctor` lists them, and `sync` says how many, because a mistyped rule
+    /// otherwise changes what you track and says nothing.
+    pub unknown: Vec<String>,
 }
 
 /// Load the config, writing the documented default if nothing is there yet.
@@ -521,17 +531,48 @@ fn load_from(path: &Path, create_if_missing: bool) -> Result<Loaded> {
 
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
+    // Collected rather than refused. A key this build does not know is either a
+    // typo — `intrest`, `show_label` — or a setting from a newer reviewq, and
+    // refusing the second to catch the first would make a config unshareable
+    // between versions. So both load, and both are reported: a setting nobody
+    // reads is a setting that silently does nothing, which is the failure this
+    // exists to make loud.
+    let mut unknown = Vec::new();
+    let parser = toml::Deserializer::parse(&raw)
+        .map_err(|err| anyhow::anyhow!(err))
+        .with_context(|| format!("parsing config {}", path.display()))?;
     let mut config: Config =
-        toml::from_str(&raw).with_context(|| format!("parsing config {}", path.display()))?;
+        serde_ignored::deserialize(parser, |key| unknown.push(key.to_string()))
+            .with_context(|| format!("parsing config {}", path.display()))?;
     // Before validation, so a `~/code/foo` checkout is checked as the directory it
     // means rather than as the literal path nobody has.
     config.expand_paths()?;
-    config.validate(path)?;
+    // A misspelt key is invisible to validation — the rule it was meant for
+    // simply has one condition fewer, and "sets no condition" is the complaint
+    // that follows. Naming what went unread turns that into the answer.
+    config
+        .validate(path)
+        .map_err(|err| match unknown.is_empty() {
+            true => err,
+            // Appended rather than added as context, which would print it first:
+            // the complaint is what happened, and this is why it may have.
+            false => anyhow::anyhow!(
+                "{err:#} — and these settings were not read, which may be why: {}",
+                unknown.join(", ")
+            ),
+        })?;
+
+    for key in &unknown {
+        // Logged, not printed: this crate writes to neither stream, and the
+        // line a person should read is the frontend's to phrase.
+        tracing::debug!(%key, config = %path.display(), "unrecognised config key");
+    }
 
     Ok(Loaded {
         config,
         path: path.to_path_buf(),
         created,
+        unknown,
     })
 }
 
@@ -1377,13 +1418,62 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_are_tolerated() {
-        toml::from_str::<Config>(&minimal(
+    fn an_unknown_key_loads_and_is_reported() {
+        // Both halves matter: a config written for a later reviewq has to load,
+        // and a typo has to be sayable — they are the same thing to a parser,
+        // and only the loading can be decided without a person.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
             r#"
+            [[project]]
+            repos = [{ owner = "apache", name = "airflow" }]
+            [[project.interest]]
+            labels = ["x"]
+            show_label = ["area:"]
+
+            [identity]
+            login = "ashb"
+
             [future]
             thing = 1
             "#,
-        ))
-        .expect("forward-compatible");
+        )
+        .expect("write");
+
+        let loaded = load_from(&path, false).expect("it still loads");
+
+        // A table nothing reads is reported as the table, not key by key.
+        assert!(
+            loaded.unknown.iter().any(|key| key == "identity"),
+            "a section nothing reads any more: {:?}",
+            loaded.unknown
+        );
+        assert!(
+            loaded.unknown.iter().any(|key| key.ends_with("show_label")),
+            "a near-miss for `show_labels`: {:?}",
+            loaded.unknown
+        );
+        assert!(
+            loaded.unknown.iter().any(|key| key.starts_with("future")),
+            "and a setting from a version that does not exist yet: {:?}",
+            loaded.unknown
+        );
+    }
+
+    #[test]
+    fn a_config_this_build_understands_reports_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, DEFAULT_CONFIG).expect("write");
+
+        let loaded = load_from(&path, false).expect("loads");
+
+        assert!(
+            loaded.unknown.is_empty(),
+            "the config reviewq ships is one reviewq reads: {:?}",
+            loaded.unknown
+        );
     }
 }

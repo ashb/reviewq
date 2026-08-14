@@ -166,6 +166,32 @@ fn a_help_page_draws_the_interface_rather_than_naming_a_file() {
     assert!(!page.contains("[img]"), "and no placeholders: {page}");
 }
 
+/// A typo in a config is silent by construction — unknown keys have to load, or
+/// a config written for a newer reviewq would refuse to start. So it is said out
+/// loud instead, by whatever command you happened to run.
+#[test]
+fn a_setting_reviewq_does_not_read_is_named_on_every_command() {
+    let (_dir, config, db) = workspace();
+    let existing = std::fs::read_to_string(&config).expect("read");
+    std::fs::write(
+        &config,
+        format!("{existing}\n[[project.interest]]\nlabels = [\"x\"]\nlables = [\"y\"]\n"),
+    )
+    .expect("write a typo");
+
+    let output = run_in(&config, &db, &["list"]);
+
+    let err = stderr(&output);
+    assert!(err.contains("not read"), "{err}");
+    assert!(err.contains("lables"), "it names the key: {err}");
+    assert!(err.contains("reviewq doctor"), "and where to look: {err}");
+
+    // And `doctor` counts it against a clean bill of health.
+    let doctor = run_in(&config, &db, &["doctor"]);
+    let shown = String::from_utf8_lossy(&doctor.stdout);
+    assert!(shown.contains("is not a setting reviewq reads"), "{shown}");
+}
+
 #[test]
 fn an_unknown_help_topic_says_what_there_is() {
     let (_dir, config, db) = workspace();

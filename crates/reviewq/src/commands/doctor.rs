@@ -38,6 +38,15 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
     } else if !db.exists() {
         row("ledger", &format!("{} (not created yet)", db.display()));
     }
+    // Before anything derived from config, because everything below is read
+    // from a file this may have just said is misspelt.
+    for key in &loaded.unknown {
+        problems += 1;
+        row(
+            "config",
+            &warn(&format!("{key} is not a setting reviewq reads")),
+        );
+    }
     row("handoff", &handoff_note(&loaded.config, &mut problems));
 
     for repo in loaded.config.repos() {
