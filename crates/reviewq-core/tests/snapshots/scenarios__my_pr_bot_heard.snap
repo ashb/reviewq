@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "A bot commented on a PR of mine, and a rule matching it asked to hear that bot. The same account on somebody else's PR stays silent."
+---
+[p1] @github-actions[bot] commented on your PR (since 2026-08-14T08:10:00Z)

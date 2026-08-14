@@ -32,7 +32,9 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Attention, AttentionReason, MyState, PrSnapshot, PrState, ThreadState};
+use crate::model::{
+    Attention, AttentionReason, MyState, OnMyPr, PrSnapshot, PrState, ThreadState, Verdict,
+};
 
 /// An @mention of me, found by scanning comment and review bodies at tier-2.
 ///
@@ -58,6 +60,10 @@ pub struct Said {
     pub by: String,
     /// When they spoke.
     pub at: Timestamp,
+    /// A review, and what it decided — or an ordinary comment. The two read
+    /// differently on a PR of mine: one is a verdict, the other a question.
+    #[serde(default)]
+    pub review: Option<Verdict>,
 }
 
 /// A formal review request that currently names me.
@@ -89,6 +95,11 @@ pub struct ClassifyCtx<'a> {
     /// What other people have said on the PR — top-level comments and reviews,
     /// mine already excluded.
     pub said: &'a [Said],
+    /// This is a PR I wrote, so anything said on it is said to me.
+    pub mine: bool,
+    /// Accounts otherwise discounted as bots whose word counts on this PR,
+    /// because a rule that matches it said so.
+    pub heard_bots: &'a [String],
     /// Logins I pulled into the discussion myself, by @mentioning them in
     /// something I wrote here. Quoted mentions are not mine to answer for, so
     /// they are not in this.
@@ -148,13 +159,17 @@ pub fn classify(
     }
 
     let mention = mention_attention(mine, now, ctx);
+    let my_pr = my_pr_attention(mine, ctx);
 
-    // A draft is work in progress; only a direct mention pierces it.
+    // A draft is work in progress; only a direct mention pierces it — and
+    // anything on a draft of my own, which is a draft I published to be told
+    // about.
     if pr.is_draft {
-        return mention.into_iter().collect();
+        return sorted(my_pr.into_iter().chain(mention).collect());
     }
 
     let mut out = Vec::new();
+    out.extend(my_pr);
     out.extend(mention);
     out.extend(thread_reply_attention(threads, mine, ctx));
     out.extend(resolved_unanswered_attention(pr, threads, mine));
@@ -167,12 +182,52 @@ pub fn classify(
         out.extend(needs_first_look_attention(pr, mine, ctx));
     }
 
+    sorted(out)
+}
+
+/// Most urgent first, which is the order every caller wants them in.
+fn sorted(mut out: Vec<Attention>) -> Vec<Attention> {
     out.sort();
     out
 }
 
-fn is_bot(login: &str, bots: &[String]) -> bool {
-    bots.iter().any(|b| b == login)
+/// Somebody did something on a PR I wrote, since I last did anything about it.
+///
+/// The top of the table, because it is the reason that unblocks rather than
+/// adds: an approval means merge it, changes requested means fix it, and a
+/// question means somebody is held up waiting on the answer.
+///
+/// Bots are discounted as everywhere else, unless a rule matching this PR asked
+/// to hear one — see [`ClassifyCtx::heard_bots`].
+fn my_pr_attention(mine: &MyState, ctx: &ClassifyCtx<'_>) -> Option<Attention> {
+    if !ctx.mine {
+        return None;
+    }
+    let latest = ctx
+        .said
+        .iter()
+        .filter(|said| !is_bot(&said.by, ctx))
+        .filter(|said| !acknowledged(said.at, mine))
+        .max_by_key(|said| said.at)?;
+    Some(Attention {
+        reason: AttentionReason::MyPr {
+            by: latest.by.clone(),
+            what: match latest.review {
+                Some(verdict) => OnMyPr::Reviewed(verdict),
+                None => OnMyPr::Commented,
+            },
+        },
+        since: latest.at,
+    })
+}
+
+/// Whether `login` is an account to discount here.
+///
+/// A bot named by a matching rule's `hear_bots` is not discounted on this PR —
+/// the same account can be noise on somebody else's PR and the whole point on
+/// your own.
+fn is_bot(login: &str, ctx: &ClassifyCtx<'_>) -> bool {
+    ctx.bots.iter().any(|b| b == login) && !ctx.heard_bots.iter().any(|b| b == login)
 }
 
 /// The newest non-bot mention of me that lands after my last action (any
@@ -181,7 +236,7 @@ fn mention_attention(mine: &MyState, _now: Timestamp, ctx: &ClassifyCtx<'_>) -> 
     let latest = ctx
         .mentions
         .iter()
-        .filter(|m| !is_bot(&m.by, ctx.bots))
+        .filter(|m| !is_bot(&m.by, ctx))
         .filter(|m| !acknowledged(m.at, mine))
         .max_by_key(|m| m.at)?;
     Some(Attention {
@@ -214,7 +269,7 @@ fn thread_reply_attention(
     let replied: Vec<&ThreadState> = threads
         .iter()
         .filter(|t| t.i_own && !t.is_resolved)
-        .filter(|t| spoken_after_me(t) && !last_speaker_is_bot(t, ctx.bots))
+        .filter(|t| spoken_after_me(t) && !last_speaker_is_bot(t, ctx))
         .filter(|t| {
             mine.done_at
                 .is_none_or(|done| t.last_comment_at > Some(done))
@@ -309,7 +364,7 @@ fn answered_after_review_attention(
     let latest = ctx
         .said
         .iter()
-        .filter(|said| !is_bot(&said.by, ctx.bots))
+        .filter(|said| !is_bot(&said.by, ctx))
         .filter(|said| said.by == pr.author || ctx.invited.iter().any(|who| who == &said.by))
         .filter(|said| !acknowledged(said.at, mine))
         .max_by_key(|said| said.at)?;
@@ -372,10 +427,10 @@ fn spoken_after_me(t: &ThreadState) -> bool {
     }
 }
 
-fn last_speaker_is_bot(t: &ThreadState, bots: &[String]) -> bool {
+fn last_speaker_is_bot(t: &ThreadState, ctx: &ClassifyCtx<'_>) -> bool {
     t.last_comment_author
         .as_deref()
-        .is_some_and(|a| is_bot(a, bots))
+        .is_some_and(|a| is_bot(a, ctx))
 }
 
 #[cfg(test)]
@@ -396,6 +451,7 @@ mod tests {
         let said = vec![Said {
             by: "uranusjr".into(),
             at: ts("2026-08-11T10:00:00Z"),
+            review: None,
         }];
         (pr, mine, said)
     }
@@ -425,6 +481,7 @@ mod tests {
         let said = vec![Said {
             by: "a-passer-by".into(),
             at: ts("2026-08-11T10:00:00Z"),
+            review: None,
         }];
 
         let ctx = ClassifyCtx {
@@ -441,6 +498,7 @@ mod tests {
         let said = vec![Said {
             by: "o-nikolas".into(),
             at: ts("2026-08-11T10:00:00Z"),
+            review: None,
         }];
         let invited = vec!["o-nikolas".to_string()];
 
@@ -496,6 +554,7 @@ mod tests {
         let later = vec![Said {
             by: "uranusjr".into(),
             at: ts("2026-08-11T12:00:00Z"),
+            review: None,
         }];
         let ctx = ClassifyCtx {
             said: &later,
@@ -850,6 +909,8 @@ mod tests {
         };
         let out = classify(&pr(), &mine, &[], now(), &ctx);
         let priorities: Vec<u8> = out.iter().map(|a| a.reason.priority()).collect();
-        assert_eq!(priorities, vec![1, 4]);
+        // A mention and a re-review, in that order — the bands themselves moved
+        // down when activity on my own PRs took the top of the table.
+        assert_eq!(priorities, vec![2, 5]);
     }
 }

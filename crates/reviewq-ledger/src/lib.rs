@@ -2911,7 +2911,7 @@ mod tests {
             )
             .unwrap()
             .expect_applied();
-        // #2 only needs a first look (priority 6).
+        // #2 only needs a first look, which is the bottom of the table.
         ledger
             .commit_detail(
                 repo_id,
@@ -2933,8 +2933,11 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].pr.number, 1);
         assert_eq!(queue[0].top.reason.discriminant(), "mention");
-        assert_eq!(queue[0].top.priority(), 1);
         assert_eq!(queue[1].pr.number, 2);
+        assert!(
+            queue[0].top.priority() < queue[1].top.priority(),
+            "the more urgent band leads, whatever the numbers are"
+        );
     }
 
     #[test]
@@ -3038,7 +3041,11 @@ mod tests {
         let stored = &ledger.show(repo_id, 1).unwrap().expect("stored").attention[0];
         assert_eq!(stored.reason, reason);
         assert_eq!(stored.reason.to_string(), reason.to_string());
-        assert_eq!(stored.priority(), 1);
+        assert_eq!(
+            stored.priority(),
+            reason.priority(),
+            "and its band is the reason's own, read back rather than stored"
+        );
 
         // And no column holds prerendered prose for it to disagree with.
         let columns: Vec<String> = ledger

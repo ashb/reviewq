@@ -191,6 +191,7 @@ async fn sync_repo(
         repo,
         &cfg.identity.login,
         &cfg.bots.logins,
+        rules,
         project.include_merged,
         &review_requested,
         now,
@@ -356,6 +357,7 @@ async fn detail_pass(
     repo: &RepoRef,
     login: &str,
     bots: &[String],
+    rules: &Interest,
     include_merged: bool,
     review_requested: &HashSet<u64>,
     now: Timestamp,
@@ -391,6 +393,7 @@ async fn detail_pass(
             review_requested,
             &tracked.pr,
             &tracked.tracked_reason,
+            &rules.heard_bots(&tracked.pr),
             now,
         )
         .await?
@@ -490,6 +493,7 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         &HashSet::new(),
         &show.pr,
         show.tracked_reason.as_deref().unwrap_or(""),
+        &cfg.interest_for(project)?.heard_bots(&show.pr),
         Timestamp::now(),
     )
     .await?;
@@ -578,6 +582,7 @@ pub async fn refresh_one(
     review_requested: &HashSet<u64>,
     pr: &PrSnapshot,
     tracked_reason: &str,
+    heard_bots: &[String],
     now: Timestamp,
 ) -> Result<Option<(PrDetail, bool)>> {
     let number = pr.number;
@@ -626,6 +631,8 @@ pub async fn refresh_one(
         mentions: &detail.mentions,
         said: &detail.said,
         invited: &detail.invited,
+        mine: pr.author.eq_ignore_ascii_case(login),
+        heard_bots,
         review_request,
         new_commits: detail.new_commits,
         include_merged,
@@ -1400,6 +1407,7 @@ mod engine_tests {
             &HashSet::new(),
             &show.pr,
             show.tracked_reason.as_deref().unwrap_or(""),
+            &[],
             now(),
         )
         .await

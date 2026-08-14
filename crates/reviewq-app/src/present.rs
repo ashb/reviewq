@@ -101,9 +101,10 @@ pub fn emphasis(priority: Option<u8>, deferred: bool) -> Emphasis {
     match priority {
         _ if deferred => Emphasis::Quiet,
         None => Emphasis::Quiet,
-        // Bands 1 and 2 are the mention and the reply in a thread you own: the
-        // two where a person is waiting on you rather than a rule pointing.
-        Some(p) if p <= 2 => Emphasis::Urgent,
+        // Bands 1 to 3 are activity on a PR of yours, a mention, and a reply in
+        // a thread you own: the ones where a person is waiting on you rather
+        // than a rule pointing.
+        Some(p) if p <= 3 => Emphasis::Urgent,
         Some(_) => Emphasis::Normal,
     }
 }
@@ -268,6 +269,16 @@ mod tests {
                 Some(band(AttentionReason::ThreadReply {
                     by: "kaxil".into(),
                     threads: 1
+                })),
+                false
+            ),
+            Emphasis::Urgent
+        );
+        assert_eq!(
+            emphasis(
+                Some(band(AttentionReason::MyPr {
+                    by: "kaxil".into(),
+                    what: reviewq_core::model::OnMyPr::Commented,
                 })),
                 false
             ),

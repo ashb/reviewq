@@ -1,0 +1,29 @@
+{
+  "description": "A bot commented on a PR of mine, and a rule matching it asked to hear that bot. The same account on somebody else's PR stays silent.",
+  "now": "2026-08-14T09:00:00Z",
+  "pr": {
+    "number": 71210,
+    "title": "Make the scheduler's parsing loop cancellable",
+    "author": "ashb",
+    "author_association": "MEMBER",
+    "head_sha": "d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a291",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-14T08:10:00Z",
+    "labels": ["area:Scheduler"],
+    "files": ["airflow-core/src/airflow/jobs/scheduler_job_runner.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_action_at": "2026-08-14T07:00:00Z"
+  },
+  "ctx": {
+    "mine": true,
+    "bots": ["github-actions[bot]", "codecov[bot]"],
+    "heard_bots": ["github-actions[bot]"],
+    "said": [
+      { "by": "codecov[bot]", "at": "2026-08-14T08:05:00Z" },
+      { "by": "github-actions[bot]", "at": "2026-08-14T08:10:00Z" }
+    ]
+  }
+}

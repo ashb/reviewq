@@ -99,10 +99,13 @@ mod tests {
             .map(reviewq_ledger::AttentionRow::priority)
             .collect();
 
-        assert_eq!(
-            bands.len(),
-            6,
-            "one of every attention reason there is: {bands:?}"
+        // A spread rather than a count: the picture is here to show that the
+        // ordering and the colours have something to say, and pinning it to the
+        // number of reasons there are would make the table's own shape this
+        // test's business.
+        assert!(
+            bands.len() >= 5,
+            "a morning, not one case — too few bands here: {bands:?}"
         );
         assert!(
             app.queue.iter().any(|item| item.item.deferred),

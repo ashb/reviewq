@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "Somebody approved a PR of mine. The top of the table: an approval means merge it, and nothing else in the table would have said so."
+---
+[p1] @potiuk approved your PR (since 2026-08-14T08:40:00Z)

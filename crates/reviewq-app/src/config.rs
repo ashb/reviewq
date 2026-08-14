@@ -163,11 +163,25 @@ pub struct InterestRule {
     /// Match a PR opened by any of these logins, whatever their relationship to
     /// the repo. What `author_associations` cannot say: whose PRs these are.
     pub authors: Vec<String>,
+    /// Match a PR I wrote.
+    ///
+    /// `authors = ["ashb"]` would say the same thing and say it twice: reviewq
+    /// already knows whose queue this is, and on a forge where you go by
+    /// another name it would say it wrongly. This asks the identity instead.
+    pub mine: bool,
     /// Match a PR whose author has any of these associations to the repo, e.g.
     /// `FIRST_TIME_CONTRIBUTOR`.
     pub author_associations: Vec<String>,
     /// Match a PR in any of these milestones.
     pub milestones: Vec<String>,
+    /// Accounts otherwise discounted as bots whose word counts on this rule's
+    /// PRs.
+    ///
+    /// A bot is noise on somebody else's PR and sometimes the whole point on
+    /// your own — "your PR broke the build" is news to its author and clutter
+    /// to a reviewer. Which PRs are which is what a rule already says, so this
+    /// is a rule's to say too, and every matching rule is heard.
+    pub hear_bots: Vec<String>,
     /// Keep the PRs this rule matches on the queue after they merge, so a
     /// post-merge reply or mention still surfaces.
     ///
@@ -181,8 +195,16 @@ pub struct InterestRule {
 
 impl InterestRule {
     /// Convert to a core rule input, refusing a rule that matches nothing.
-    fn to_input(&self) -> Result<RuleInput> {
+    ///
+    /// `me` is the login this queue belongs to on the host in question, which
+    /// is what `mine` compiles into — the rules themselves know nothing about
+    /// identity, and a login named here would be one more place to update when
+    /// it differs per forge.
+    fn to_input(&self, me: &str) -> Result<RuleInput> {
         let mut conditions = Vec::new();
+        if self.mine {
+            conditions.push(ConditionInput::Authors(vec![me.to_string()]));
+        }
         if !self.labels.is_empty() {
             conditions.push(ConditionInput::Labels(self.labels.clone()));
         }
@@ -202,7 +224,7 @@ impl InterestRule {
         }
         if conditions.is_empty() {
             bail!(
-                "interest rule{} sets no condition (needs one of labels/paths/\
+                "interest rule{} sets no condition (needs one of mine/labels/paths/\
                  authors/author_associations/milestones)",
                 self.name
                     .as_deref()
@@ -214,6 +236,7 @@ impl InterestRule {
             name: self.name.clone(),
             conditions,
             after_merge: self.after_merge,
+            hear_bots: self.hear_bots.clone(),
         })
     }
 }
@@ -655,7 +678,7 @@ impl Config {
         let inputs = project
             .interest
             .iter()
-            .map(InterestRule::to_input)
+            .map(|rule| rule.to_input(&self.identity.login))
             .collect::<Result<Vec<_>>>()?;
         Interest::compile(inputs).context("compiling interest globs")
     }
@@ -1060,6 +1083,43 @@ mod tests {
             reviewq_core::rules::Evaluation::NoMatch,
             "a login rule must not fire for everyone else"
         );
+    }
+
+    #[test]
+    fn a_rule_can_say_mine_without_saying_who_that_is() {
+        // The login is already in `[identity]`, and on another forge it may be
+        // a different one — a rule naming it would be a second place to be
+        // wrong.
+        let config: Config = toml::from_str(&minimal(
+            r#"
+            [[project.interest]]
+            name = "mine"
+            mine = true
+            hear_bots = ["github-actions[bot]"]
+            "#,
+        ))
+        .expect("parses");
+        config.validate(Path::new("cfg")).expect("validates");
+
+        let rules = config.interest_for(&config.projects[0]).expect("compiles");
+        let mut ours = pr();
+        ours.author = "ashb".into();
+        assert!(
+            matches!(
+                rules.evaluate(&ours),
+                reviewq_core::rules::Evaluation::Match(_)
+            ),
+            "the identity's own PRs match"
+        );
+        assert_eq!(
+            rules.evaluate(&pr()),
+            reviewq_core::rules::Evaluation::NoMatch,
+            "and nobody else's do"
+        );
+
+        // And the bots that rule asked to hear are heard on those PRs only.
+        assert_eq!(rules.heard_bots(&ours), ["github-actions[bot]"]);
+        assert!(rules.heard_bots(&pr()).is_empty());
     }
 
     #[test]

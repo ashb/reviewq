@@ -78,6 +78,18 @@ author_associations = ["FIRST_TIME_CONTRIBUTOR"]
 #   [[project.interest]]
 #   authors = ["potiuk"]
 
+# Your own PRs, so a review or a comment on one reaches the top of the queue.
+# `mine` rather than your own login: reviewq knows whose queue this is, and on
+# another forge you may go by a different name.
+#
+# `hear_bots` names accounts otherwise discounted as bots whose word counts on
+# this rule's PRs — a bot is noise on somebody else's PR and sometimes the whole
+# point on your own ("your PR broke the build"). Every matching rule is heard.
+#   [[project.interest]]
+#   name      = "mine"
+#   mine      = true
+#   hear_bots = ["github-actions[bot]"]
+
 # A rule may also keep its own PRs on the queue after they merge, without the
 # whole project doing so — a change in these paths, by someone whose work you
 # check, is worth a look even once it has shipped:

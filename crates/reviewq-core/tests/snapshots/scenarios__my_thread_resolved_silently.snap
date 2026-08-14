@@ -2,4 +2,4 @@
 source: crates/reviewq-core/tests/scenarios.rs
 expression: "Someone resolved my thread without replying: resolved-unanswered, which only an explicit ack clears."
 ---
-[p3] @potiuk resolved your thread without replying (since 2026-08-05T07:05:00Z)
+[p4] @potiuk resolved your thread without replying (since 2026-08-05T07:05:00Z)

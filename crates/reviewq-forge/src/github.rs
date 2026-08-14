@@ -934,6 +934,7 @@ impl DetailPr {
                 (false, Some(by), Some(at)) => said.push(Said {
                     by: by.to_string(),
                     at,
+                    review: Verdict::from_wire(&review.state),
                 }),
                 (false, _, _) => {}
             }
@@ -986,6 +987,7 @@ impl DetailPr {
                 said.push(Said {
                     by: by.to_string(),
                     at: comment.created_at,
+                    review: None,
                 });
             }
             if let Some(m) = mention_from(

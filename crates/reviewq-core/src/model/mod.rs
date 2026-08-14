@@ -9,5 +9,5 @@ mod reason;
 mod snapshot;
 
 pub use classify::{ClassifyCtx, Mention, ReviewRequest, Said, classify};
-pub use reason::{Attention, AttentionReason};
+pub use reason::{Attention, AttentionReason, OnMyPr};
 pub use snapshot::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};

@@ -48,6 +48,10 @@ struct ScenarioCtx {
     #[serde(default)]
     said: Vec<Said>,
     #[serde(default)]
+    mine: bool,
+    #[serde(default)]
+    heard_bots: Vec<String>,
+    #[serde(default)]
     invited: Vec<String>,
     #[serde(default)]
     new_commits: u32,
@@ -73,6 +77,8 @@ impl Scenario {
             mentions: &self.ctx.mentions,
             review_request: self.ctx.review_request.clone(),
             said: &self.ctx.said,
+            mine: self.ctx.mine,
+            heard_bots: &self.ctx.heard_bots,
             invited: &self.ctx.invited,
             new_commits: self.ctx.new_commits,
             include_merged: self.ctx.include_merged,
@@ -184,6 +190,7 @@ fn every_attention_reason_is_covered_by_a_fixture() {
 
     let expected = [
         "answered_after_review",
+        "my_pr",
         "mention",
         "needs_first_look",
         "re_review",

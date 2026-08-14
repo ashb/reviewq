@@ -2,4 +2,4 @@
 source: crates/reviewq-core/tests/scenarios.rs
 expression: "Muted PR with a fresh reply in a thread I own: the reason is computed all the same. A mute says what you want shown, which is the queue's business — so what you silenced can be listed, with the reason that would have surfaced it, and unmuting needs no sync to bring it back."
 ---
-[p2] @o-nikolas replied in a thread you own (since 2026-08-05T11:30:00Z)
+[p3] @o-nikolas replied in a thread you own (since 2026-08-05T11:30:00Z)

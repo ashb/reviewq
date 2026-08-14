@@ -1,6 +1,8 @@
 use std::fmt;
 
 use jiff::Timestamp;
+
+use crate::model::Verdict;
 use serde::{Deserialize, Serialize};
 
 /// Why a PR is in the queue, and since when.
@@ -29,6 +31,18 @@ pub struct Attention {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum AttentionReason {
+    /// Somebody did something on a PR I wrote: reviewed it, or said something.
+    ///
+    /// First in the table because it is the one that unblocks work rather than
+    /// adding it — a review of mine is somebody else's PR moving, and a review
+    /// of theirs is mine.
+    MyPr {
+        /// Login of whoever did it.
+        by: String,
+        /// What they did.
+        what: OnMyPr,
+    },
+
     /// Someone @mentioned me in a comment newer than my last action.
     Mention {
         /// Login of whoever mentioned me.
@@ -89,21 +103,32 @@ pub enum AttentionReason {
     },
 }
 
+/// What somebody did on a PR of mine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnMyPr {
+    /// Submitted a review, with the verdict they gave.
+    Reviewed(Verdict),
+    /// Said something that was not a review.
+    Commented,
+}
+
 impl AttentionReason {
     /// Queue priority; 1 is most urgent. Matches the reason table in the design
     /// doc, and is the primary sort key for the queue.
     pub fn priority(&self) -> u8 {
         match self {
-            Self::Mention { .. } => 1,
-            Self::ThreadReply { .. } => 2,
-            Self::ResolvedUnanswered { .. } => 3,
-            Self::ReReview { .. } => 4,
+            Self::MyPr { .. } => 1,
+            Self::Mention { .. } => 2,
+            Self::ThreadReply { .. } => 3,
+            Self::ResolvedUnanswered { .. } => 4,
+            Self::ReReview { .. } => 5,
             // Above a fresh request, below new commits: this is a PR you are
             // already in, and somebody is waiting on your answer to what you
             // already said.
-            Self::AnsweredAfterReview { .. } => 5,
-            Self::ReviewRequested { .. } => 6,
-            Self::NeedsFirstLook { .. } => 7,
+            Self::AnsweredAfterReview { .. } => 6,
+            Self::ReviewRequested { .. } => 7,
+            Self::NeedsFirstLook { .. } => 8,
         }
     }
 
@@ -116,6 +141,7 @@ impl AttentionReason {
     /// stored data.
     pub fn discriminant(&self) -> &'static str {
         match self {
+            Self::MyPr { .. } => "my_pr",
             Self::Mention { .. } => "mention",
             Self::ThreadReply { .. } => "thread_reply",
             Self::ResolvedUnanswered { .. } => "resolved_unanswered",
@@ -130,6 +156,15 @@ impl AttentionReason {
 impl fmt::Display for AttentionReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MyPr { by, what } => match what {
+                OnMyPr::Reviewed(Verdict::Approved) => write!(f, "@{by} approved your PR"),
+                OnMyPr::Reviewed(Verdict::ChangesRequested) => {
+                    write!(f, "@{by} requested changes on your PR")
+                }
+                OnMyPr::Reviewed(Verdict::Commented) => write!(f, "@{by} reviewed your PR"),
+                OnMyPr::Commented => write!(f, "@{by} commented on your PR"),
+            },
+
             Self::Mention { by } => write!(f, "@{by} mentioned you"),
 
             Self::ThreadReply { by, threads } => {
@@ -214,8 +249,12 @@ mod tests {
 
     /// One of each variant, so a test covering "all of them" keeps covering all
     /// of them when a variant is added.
-    fn every_variant() -> [AttentionReason; 7] {
+    fn every_variant() -> [AttentionReason; 8] {
         [
+            AttentionReason::MyPr {
+                by: "a".into(),
+                what: OnMyPr::Commented,
+            },
             AttentionReason::Mention { by: "a".into() },
             AttentionReason::ThreadReply {
                 by: "a".into(),
@@ -244,7 +283,7 @@ mod tests {
 
         let mut priorities: Vec<u8> = all.iter().map(AttentionReason::priority).collect();
         priorities.sort_unstable();
-        assert_eq!(priorities, (1..=7).collect::<Vec<u8>>());
+        assert_eq!(priorities, (1..=8).collect::<Vec<u8>>());
     }
 
     #[test]

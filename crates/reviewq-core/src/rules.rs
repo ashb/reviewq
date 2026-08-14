@@ -26,6 +26,9 @@ pub struct RuleInput {
     pub conditions: Vec<ConditionInput>,
     /// This rule's PRs stay worth reviewing after they merge.
     pub after_merge: bool,
+    /// Accounts that are ordinarily discounted as bots, but whose word counts
+    /// on this rule's PRs.
+    pub hear_bots: Vec<String>,
 }
 
 /// One condition of a rule, before compilation. Each carries the set of values
@@ -71,6 +74,7 @@ struct Rule {
     name: Option<String>,
     conditions: Vec<Condition>,
     after_merge: bool,
+    hear_bots: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,7 @@ impl Interest {
                 name: rule.name,
                 conditions,
                 after_merge: rule.after_merge,
+                hear_bots: rule.hear_bots,
             });
         }
         Ok(Self { rules: compiled })
@@ -157,6 +162,30 @@ impl Interest {
             .iter()
             .filter(|rule| rule.after_merge)
             .any(|rule| matches!(rule.evaluate(pr), RuleOutcome::Match(_)))
+    }
+
+    /// The bots worth hearing on `pr` — every matching rule's, together.
+    ///
+    /// Asked of every matching rule for the same reason
+    /// [`keeps_after_merge`](Self::keeps_after_merge) is: interest is a
+    /// disjunction, so a rule saying "on my own PRs, the CI bot is not noise"
+    /// must be heard even when a broader rule named the PR first.
+    ///
+    /// A bot is noise on somebody else's PR and sometimes the whole point on
+    /// your own — "your PR broke the build" is news to its author and clutter
+    /// to a reviewer — and which PRs are which is what a rule already says.
+    pub fn heard_bots(&self, pr: &PrSnapshot) -> Vec<String> {
+        let mut heard: Vec<String> = Vec::new();
+        for rule in self.rules.iter().filter(|rule| !rule.hear_bots.is_empty()) {
+            if matches!(rule.evaluate(pr), RuleOutcome::Match(_)) {
+                for bot in &rule.hear_bots {
+                    if !heard.contains(bot) {
+                        heard.push(bot.clone());
+                    }
+                }
+            }
+        }
+        heard
     }
 }
 
@@ -291,6 +320,7 @@ mod tests {
             name: None,
             conditions,
             after_merge: false,
+            hear_bots: Vec::new(),
         }
     }
 

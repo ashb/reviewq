@@ -1,0 +1,24 @@
+{
+  "description": "Somebody approved a PR of mine. The top of the table: an approval means merge it, and nothing else in the table would have said so.",
+  "now": "2026-08-14T09:00:00Z",
+  "pr": {
+    "number": 71204,
+    "title": "Fix short-read handling in task-sdk IPC framing",
+    "author": "ashb",
+    "author_association": "MEMBER",
+    "head_sha": "5e14b22a0e6b4c8d9f0a1b2c3d4e5f6a7b8c9d0e",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-14T08:40:00Z",
+    "labels": ["area:task-sdk"],
+    "files": ["task-sdk/src/airflow/sdk/execution_time/comms.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_action_at": "2026-08-13T17:00:00Z"
+  },
+  "ctx": {
+    "mine": true,
+    "said": [{ "by": "potiuk", "at": "2026-08-14T08:40:00Z", "review": "APPROVED" }]
+  }
+}
