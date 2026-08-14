@@ -2137,10 +2137,27 @@ sensor = S3KeySensor(deferrable=True)
     fn the_help_overlay_lists_every_binding_grouped() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.overlay = Overlay::Help { scroll: 0 };
-        // Tall enough for the whole reference — which grows as bindings are added,
-        // so this has room to spare. What it does when it *doesn't* fit is the
-        // next test's business.
-        let screen = render(&mut app, 100, 50).join("\n");
+
+        // Tall enough for the whole reference to show unscrolled, derived the
+        // same way `help_overlay` sizes it: one line per mark, binding and
+        // gesture, two more for every section heading, and two for the
+        // reference's own border — plus the header, footer, and the two rows
+        // `help_overlay` reserves so a queue row stays visible above and
+        // below it. Deriving this from the table rather than a fixed height
+        // keeps the test honest as bindings are added, instead of quietly
+        // starting to assert against a scrolled-off screen.
+        let mut wanted = 1 + MARKS.len();
+        let mut group = "";
+        for binding in keys::described() {
+            if binding.group != group {
+                wanted += 2;
+                group = binding.group;
+            }
+            wanted += 1;
+        }
+        wanted += 2 + MOUSE_GESTURES.len() + 2;
+        let height = (wanted + 4) as u16;
+        let screen = render(&mut app, 100, height).join("\n");
 
         // Every binding the table describes reaches the reference — derived from
         // the table rather than listed here, so a new key with no entry fails

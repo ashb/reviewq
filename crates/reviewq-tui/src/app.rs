@@ -1167,6 +1167,8 @@ impl App {
                 | Action::Up
                 | Action::PageDown
                 | Action::PageUp
+                | Action::ScrollDetailDown
+                | Action::ScrollDetailUp
                 | Action::First
                 | Action::Last,
             ) => unreachable!("update handles these and returns Handled"),
@@ -1222,8 +1224,8 @@ impl App {
             // something else would be a change you cannot see.
             Action::Down => self.scroll_peek(1),
             Action::Up => self.scroll_peek(-1),
-            Action::PageDown => self.scroll_peek(page),
-            Action::PageUp => self.scroll_peek(-page),
+            Action::PageDown | Action::ScrollDetailDown => self.scroll_peek(page),
+            Action::PageUp | Action::ScrollDetailUp => self.scroll_peek(-page),
             Action::First => self.scroll_peek(isize::MIN),
             Action::Last => self.scroll_peek(isize::MAX),
             Action::OpenInBrowser => {
@@ -1855,6 +1857,10 @@ impl App {
             Action::Up => handled(self.scroll(-1)),
             Action::PageDown => handled(self.scroll(page)),
             Action::PageUp => handled(self.scroll(-page)),
+            // Unlike `PageDown`/`PageUp`, these reach the description whether
+            // or not it has the keyboard's focus.
+            Action::ScrollDetailDown => handled(self.scroll_detail(page)),
+            Action::ScrollDetailUp => handled(self.scroll_detail(-page)),
             Action::First => handled(self.scroll_to_start()),
             Action::Last => handled(self.scroll_to_end()),
             // Not this layer's: performing these needs the hooks, the channel or
@@ -2066,13 +2072,16 @@ impl App {
     fn scroll(&mut self, delta: isize) -> Result<()> {
         match self.focus {
             Focus::Queue => self.move_by(delta),
-            Focus::Detail => {
-                let target = self.detail_scroll as isize + delta;
-                self.detail_scroll = target.max(0).try_into().unwrap_or(u16::MAX);
-                self.clamp_detail_scroll();
-                Ok(())
-            }
+            Focus::Detail => self.scroll_detail(delta),
         }
+    }
+
+    /// Move the description `delta` rows, regardless of which pane has focus.
+    fn scroll_detail(&mut self, delta: isize) -> Result<()> {
+        let target = self.detail_scroll as isize + delta;
+        self.detail_scroll = target.max(0).try_into().unwrap_or(u16::MAX);
+        self.clamp_detail_scroll();
+        Ok(())
     }
 
     fn scroll_to_start(&mut self) -> Result<()> {

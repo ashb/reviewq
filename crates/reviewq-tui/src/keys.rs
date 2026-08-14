@@ -25,10 +25,14 @@ pub enum Action {
     Down,
     /// One row up.
     Up,
-    /// A screenful down.
+    /// A screenful down, in whichever pane has focus.
     PageDown,
-    /// A screenful up.
+    /// A screenful up, in whichever pane has focus.
     PageUp,
+    /// A screenful down through the description, whichever pane has focus.
+    ScrollDetailDown,
+    /// A screenful up through the description, whichever pane has focus.
+    ScrollDetailUp,
     /// Jump to the first row.
     First,
     /// Jump to the last row.
@@ -140,8 +144,8 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         action: Action::PageDown,
-        chords: &[key(KeyCode::PageDown), ctrl(KeyCode::Char('d'))],
-        keys: "PgDn / ^D",
+        chords: &[key(KeyCode::PageDown)],
+        keys: "PgDn",
         what: "page down",
         group: "Navigate",
         footer: false,
@@ -149,9 +153,31 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         action: Action::PageUp,
-        chords: &[key(KeyCode::PageUp), ctrl(KeyCode::Char('u'))],
-        keys: "PgUp / ^U",
+        chords: &[key(KeyCode::PageUp)],
+        keys: "PgUp",
         what: "page up",
+        group: "Navigate",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        // `^D`/`^U` rather than folding into `PageDown`/`PageUp` above: those
+        // page whichever pane has focus, but the description is what you're
+        // usually paging through while the queue still has the keyboard, and
+        // tabbing over first just to page it is the friction this removes.
+        action: Action::ScrollDetailDown,
+        chords: &[ctrl(KeyCode::Char('d'))],
+        keys: "^D",
+        what: "page the description down",
+        group: "Navigate",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        action: Action::ScrollDetailUp,
+        chords: &[ctrl(KeyCode::Char('u'))],
+        keys: "^U",
+        what: "page the description up",
         group: "Navigate",
         footer: false,
         hidden: false,
@@ -440,11 +466,12 @@ mod tests {
 
     #[test]
     fn ctrl_is_part_of_the_match() {
-        // `ctrl-d` pages while a bare `d` marks done: two unrelated actions on
-        // the same letter, which only holds because Ctrl is part of the match.
+        // `ctrl-d` pages the description while a bare `d` marks done: two
+        // unrelated actions on the same letter, which only holds because Ctrl
+        // is part of the match.
         assert_eq!(
             action_for(press_ctrl(KeyCode::Char('d'))),
-            Some(Action::PageDown)
+            Some(Action::ScrollDetailDown)
         );
         assert_eq!(action_for(press(KeyCode::Char('d'))), Some(Action::Done));
         // And `ctrl-q` is not `q`.

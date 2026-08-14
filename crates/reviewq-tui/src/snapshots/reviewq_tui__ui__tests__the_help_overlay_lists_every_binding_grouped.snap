@@ -14,18 +14,20 @@ reviewq  2 on the queue
 │                  │                                                           │                   │
 │                  │ Navigate                                                  │                   │
 │                  │   ↑↓ / jk     move                                        │                   │
-│                  │   PgDn / ^D   page down                                   │                   │
-│                  │   PgUp / ^U   page up                                     │                   │
+│                  │   PgDn        page down                                   │                   │
+│                  │   PgUp        page up                                     │                   │
+│                  │   ^D          page the description down                   │                   │
+│                  │   ^U          page the description up                     │                   │
 │                  │   g / Home    first                                       │                   │
-│                  │   G / End     last                                        │                   │
+│                  │   G / End     last                                        │nsor.              │
 │                  │   :           go to a PR by number                        │                   │
-│                  │                                                           │nsor.              │
+│                  │                                                           │                   │
 │                  │ View                                                      │                   │
 │                  │   Tab         switch pane                                 │                   │
 │                  │   t           adapt for a light or dark terminal          │                   │
-│                  │   ^L          show or hide the labels                     │                   │
+│                  │   ^L          show or hide the labels                     │rue)               │
 │                  │   W           show what waits on someone else, or go back │                   │
-│                  │   M           show what you have muted, or go back        │rue)               │
+│                  │   M           show what you have muted, or go back        │                   │
 │                  │                                                           │                   │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
