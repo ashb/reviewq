@@ -700,7 +700,7 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(keyed_hint(
                 &[
-                    ("Esc", "back to the queue"),
+                    ("Esc / Tab", "back to the queue"),
                     ("jk", "scroll"),
                     ("o", "open"),
                     ("c / y", "copy URL"),
@@ -857,12 +857,15 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
             ))],
             t,
         ),
-        Overlay::Peeking { number } => modal(
+        Overlay::Peeking { number, from_forge } => modal(
             frame,
             area,
             &format!(" #{number} "),
             vec![Line::from(Span::styled(
-                "Reading it…",
+                match from_forge {
+                    true => "Fetching from the forge…",
+                    false => "Reading it…",
+                },
                 Style::default().fg(color(t.text)),
             ))],
             t,

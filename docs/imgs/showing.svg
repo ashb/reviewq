@@ -189,12 +189,12 @@
 <text x="1167.6" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="589.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────╯</text>
 <text x="529.2" y="589.5" fill="#606a74" textLength="646.8" lengthAdjust="spacing" xml:space="preserve">╰───────────────────────────────────────────────────────────────────────────╯</text>
-<text x="16.8" y="607.5" fill="#ebcb8b" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Esc</text>
-<text x="42.0" y="607.5" fill="#9a9a9a" textLength="151.2" lengthAdjust="spacing" xml:space="preserve"> back to the queue</text>
-<text x="218.4" y="607.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">jk</text>
-<text x="235.2" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> scroll</text>
-<text x="319.2" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">o</text>
-<text x="327.6" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> open</text>
-<text x="394.8" y="607.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">c / y</text>
-<text x="436.8" y="607.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve"> copy URL</text>
+<text x="16.8" y="607.5" fill="#ebcb8b" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Esc / Tab</text>
+<text x="92.4" y="607.5" fill="#9a9a9a" textLength="151.2" lengthAdjust="spacing" xml:space="preserve"> back to the queue</text>
+<text x="268.8" y="607.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">jk</text>
+<text x="285.6" y="607.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> scroll</text>
+<text x="369.6" y="607.5" fill="#ebcb8b" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">o</text>
+<text x="378.0" y="607.5" fill="#9a9a9a" textLength="42.0" lengthAdjust="spacing" xml:space="preserve"> open</text>
+<text x="445.2" y="607.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">c / y</text>
+<text x="487.2" y="607.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve"> copy URL</text>
 </svg>

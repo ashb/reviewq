@@ -487,6 +487,10 @@ pub enum Overlay {
     Peeking {
         /// The PR being read.
         number: u64,
+        /// It is not in the ledger, so this is a round trip to the forge rather
+        /// than a read that will be over before the notice is seen. The wait is
+        /// the reason the notice exists, so it should say which one it is.
+        from_forge: bool,
     },
     /// Typing a PR number to jump to.
     JumpPrompt {
@@ -1238,8 +1242,15 @@ impl App {
                 self.start_sync(channel, hooks);
                 Ok(())
             }
+            // Not a refusal: `Tab` asks for the other pane, and while a PR is
+            // on show the other pane is the queue behind it — so the way there
+            // is to put this away, which is what the key is reaching for. It
+            // refused before, and a key that does nothing reads as a freeze.
+            Action::SwitchPane => {
+                self.stop_peeking();
+                Ok(())
+            }
             Action::Jump
-            | Action::SwitchPane
             | Action::RefreshSelected
             | Action::Review
             | Action::Done
@@ -1356,12 +1367,19 @@ impl App {
         };
 
         // A peeked PR owns the screen the way the keyboard sees it, so the wheel
-        // scrolls what is being read wherever the pointer is, and a click on a
-        // queue row — which is not what is on show — does nothing.
+        // scrolls what is being read wherever the pointer is. A click on the
+        // queue is the other thing somebody does to leave: those rows are drawn
+        // and clickable, and pointing at one is not ambiguous — it says put this
+        // away and take me to that. Ignoring it, as this did, leaves a reader
+        // clicking a row that never lights up.
         if self.peek.is_some() {
             return match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll_peek(-WHEEL_ROWS),
                 MouseEventKind::ScrollDown => self.scroll_peek(WHEEL_ROWS),
+                MouseEventKind::Down(MouseButton::Left) if pane == Focus::Queue => {
+                    self.stop_peeking();
+                    self.select_row_at(mouse.row)
+                }
                 _ => Ok(()),
             };
         }
@@ -1437,7 +1455,13 @@ impl App {
                 // either blocks on the forge — same reason as the handoff.
                 match key.code {
                     KeyCode::Char('s') | KeyCode::Enter => {
-                        self.overlay = Overlay::Peeking { number };
+                        self.overlay = Overlay::Peeking {
+                            number,
+                            // Everything but `Unknown` is stored, and a stored
+                            // PR is read from the ledger without a network in
+                            // sight.
+                            from_forge: why == Unqueued::Unknown,
+                        };
                         self.pending_peek = Some(number);
                     }
                     KeyCode::Char('t') if why.trackable() => {
@@ -3902,6 +3926,108 @@ mod loop_tests {
         assert!(app.peek.is_none());
         assert_eq!(app.focus, Focus::Queue);
         assert!(app.status.is_none(), "and says nothing about it afterwards");
+    }
+
+    #[test]
+    fn the_wait_for_a_pr_says_which_wait_it_is() {
+        // A PR the ledger has never seen costs a round trip; one it has is read
+        // and drawn before anybody reads the notice. The notice exists for the
+        // first, so it should not claim the second.
+        let mut unknown = app();
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(
+            &mut unknown,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('9'),
+                KeyCode::Enter,
+                KeyCode::Char('s'),
+            ],
+        );
+        assert_eq!(
+            unknown.overlay,
+            Overlay::Peeking {
+                number: 9,
+                from_forge: true
+            },
+            "#9 is unknown, so it has to be fetched"
+        );
+
+        // A stored one is a local read, and saying "fetching" of it would be a
+        // lie. Merged, because `:` finds a tracked PR on whichever list it is
+        // on and switches to it — the offer to show only comes up for a PR no
+        // list has, and merged is the commonest of those.
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut merged = pr_snapshot(70999);
+        merged.state = reviewq_core::model::PrState::Merged;
+        ledger
+            .upsert_pr(repo_id, &merged, None, ts("2026-08-11T12:00:00Z"))
+            .expect("stored");
+        let mut stored = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        feed(
+            &mut stored,
+            &hooks,
+            &[
+                KeyCode::Char(':'),
+                KeyCode::Char('7'),
+                KeyCode::Char('0'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
+                KeyCode::Char('9'),
+                KeyCode::Enter,
+                KeyCode::Char('s'),
+            ],
+        );
+        assert_eq!(
+            stored.overlay,
+            Overlay::Peeking {
+                number: 70999,
+                from_forge: false
+            }
+        );
+    }
+
+    #[test]
+    fn tab_leaves_a_shown_pr_rather_than_doing_nothing() {
+        // Reported as "tab doesn't switch panels any more": `:`, `s`, and then
+        // a key that refused with a status line, which reads as a stuck screen
+        // rather than as a mode.
+        let (app, _) = showing_nine(&[special(KeyCode::Tab)]);
+
+        assert!(app.peek.is_none(), "it put the PR away");
+        assert_eq!(app.focus, Focus::Queue, "and gave the keys to the queue");
+    }
+
+    #[test]
+    fn clicking_a_queue_row_leaves_a_shown_pr_for_that_row() {
+        // The other half of the same report: the rows are drawn and clickable
+        // the whole time a PR is on show, and clicking one did nothing at all.
+        let mut app = App::with_ledger(Theme::default(), two_queued(), test_config()).expect("app");
+        let (hooks, _) = fake_hooks(
+            vec![
+                press(':'),
+                press('9'),
+                special(KeyCode::Enter),
+                press('s'),
+                click(QUEUE_COLUMN, FIRST_ROW + 1),
+                press('q'),
+            ],
+            None,
+            false,
+        );
+
+        drive(&mut app, &hooks);
+
+        assert!(app.peek.is_none(), "the click put it away");
+        assert_eq!(
+            app.current().map(|item| item.item.pr.number),
+            Some(70201),
+            "and selected the row that was clicked"
+        );
+        assert_eq!(app.focus, Focus::Queue);
     }
 
     #[test]
