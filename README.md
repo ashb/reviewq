@@ -124,6 +124,13 @@ decision, though each paints it in its own palette.
 A reason answers a question the forge cannot: not *did something happen*, but
 *has something happened since I last looked*.
 
+Which reasons a PR carries is decided when its detail is fetched, and a detail
+is only re-fetched when the PR has changed since the last one. So a reviewq that
+learns a new reason says nothing new about a PR nobody has touched — until
+`reviewq sync --all` re-examines every tracked PR, which is worth running once
+after an upgrade and never otherwise. One fetch per tracked PR, against a budget
+of 5,000 an hour.
+
 Some states silence a PR before any of that is computed. A snooze suppresses
 everything until it lapses, mentions included, and consumes nothing — the same
 reasons reappear afterwards unchanged. A closed-unmerged PR is abandoned and stays
@@ -191,7 +198,7 @@ stop asking at the next sync.
 
 | | |
 |---|---|
-| `sync [N] [--labels]` | Fetch from the forge and rebuild the ledger, refresh one PR, or bring in each repo's label palette |
+| `sync [N] [--all] [--labels]` | Fetch from the forge and rebuild the ledger, refresh one PR, re-examine every tracked PR, or bring in each repo's label palette |
 | `list [--all\|--waiting\|--muted] [--json]` | The queue, everything tracked, what waits on someone else, or what you have silenced — each row with the mark and any live snooze |
 | `next [--json]` | Just the most urgent one |
 | `show <N\|url> [--json]` | Everything known about one PR and why it is on the queue |

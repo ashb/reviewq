@@ -165,6 +165,15 @@ pub struct SyncArgs {
     #[arg(value_parser = pr_number)]
     pub number: Option<u64>,
 
+    /// Re-fetch every tracked PR, not only the ones that have changed.
+    ///
+    /// What a reason means is decided when a PR's detail is classified, so a
+    /// reviewq that learns a new reason says nothing new about a PR nobody has
+    /// touched since. This applies it to everything, at one fetch per tracked
+    /// PR — worth running once after an upgrade, and never otherwise.
+    #[arg(long, conflicts_with = "number")]
+    pub all: bool,
+
     /// Also fetch every label each repo defines, with its colour.
     ///
     /// A label's colour changes about never, so an ordinary sync does not ask:

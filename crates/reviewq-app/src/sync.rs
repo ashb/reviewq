@@ -14,7 +14,7 @@ use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ClassifyCtx, PrSnapshot, PrState, classify};
 use reviewq_core::rules::{Evaluation, Interest};
 use reviewq_forge::{Forge, PrDetail};
-use reviewq_ledger::{Committed, Ledger, TrackedReason};
+use reviewq_ledger::{Committed, Detail, Ledger, TrackedReason};
 
 use crate::config::{Config, Project, RepoRef};
 use crate::identity::Logins;
@@ -31,7 +31,12 @@ pub const TRUNCATED_KEY: &str = "last_sweep_truncated";
 /// writing through one ledger handle. A failure on any repo aborts the run —
 /// but everything committed before it stays committed, and the cursor means the
 /// next sync resumes rather than starts over.
-pub async fn run(cfg: &Config, labels: bool, progress: &mut dyn SyncProgress) -> Result<ExitCode> {
+pub async fn run(
+    cfg: &Config,
+    labels: bool,
+    which: Detail,
+    progress: &mut dyn SyncProgress,
+) -> Result<ExitCode> {
     let now = Timestamp::now();
     // One handle for the whole run: every configured repo's sync writes
     // through it, each scoped by its own `repo_id`.
@@ -62,6 +67,7 @@ pub async fn run(cfg: &Config, labels: bool, progress: &mut dyn SyncProgress) ->
                 &rules,
                 &me,
                 labels,
+                which,
                 now,
                 progress,
             )
@@ -86,6 +92,7 @@ async fn sync_repo(
     rules: &Interest,
     me: &str,
     labels: bool,
+    which: Detail,
     now: Timestamp,
     progress: &mut dyn SyncProgress,
 ) -> Result<()> {
@@ -203,6 +210,7 @@ async fn sync_repo(
         me,
         &cfg.bots.logins,
         rules,
+        which,
         project.include_merged,
         &review_requested,
         now,
@@ -369,13 +377,14 @@ async fn detail_pass(
     login: &str,
     bots: &[String],
     rules: &Interest,
+    which: Detail,
     include_merged: bool,
     review_requested: &HashSet<u64>,
     now: Timestamp,
     stats: &mut Stats,
     progress: &mut dyn SyncProgress,
 ) -> Result<()> {
-    let pending = ledger.prs_needing_detail(repo_id, include_merged)?;
+    let pending = ledger.prs_needing_detail(repo_id, include_merged, which)?;
     let total = pending.len() as u32;
     for (index, tracked) in pending.iter().enumerate() {
         // The floor is checked against the budget the last fetch reported, so we
@@ -971,6 +980,7 @@ mod engine_tests {
             &rules,
             "ashb",
             labels,
+            Detail::Stale,
             now(),
             &mut progress,
         )
@@ -1098,6 +1108,7 @@ mod engine_tests {
             &rules,
             "ashb",
             false,
+            Detail::Stale,
             now(),
             &mut RecordingProgress::default(),
         )
@@ -1142,7 +1153,7 @@ mod engine_tests {
         );
         assert_eq!(
             ledger
-                .prs_needing_detail(repo_id, false)
+                .prs_needing_detail(repo_id, false, Detail::Stale)
                 .expect("pending")
                 .len(),
             2,
@@ -1175,7 +1186,7 @@ mod engine_tests {
             "only the PR that still exists is on the queue"
         );
         let pending: Vec<u64> = ledger
-            .prs_needing_detail(repo_id, false)
+            .prs_needing_detail(repo_id, false, Detail::Stale)
             .expect("pending")
             .iter()
             .map(|t| t.pr.number)
@@ -1213,6 +1224,7 @@ mod engine_tests {
             &rules,
             "ashb",
             false,
+            Detail::Stale,
             now(),
             &mut RecordingProgress::default(),
         )

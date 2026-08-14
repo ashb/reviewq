@@ -97,9 +97,14 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
                     tx: tx.clone(),
                     summaries: Vec::new(),
                 };
+                // The interface's `S` is the ordinary sync: whatever has changed
+                // since last time. Re-detailing everything is a thing you ask
+                // for once after an upgrade, on the command line, where its cost
+                // is visible.
                 let ran = Handle::current().block_on(reviewq_app::sync::run(
                     &config,
                     false,
+                    reviewq_ledger::Detail::Stale,
                     &mut progress,
                 ));
                 // The exit code is the CLI's business: here the run either

@@ -20,7 +20,11 @@ pub async fn run(loaded: &Loaded, args: &SyncArgs, logging: bool) -> Result<Exit
         return one(&loaded.config, number).await;
     }
     let mut progress = StderrProgress::new(logging);
-    reviewq_app::sync::run(&loaded.config, args.labels, &mut progress).await
+    let which = match args.all {
+        true => reviewq_ledger::Detail::Every,
+        false => reviewq_ledger::Detail::Stale,
+    };
+    reviewq_app::sync::run(&loaded.config, args.labels, which, &mut progress).await
 }
 
 /// `reviewq sync <number>`: refresh one PR's detail and say what changed.

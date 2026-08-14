@@ -410,6 +410,21 @@ impl AttentionRow {
     }
 }
 
+/// Which tracked PRs a detail pass should fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// Those whose detail is older than the PR — the ordinary sync.
+    Stale,
+    /// Every one of them, however quiet.
+    ///
+    /// What a reason *means* is decided when a PR's detail is classified, so a
+    /// build that adds a reason changes nothing about a PR nobody has touched
+    /// since. This is how that gets applied without waiting for the world to
+    /// move: it costs a fetch per tracked PR, which is why it is asked for
+    /// rather than done.
+    Every,
+}
+
 /// A PR on the queue: its snapshot, why it is tracked, and the single
 /// highest-priority reason it currently wants attention for.
 #[derive(Debug, Clone)]
@@ -729,12 +744,17 @@ impl Ledger {
     }
 
     /// Tracked PRs whose detail needs a (re-)fetch: never fetched, or fetched
-    /// before the last time the PR changed. Open PRs always; a merged PR when
-    /// `include_merged` (the per-project post-merge-review opt-in) or when the
-    /// rule that tracked it said `after_merge`; closed-unmerged PRs never.
-    /// Returns the full snapshot and tracked reason so the caller can classify
-    /// without a second read.
-    pub fn prs_needing_detail(&self, repo_id: i64, include_merged: bool) -> Result<Vec<TrackedPr>> {
+    /// before the last time the PR changed — or every tracked PR, when asked.
+    /// Open PRs always; a merged PR when `include_merged` (the per-project
+    /// post-merge-review opt-in) or when the rule that tracked it said
+    /// `after_merge`; closed-unmerged PRs never. Returns the full snapshot and
+    /// tracked reason so the caller can classify without a second read.
+    pub fn prs_needing_detail(
+        &self,
+        repo_id: i64,
+        include_merged: bool,
+        which: Detail,
+    ) -> Result<Vec<TrackedPr>> {
         // Timestamps are stored as fixed-precision RFC3339 (see `commit_detail`
         // and the sweep), so this lexicographic `<` is a correct chronological
         // comparison.
@@ -746,12 +766,15 @@ impl Ledger {
             WHERE p.repo_id = ?1 AND p.tracked_reason IS NOT NULL
               AND (p.state = 'OPEN'
                    OR (p.state = 'MERGED' AND (?2 OR p.after_merge = 1)))
-              AND (p.detail_synced_at IS NULL OR p.detail_synced_at < p.updated_at)
+              AND (?3 OR p.detail_synced_at IS NULL OR p.detail_synced_at < p.updated_at)
             ORDER BY p.number
             ",
         ))?;
         let rows = stmt
-            .query_map(params![repo_id, include_merged], row_to_tracked)?
+            .query_map(
+                params![repo_id, include_merged, which == Detail::Every],
+                row_to_tracked,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -2109,7 +2132,9 @@ mod tests {
             "v3-1-test"
         );
         assert_eq!(
-            ledger.prs_needing_detail(repo_id, false).unwrap()[0]
+            ledger
+                .prs_needing_detail(repo_id, false, Detail::Stale)
+                .unwrap()[0]
                 .pr
                 .base_ref,
             "v3-1-test",
@@ -2164,7 +2189,9 @@ mod tests {
             Some(opened)
         );
         assert_eq!(
-            ledger.prs_needing_detail(repo_id, false).unwrap()[0]
+            ledger
+                .prs_needing_detail(repo_id, false, Detail::Stale)
+                .unwrap()[0]
                 .pr
                 .created_at,
             Some(opened)
@@ -2994,7 +3021,7 @@ mod tests {
         );
         assert!(
             ledger
-                .prs_needing_detail(repo_id, false)
+                .prs_needing_detail(repo_id, false, Detail::Stale)
                 .unwrap()
                 .is_empty(),
             "and must not be refetched on every later sync"
@@ -3012,7 +3039,7 @@ mod tests {
             .unwrap();
         assert!(
             ledger
-                .prs_needing_detail(repo_id, false)
+                .prs_needing_detail(repo_id, false, Detail::Stale)
                 .unwrap()
                 .is_empty()
         );
@@ -3022,7 +3049,13 @@ mod tests {
         back.updated_at = ts("2026-08-11T09:00:00Z");
         ledger.upsert_pr(repo_id, &back, None, now()).unwrap();
 
-        assert_eq!(ledger.prs_needing_detail(repo_id, false).unwrap().len(), 1);
+        assert_eq!(
+            ledger
+                .prs_needing_detail(repo_id, false, Detail::Stale)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -3255,7 +3288,9 @@ mod tests {
             .unwrap()
             .expect_applied();
 
-        let need = ledger.prs_needing_detail(repo_id, false).unwrap();
+        let need = ledger
+            .prs_needing_detail(repo_id, false, Detail::Stale)
+            .unwrap();
         assert_eq!(need.len(), 1);
         assert_eq!(need[0].pr.number, 1);
         assert_eq!(need[0].pr.head_sha, "abc123");
@@ -3270,13 +3305,16 @@ mod tests {
 
         assert!(
             ledger
-                .prs_needing_detail(repo_id, false)
+                .prs_needing_detail(repo_id, false, Detail::Stale)
                 .unwrap()
                 .is_empty(),
             "merged PR skipped without the opt-in"
         );
         assert_eq!(
-            ledger.prs_needing_detail(repo_id, true).unwrap().len(),
+            ledger
+                .prs_needing_detail(repo_id, true, Detail::Stale)
+                .unwrap()
+                .len(),
             1,
             "merged PR fetched with the opt-in"
         );
@@ -3299,7 +3337,9 @@ mod tests {
             )
             .unwrap();
 
-        let need = ledger.prs_needing_detail(repo_id, false).unwrap();
+        let need = ledger
+            .prs_needing_detail(repo_id, false, Detail::Stale)
+            .unwrap();
         assert_eq!(need.len(), 1);
         assert!(need[0].after_merge, "and it says why it is still here");
     }
@@ -3569,6 +3609,45 @@ mod tests {
         let attention = ledger.show(repo_id, 1).unwrap().unwrap().attention;
         assert_eq!(attention.len(), 1);
         assert_eq!(attention[0].reason.discriminant(), "review_requested");
+    }
+
+    #[test]
+    fn asking_for_everything_returns_prs_whose_detail_is_current() {
+        // What a reason means is decided when a detail is classified, so a
+        // build that learns a new one has nothing to say about a PR nobody has
+        // touched — until this asks for it anyway.
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[],
+                None,
+                // Detailed after the PR last changed, so nothing is due.
+                "2026-08-09T00:00:00Z".parse().unwrap(),
+            )
+            .unwrap()
+            .expect_applied();
+
+        assert!(
+            ledger
+                .prs_needing_detail(repo_id, false, Detail::Stale)
+                .unwrap()
+                .is_empty(),
+            "an ordinary sync leaves it alone"
+        );
+        assert_eq!(
+            ledger
+                .prs_needing_detail(repo_id, false, Detail::Every)
+                .unwrap()
+                .len(),
+            1,
+            "and asking for everything means everything"
+        );
     }
 
     #[test]
