@@ -614,12 +614,12 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         );
     }
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    // Post-wrap, because that's the unit `scroll` moves in: counting the
-    // `Line`s would under-count a wrapped description and stop `G` short of
-    // the end.
-    let total = paragraph.line_count(inner.width);
-    frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), inner);
+    // The queue marks its own position with the highlighted row; the
+    // description has nothing else to say how far into a long one you are, or
+    // how long it runs — hence the scrollbar the queue doesn't get.
+    let total = Scrollable::new(lines)
+        .wrapped()
+        .render(frame, area, inner, app.detail_scroll, t);
     (total, inner)
 }
 
@@ -1149,49 +1149,91 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, marks: &Marks, t: 
         ]));
 
     let inner = block.inner(area);
-    let total = rows.len();
-    let shown = inner.height as usize;
-    let max_scroll = total.saturating_sub(shown) as u16;
-    let scroll = scroll.min(max_scroll);
-
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
-
-    // ratatui owns the drawing of this; the offset above is ours. Only shown
-    // when there is somewhere to go, so a reference that fits carries no
-    // furniture about scrolling it.
-    if max_scroll > 0 {
-        let track = Rect {
-            x: area.right().saturating_sub(1),
-            y: area.y + 1,
-            width: 1,
-            height: inner.height,
-        };
-        // `content_length` counts scroll *positions*, not rows: the widget puts
-        // the thumb at the end when `position == content_length - 1`, so passing
-        // the row count would leave it a third of the way down with the last row
-        // already on screen. One more than the furthest we can scroll is the
-        // number of positions there are.
-        let mut state = ScrollbarState::new(max_scroll as usize + 1)
-            .position(scroll as usize)
-            .viewport_content_length(shown);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                // Drawn over the border rather than inside it: an arrow at each
-                // end would be two more things that look like they can be
-                // clicked, and nothing here can be.
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(color(t.border)))
-                .thumb_style(Style::default().fg(color(t.focus))),
-            track,
-            &mut state,
-        );
-    }
+    let total = Scrollable::new(rows).render(frame, area, inner, scroll, t);
     // What is left below the last visible row. Zero when it all fits, which is
     // what stops a scroll key doing anything on a tall terminal.
-    max_scroll
+    total.saturating_sub(inner.height as usize) as u16
+}
+
+/// Lines that scroll, with a scrollbar over `area`'s right border once
+/// there's somewhere to go. Built by the reference and the description pane
+/// from their own content, then handed here — the two disagree about layout
+/// and wrapping, but not about what a scroll offset means once there's a
+/// scrollbar attached to it, and that arithmetic (`ScrollbarState`'s
+/// content-length counting positions rather than rows) is worth getting
+/// right in one place rather than risking a second copy drifting from it.
+struct Scrollable<'a> {
+    lines: Vec<Line<'a>>,
+    wrap: bool,
+}
+
+impl<'a> Scrollable<'a> {
+    fn new(lines: Vec<Line<'a>>) -> Self {
+        Self { lines, wrap: false }
+    }
+
+    /// Wrap long lines to `inner`'s width instead of running them off the
+    /// edge — for prose. The reference builds rows short enough that it never
+    /// asks for this, so `render` counts what was handed in rather than
+    /// measuring a wrap that didn't happen.
+    fn wrapped(mut self) -> Self {
+        self.wrap = true;
+        self
+    }
+
+    /// Draw into `inner`, scrolled to `scroll` and clamped to what the
+    /// content has, with the scrollbar over `area`'s right border. Returns the
+    /// total line count, post-wrap — the unit a caller's own paging keys move
+    /// in, and what stops `G` short of the end.
+    fn render(self, frame: &mut Frame, area: Rect, inner: Rect, scroll: u16, t: &Theme) -> usize {
+        let unwrapped_total = self.lines.len();
+        let mut paragraph = Paragraph::new(self.lines);
+        if self.wrap {
+            paragraph = paragraph.wrap(Wrap { trim: false });
+        }
+        let total = if self.wrap {
+            paragraph.line_count(inner.width)
+        } else {
+            unwrapped_total
+        };
+        let max_scroll = total.saturating_sub(inner.height as usize);
+        let scroll = scroll.min(max_scroll as u16);
+        frame.render_widget(paragraph.scroll((scroll, 0)), inner);
+
+        // Only drawn when there is somewhere to go, so a panel that fits
+        // carries no furniture about scrolling it.
+        if max_scroll > 0 {
+            let track = Rect {
+                x: area.right().saturating_sub(1),
+                y: area.y + 1,
+                width: 1,
+                height: inner.height,
+            };
+            // One more than the furthest we can scroll is the number of
+            // positions there are: the widget puts the thumb at the end when
+            // `position == content_length - 1`, so passing the row count
+            // would leave it a third of the way down with the last row
+            // already on screen.
+            let mut state = ScrollbarState::new(max_scroll + 1)
+                .position(scroll as usize)
+                .viewport_content_length(inner.height as usize);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    // Drawn over the border rather than inside it: an arrow at
+                    // each end would be two more things that look like they
+                    // can be clicked, and nothing here can be.
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_style(Style::default().fg(color(t.border)))
+                    .thumb_style(Style::default().fg(color(t.focus))),
+                track,
+                &mut state,
+            );
+        }
+        total
+    }
 }
 
 /// The `width` x `height` rect at the middle of `area`, clamped to fit.
@@ -2275,11 +2317,39 @@ sensor = S3KeySensor(deferrable=True)
         render(&mut app, 100, 20);
         let end = app.help_max_scroll();
 
-        // The rows the scrollbar occupies, in order: thumb `█`, track `║`.
+        // The rows the reference's own scrollbar occupies, in order: thumb
+        // `█`, track `║`. Bounded to its own columns — found from its title
+        // row — because the description pane behind it has a scrollbar of
+        // its own now, and a scan of the whole row would as happily pick that
+        // one up.
         let bar_rows = |app: &mut App| -> Vec<char> {
-            render(app, 100, 20)
+            let screen = render(app, 100, 20);
+            let title_row = screen
                 .iter()
-                .filter_map(|row| row.chars().find(|c| *c == '█' || *c == '║'))
+                .find(|row| row.contains("Reference"))
+                .expect("the reference's title");
+            // Char positions, not `str::find`'s byte offsets — the border is
+            // built from multi-byte box-drawing glyphs, so the two disagree.
+            let left = title_row
+                .chars()
+                .position(|c| c == '╭')
+                .expect("its left corner");
+            let right = title_row
+                .chars()
+                .enumerate()
+                .filter(|(_, c)| *c == '╮')
+                .map(|(i, _)| i)
+                .last()
+                .expect("its right corner");
+            screen
+                .iter()
+                .filter_map(|row| {
+                    row.chars()
+                        .enumerate()
+                        .filter(|(x, _)| (left..=right).contains(x))
+                        .map(|(_, c)| c)
+                        .find(|c| *c == '█' || *c == '║')
+                })
                 .collect()
         };
 

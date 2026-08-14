@@ -4,23 +4,23 @@ expression: "rows.join(\"\\n\")"
 ---
 reviewq  2 on the queue
 ╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
-│ ▸   #70135  @kaxil mentioned you area:asy ││ Add deferrable mode to S3KeySensor                  │
-│     #70201  matches label area:async  Tid ││ OPEN · @potiuk · interest: label area:async         │
-│                                           ││ opened 2026-07-30 · updated 2026-08-10T09:00:00Z ·  │
-│                                           ││  main                                              │
-│                                           ││ area:async                                          │
-│                                           ││                                                     │
-│                                           ││ You                                                 │
-│                                           ││   you have not looked at it yet                     │
-│                                           ││                                                     │
-│                                           ││ Attention                                           │
-│                                           ││   p2  @kaxil mentioned you                          │
-│                                           ││                                                     │
-│                                           ││ Description                                         │
-│                                           ││ ## What this does                                   │
-│                                           ││                                                     │
-│                                           ││ Adds a deferrable flag to S3KeySensor.              │
-│                                           ││                                                     │
-│                                           ││ - [x] Tests added                                   │
+│ ▸   #70135  @kaxil mentioned you area:asy ││ Add deferrable mode to S3KeySensor                  █
+│     #70201  matches label area:async  Tid ││ OPEN · @potiuk · interest: label area:async         █
+│                                           ││ opened 2026-07-30 · updated 2026-08-10T09:00:00Z ·  █
+│                                           ││  main                                              █
+│                                           ││ area:async                                          █
+│                                           ││                                                     █
+│                                           ││ You                                                 █
+│                                           ││   you have not looked at it yet                     █
+│                                           ││                                                     █
+│                                           ││ Attention                                           █
+│                                           ││   p2  @kaxil mentioned you                          █
+│                                           ││                                                     █
+│                                           ││ Description                                         █
+│                                           ││ ## What this does                                   █
+│                                           ││                                                     ║
+│                                           ││ Adds a deferrable flag to S3KeySensor.              ║
+│                                           ││                                                     ║
+│                                           ││ - [x] Tests added                                   ║
 ╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 jk move   ⏎ review   d done   z snooze   ? / h keys   Esc quit

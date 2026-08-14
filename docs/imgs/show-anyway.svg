@@ -20,7 +20,7 @@
 <text x="520.8" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="49.5" fill="#ffffff" textLength="260.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Deferrable mode for S3KeySensor</text>
-<text x="1167.6" y="49.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="49.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="67.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">·</text>
 <text x="50.4" y="67.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69757</text>
@@ -32,7 +32,7 @@
 <text x="529.2" y="67.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="67.5" fill="#a3be8c" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">OPEN</text>
 <text x="579.6" y="67.5" fill="#9a9a9a" textLength="344.4" lengthAdjust="spacing" xml:space="preserve"> · @kaxil · interest: label area:task-sdk</text>
-<text x="1167.6" y="67.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="67.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="50.4" y="85.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70390</text>
 <text x="117.6" y="85.5" fill="#c36b73" textLength="201.6" lengthAdjust="spacing" xml:space="preserve">@o-nikolas mentioned you</text>
@@ -41,7 +41,7 @@
 <text x="520.8" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="85.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="85.5" fill="#9a9a9a" textLength="478.8" lengthAdjust="spacing" xml:space="preserve">opened 2026-08-04 · updated 2026-08-12T07:05:00Z ·  main</text>
-<text x="1167.6" y="85.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="85.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="103.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">✓</text>
 <text x="50.4" y="103.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70208</text>
@@ -56,14 +56,14 @@
 <text x="680.4" y="103.5" fill="#c2e0c6" textLength="117.6" lengthAdjust="spacing" xml:space="preserve"> kind:feature </text>
 <rect x="806.4" y="90.0" width="117.6" height="18" fill="#181818"/>
 <text x="806.4" y="103.5" fill="#646464" textLength="117.6" lengthAdjust="spacing" xml:space="preserve"> needs-review </text>
-<text x="1167.6" y="103.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="103.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="121.5" fill="#a3be8c" textLength="8.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">✓</text>
 <text x="50.4" y="121.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70061</text>
 <text x="117.6" y="121.5" fill="#96b5b4" textLength="394.8" lengthAdjust="spacing" xml:space="preserve">@jedcunningham resolved your thread without rep</text>
 <text x="520.8" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="121.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="121.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="139.5" fill="#9a9a9a" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">✓</text>
 <text x="50.4" y="139.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#69982</text>
@@ -73,7 +73,7 @@
 <text x="520.8" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="139.5" fill="#9a9a9a" textLength="25.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">You</text>
-<text x="1167.6" y="139.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="139.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="50.4" y="157.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70311</text>
 <text x="117.6" y="157.5" fill="#96b5b4" textLength="394.8" lengthAdjust="spacing" xml:space="preserve">review requested via @apache/airflow-committers</text>
@@ -83,7 +83,7 @@
 <text x="722.4" y="157.5" fill="#c36b73" textLength="142.8" lengthAdjust="spacing" xml:space="preserve">CHANGES_REQUESTED</text>
 <text x="865.2" y="157.5" fill="#9a9a9a" textLength="210.0" lengthAdjust="spacing" xml:space="preserve">, at 2026-08-11T16:20:00Z</text>
 <text x="1075.2" y="157.5" fill="#d08770" textLength="50.4" lengthAdjust="spacing" xml:space="preserve"> — the</text>
-<text x="1167.6" y="157.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="157.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="50.4" y="175.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70344</text>
 <text x="117.6" y="175.5" fill="#96b5b4" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">matches author FIRST_TIME_CONTRIBUTOR</text>
@@ -91,7 +91,7 @@
 <text x="520.8" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="175.5" fill="#d08770" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">head has moved since</text>
-<text x="1167.6" y="175.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="175.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="33.6" y="193.5" fill="#8fa1b3" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">󰒲</text>
 <text x="50.4" y="193.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">#70102</text>
@@ -101,44 +101,44 @@
 <text x="487.2" y="193.5" fill="#ffffff" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">  B </text>
 <text x="520.8" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="193.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="193.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="211.5" fill="#9a9a9a" textLength="75.6" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Attention</text>
-<text x="1167.6" y="211.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="211.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="229.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="229.5" fill="#9a9a9a" textLength="50.4" lengthAdjust="spacing" xml:space="preserve">  p2  </text>
 <text x="596.4" y="229.5" fill="#c36b73" textLength="168.0" lengthAdjust="spacing" xml:space="preserve">@kaxil mentioned you</text>
-<text x="1167.6" y="229.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="229.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="247.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="247.5" fill="#96b5b4" textLength="562.8" lengthAdjust="spacing" xml:space="preserve">╭ #69401 ─────────────────────────────────────────────────────────╮</text>
-<text x="1167.6" y="247.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="247.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="310.8" y="265.5" fill="#ffffff" textLength="546.0" lengthAdjust="spacing" xml:space="preserve"> Not in your ledger.                                             </text>
 <text x="856.8" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="265.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="856.8" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="283.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="319.2" y="301.5" fill="#9a9a9a" textLength="386.4" lengthAdjust="spacing" xml:space="preserve">Showing it changes nothing and stores nothing.</text>
 <text x="856.8" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="301.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="319.2" y="319.5" fill="#9a9a9a" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">Tracking it puts it on the queue, fetching it first if need be.</text>
 <text x="856.8" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="319.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="337.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="337.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="856.8" y="337.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="337.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="337.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="355.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="355.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="336.0" y="355.5" fill="#ebcb8b" textLength="42.0" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">s / ⏎</text>
@@ -148,24 +148,24 @@
 <text x="579.6" y="355.5" fill="#ebcb8b" textLength="109.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">any other key</text>
 <text x="688.8" y="355.5" fill="#9a9a9a" textLength="58.8" lengthAdjust="spacing" xml:space="preserve"> cancel</text>
 <text x="856.8" y="355.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="355.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="355.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="373.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="373.5" fill="#96b5b4" textLength="562.8" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────────╯</text>
-<text x="1167.6" y="373.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="373.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="391.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="391.5" fill="#9a9a9a" textLength="92.4" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Description</text>
-<text x="1167.6" y="391.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="391.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="409.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="546.0" y="409.5" fill="#96b5b4" textLength="142.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">## What this does</text>
-<text x="1167.6" y="409.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="409.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="427.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="427.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="427.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
@@ -174,42 +174,42 @@
 <text x="688.8" y="445.5" fill="#ffffff" textLength="75.6" lengthAdjust="spacing" xml:space="preserve"> flag to </text>
 <text x="764.4" y="445.5" fill="#ebcb8b" textLength="92.4" lengthAdjust="spacing" xml:space="preserve">S3KeySensor</text>
 <text x="856.8" y="445.5" fill="#ffffff" textLength="310.8" lengthAdjust="spacing" xml:space="preserve">, so a sensor waiting on a key       </text>
-<text x="1167.6" y="445.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="445.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="537.6" y="463.5" fill="#ffffff" textLength="630.0" lengthAdjust="spacing" xml:space="preserve"> releases its worker slot instead of holding it for the whole poke         </text>
-<text x="1167.6" y="463.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="463.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="481.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="537.6" y="481.5" fill="#ffffff" textLength="630.0" lengthAdjust="spacing" xml:space="preserve"> interval.                                                                 </text>
-<text x="1167.6" y="481.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="481.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="499.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="499.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="537.6" y="517.5" fill="#ffffff" textLength="302.4" lengthAdjust="spacing" xml:space="preserve"> - [x] Trigger and sensor share one </text>
 <text x="840.0" y="517.5" fill="#ebcb8b" textLength="33.6" lengthAdjust="spacing" xml:space="preserve">poke</text>
 <text x="873.6" y="517.5" fill="#ffffff" textLength="294.0" lengthAdjust="spacing" xml:space="preserve"> implementation                    </text>
-<text x="1167.6" y="517.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="517.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="537.6" y="535.5" fill="#ffffff" textLength="630.0" lengthAdjust="spacing" xml:space="preserve"> - [x] Tests for both modes                                                </text>
-<text x="1167.6" y="535.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="535.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="537.6" y="553.5" fill="#ffffff" textLength="630.0" lengthAdjust="spacing" xml:space="preserve"> - [ ] Docs updated — waiting on #70344                                    </text>
-<text x="1167.6" y="553.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="553.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
 <text x="0.0" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="571.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="1167.6" y="571.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="0.0" y="589.5" fill="#96b5b4" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">╰─────────────────────────────────────────────────────────────╯</text>
 <text x="529.2" y="589.5" fill="#606a74" textLength="646.8" lengthAdjust="spacing" xml:space="preserve">╰───────────────────────────────────────────────────────────────────────────╯</text>
 <text x="0.0" y="607.5" fill="#ebcb8b" textLength="16.8" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">jk</text>

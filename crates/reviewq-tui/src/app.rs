@@ -971,12 +971,12 @@ impl App {
     /// because the content's length isn't known until then — a narrower pane
     /// wraps to more lines, a shorter description to fewer.
     fn clamp_detail_scroll(&mut self) {
-        let last = self
+        let max_scroll = self
             .detail_lines
             .saturating_sub(self.page)
             .try_into()
             .unwrap_or(u16::MAX);
-        self.detail_scroll = self.detail_scroll.min(last);
+        self.detail_scroll = self.detail_scroll.min(max_scroll);
     }
 
     /// Draw, wait for something to happen, repeat, until the user quits.
