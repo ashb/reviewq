@@ -19,6 +19,8 @@ pub enum Action {
     SwitchPane,
     /// Adapt the palette for the other terminal background.
     ToggleTheme,
+    /// Show or hide the label chips on the rows.
+    ToggleLabels,
     /// One row down, in whichever pane has focus.
     Down,
     /// One row up.
@@ -198,6 +200,19 @@ pub const BINDINGS: &[Binding] = &[
         chords: &[key(KeyCode::Char('t'))],
         keys: "t",
         what: "adapt for a light or dark terminal",
+        group: "View",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        // `^L` rather than `l` or `L`: both of those are movement in vim, and
+        // this list is read the way a vim buffer is. `^L` is a redraw there,
+        // which this interface needs no key for — it redraws whenever anything
+        // changes.
+        action: Action::ToggleLabels,
+        chords: &[ctrl(KeyCode::Char('l'))],
+        keys: "^L",
+        what: "show or hide the labels",
         group: "View",
         footer: false,
         hidden: false,

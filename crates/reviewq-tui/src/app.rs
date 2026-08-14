@@ -221,6 +221,13 @@ pub struct App {
     /// one PR doesn't fetch it twice, while two different PRs can refresh at
     /// once.
     pub refreshing: BTreeSet<u64>,
+    /// Whether the rows carry their label chips.
+    ///
+    /// A session-long switch rather than a config key: what a row should show
+    /// depends on what you are doing with it, and the answer changes between
+    /// reading the queue and hunting for one PR. `show_labels` is still what
+    /// decides *which* labels; this decides whether any of them are drawn.
+    pub labels: bool,
     /// Whether a full sync is in flight. One at a time: two sweeps of the same
     /// repos would spend the rate-limit budget twice to reach the same ledger,
     /// and the second would race the first for the cursor.
@@ -731,6 +738,7 @@ impl App {
             help_max_scroll: 0,
             status: None,
             refreshing: BTreeSet::new(),
+            labels: true,
             syncing: false,
             page: 1,
             detail_lines: 0,
@@ -892,6 +900,9 @@ impl App {
     /// steers by. A repo no project claims shows none — there is nobody to have
     /// said which.
     pub(crate) fn labels_for(&self, row: &Located<Row>) -> Vec<(String, Option<Rgb>)> {
+        if !self.labels {
+            return Vec::new();
+        }
         let Some(project) = self.config.projects.iter().find(|project| {
             project
                 .repos
@@ -1146,6 +1157,7 @@ impl App {
             Update::Passed(
                 Action::Quit
                 | Action::Back
+                | Action::ToggleLabels
                 | Action::Help
                 | Action::Jump
                 | Action::SwitchPane
@@ -1192,6 +1204,12 @@ impl App {
             }
             Action::ToggleTheme => {
                 self.theme = self.theme.toggled();
+                Ok(())
+            }
+            // The queue is still drawn behind the PR on show, so this still
+            // changes something a reader can see.
+            Action::ToggleLabels => {
+                self.labels = !self.labels;
                 Ok(())
             }
             // `dispatch` takes this one before anything else gets the keyboard,
@@ -1823,6 +1841,10 @@ impl App {
                 // Nothing but the palette: every colour comes from the theme, so
                 // swapping it is the whole change, and the next draw carries it.
                 self.theme = self.theme.toggled();
+                Ok(Update::Handled)
+            }
+            Action::ToggleLabels => {
+                self.labels = !self.labels;
                 Ok(Update::Handled)
             }
             Action::SaveSvg => {
@@ -2890,6 +2912,17 @@ mod loop_tests {
         app.run(&mut terminal, &mut channel, hooks).expect("loop");
     }
 
+    /// Hand one Ctrl-held key to the dispatcher.
+    fn feed_ctrl(app: &mut App, hooks: &Hooks, code: char) {
+        let channel = Channel::new();
+        app.dispatch(
+            KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL),
+            &channel,
+            hooks,
+        )
+        .expect("dispatch");
+    }
+
     /// Hand keys straight to the dispatcher, for a sequence meant to finish with
     /// an overlay still up and inspectable — in a prompt, `q` types a letter
     /// rather than quitting, so such a script would never end the loop.
@@ -3500,6 +3533,35 @@ mod loop_tests {
             .expect("send");
         app.drain(&channel);
         assert_eq!(app.status.as_deref(), Some("syncing — updated 50/300"));
+    }
+
+    #[test]
+    fn control_l_hides_the_labels_and_shows_them_again() {
+        // The chips are worth two or three columns of a row, and which way that
+        // trade falls depends on what you are doing — so it is a key rather
+        // than a config setting.
+        // A PR carrying a label the test config asks to see.
+        let ledger = fixture();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut labelled = pr_snapshot(70135);
+        labelled.labels = vec!["area:async".into()];
+        ledger
+            .upsert_pr(repo_id, &labelled, None, ts("2026-08-11T12:00:00Z"))
+            .expect("labelled");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        let row = app.queue.first().expect("a row").clone();
+        assert!(!app.labels_for(&row).is_empty(), "the fixture has chips");
+
+        feed_ctrl(&mut app, &hooks, 'l');
+
+        assert!(!app.labels);
+        assert!(app.labels_for(&row).is_empty(), "and the rows lose them");
+
+        feed_ctrl(&mut app, &hooks, 'l');
+
+        assert!(app.labels);
+        assert!(!app.labels_for(&row).is_empty(), "and get them back");
     }
 
     #[test]

@@ -23,9 +23,10 @@ reviewq  2 on the queue
 │                  │ View                                                      │                   │
 │                  │   Tab         switch pane                                 │                   │
 │                  │   t           adapt for a light or dark terminal          │                   │
+│                  │   ^L          show or hide the labels                     │                   │
 │                  │   W           show what waits on someone else, or go back │                   │
-│                  │   M           show what you have muted, or go back        │                   │
-│                  │                                                           │rue)               │
+│                  │   M           show what you have muted, or go back        │rue)               │
+│                  │                                                           │                   │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
 │                  │   d           done — handled at this head                 │                   │
@@ -49,6 +50,5 @@ reviewq  2 on the queue
 │                  │   click       select the row, or focus the pane           │                   │
 │                  │   wheel       scroll what is under the pointer            │                   │
 │                  ╰ ↑↓ scroll   any other key close ──────────────────────────╯                   │
-│                                           ││                                                     │
 ╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
 jk move   ⏎ review   d done   z snooze   ? / h keys   Esc quit

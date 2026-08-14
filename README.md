@@ -261,6 +261,11 @@ with something on it says so without being opened.
 or a shown PR, so one key always means *out of this*. On the queue there is
 nothing left to leave and it quits, which `q` does from anywhere.
 
+`^L` hides the label chips and brings them back — the same rows, two or three
+columns wider for the titles. `show_labels` still says *which* labels a project
+shows; this says whether any of them are drawn, and it lasts the session rather
+than living in the config, because the trade changes with what you are doing.
+
 The palette adapts to a light terminal with `t`, or `[output] theme = "light"`.
 
 ![The same queue on a light background](docs/imgs/queue-light.svg)
