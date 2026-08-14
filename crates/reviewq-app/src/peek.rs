@@ -62,7 +62,12 @@ pub async fn peek_one(cfg: &Config, number: u64) -> Result<Peeked> {
     }
 
     let forge = cfg.forge_for(&repo.host)?;
-    fetched(&repo, number, &cfg.identity.login, forge.as_ref()).await
+    // Reading a PR nobody has tracked still needs to know whose reviews are
+    // whose, and the host is the one that knows.
+    let me = crate::identity::Logins::new()
+        .on(cfg, &repo.host, forge.as_ref())
+        .await?;
+    fetched(&repo, number, &me, forge.as_ref()).await
 }
 
 /// Assemble a [`Peeked`] from what the forge can tell us about one PR.

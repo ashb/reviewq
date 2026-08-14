@@ -224,8 +224,6 @@ mod tests {
             &path,
             format!(
                 r#"
-                [identity]
-                login = "ashb"
                 [[project]]
                 repos = [{repo}]
                 [[project.interest]]
@@ -291,8 +289,6 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             [[project.interest]]

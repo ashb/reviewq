@@ -40,6 +40,9 @@ pub struct ForgeHost {
     /// The API root URL, for an instance that is not the provider's public one
     /// (a GitHub Enterprise host, say).
     pub api_base: Option<String>,
+    /// Who you are on this host, when that is not what the credentials say and
+    /// not what `[identity]` says either. Rarely needed: the token knows.
+    pub login: Option<String>,
     /// The environment variable holding the token.
     pub token_env: Option<String>,
     /// The environment variable naming a file that holds the token.
@@ -60,6 +63,7 @@ impl ForgeHost {
         ForgeHost {
             provider: self.provider.clone().or_else(|| base.provider.clone()),
             api_base: self.api_base.clone().or_else(|| base.api_base.clone()),
+            login: self.login.clone().or_else(|| base.login.clone()),
             token_env: self.token_env.clone().or_else(|| base.token_env.clone()),
             token_file_env: self
                 .token_file_env
@@ -144,6 +148,8 @@ static BUILT_IN_HOSTS: LazyLock<BTreeMap<String, ForgeHost>> = LazyLock::new(|| 
         ForgeHost {
             provider: Some("github".to_string()),
             api_base: None,
+            // Nobody's name is built in: the token says.
+            login: None,
             token_env: Some(GITHUB_TOKEN_ENV.to_string()),
             token_file_env: Some("GITHUB_TOKEN_FILE".to_string()),
             token_command: None,

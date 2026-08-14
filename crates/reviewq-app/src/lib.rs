@@ -21,6 +21,7 @@ mod fake_forge;
 
 pub mod actions;
 pub mod config;
+pub mod identity;
 pub mod paths;
 pub mod peek;
 pub mod present;

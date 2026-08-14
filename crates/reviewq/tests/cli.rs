@@ -41,8 +41,6 @@ fn workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
     std::fs::write(
         &config,
         r#"
-        [identity]
-        login = "ashb"
         [[project]]
         repos = [{ owner = "apache", name = "airflow" }]
         [[project.interest]]

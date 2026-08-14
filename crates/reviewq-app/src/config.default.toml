@@ -8,9 +8,12 @@
 # outranks the rules below — a PR you have untracked stays untracked however
 # well it matches, until `reviewq track N` puts it back.
 
-[identity]
-# Whose queue this is. All attention reasons are computed relative to this login.
-login = "ashb"
+# Whose queue this is is not configured: a token knows whose it is, and reviewq
+# asks each host once per sync. That is also the only answer that works when you
+# go by different names on different forges. To override it on a host — a
+# machine account, an alias — name it there:
+#   [forge."github.acme.example"]
+#   login = "ash-work"
 
 # A project bundles one or more repos with the interest rules that apply to
 # them. Add more [[project]] blocks for other codebases; each carries its own

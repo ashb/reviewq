@@ -47,11 +47,9 @@ The config is written for you the first time anything needs it, comments and
 all, at `$XDG_CONFIG_HOME/reviewq/config.toml`. Three things in it are yours to
 set before the first sync:
 
-1. **`identity.login`** — every reason is computed relative to this account, so
-   nothing works until it is yours.
-2. **The repos**, in a `[[project]]` block. A project bundles repos that share
+1. **The repos**, in a `[[project]]` block. A project bundles repos that share
    conventions; add another for a codebase whose conventions differ.
-3. **The interest rules** — which PRs you want to see. This is the step that
+2. **The interest rules** — which PRs you want to see. This is the step that
    makes the queue yours rather than a feed: labels, paths, authors, author
    associations, milestones. `reviewq help interest` is the whole reference,
    and the rules *add* to each other — none of them hides anything.
@@ -291,14 +289,17 @@ later version still loads.
 ### Who you are, and what you watch
 
 ```toml
-[identity]
-login = "ashb"          # every reason is computed relative to this account
-
 [[project]]
 name  = "airflow"
 repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
 show_labels = ["area:*", "backport"]
 ```
+
+There is no login to set: a token knows whose it is, so reviewq asks each host
+once per sync and computes every reason relative to the name *that* host knows
+you by — which is the only answer that works when a second forge knows you as
+somebody else. `[forge."host"] login` overrides it for a host, which is what a
+machine account or an alias needs.
 
 A project bundles repos with the rules that apply to them; add another
 `[[project]]` for a codebase whose conventions differ. `path` is the local

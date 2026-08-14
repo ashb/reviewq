@@ -109,22 +109,29 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
         };
         viewer.rate_limit.trace("doctor:viewer");
 
-        let configured = loaded.config.identity.login.trim();
-        if viewer.login == configured {
-            row(
+        // Who the token says you are, and whether config has overruled it. An
+        // override is not a problem — it is how you name a machine account, or
+        // an alias — but a *silent* one would be, so it is reported either way.
+        match loaded.config.configured_login(&repo.host) {
+            None => row(
                 "  viewer",
-                &format!("{} {}", viewer.login, ok("matches identity.login")),
-            );
-        } else {
-            problems += 1;
-            row(
+                &format!("{} {}", viewer.login, ok("from the token")),
+            ),
+            Some(login) if login == viewer.login => row(
+                "  viewer",
+                &format!("{} {}", viewer.login, ok("token and config agree")),
+            ),
+            Some(login) => row(
                 "  viewer",
                 &format!(
                     "{} {}",
-                    viewer.login,
-                    warn(&format!("but identity.login is {configured}"))
+                    login,
+                    warn(&format!(
+                        "configured; the token belongs to {}",
+                        viewer.login
+                    ))
                 ),
-            );
+            ),
         }
 
         let rl = &viewer.rate_limit;

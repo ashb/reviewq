@@ -21,9 +21,6 @@ pub const DEFAULT_CONFIG: &str = include_str!("config.default.toml");
 /// The whole config file, as loaded and validated.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    /// Who "me" is. The only required section — every reason is computed
-    /// relative to this account.
-    pub identity: Identity,
     /// One or more projects, each bundling its repos with the interest rules
     /// that apply to them. `[[project]]` in TOML.
     #[serde(rename = "project", default)]
@@ -51,13 +48,6 @@ pub struct Config {
     /// internal name aren't tied together.
     #[serde(default, rename = "forge")]
     pub forges: ForgeTable,
-}
-
-/// Who reviewq is computing a queue for.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Identity {
-    /// My GitHub login. Reasons are computed relative to this account.
-    pub login: String,
 }
 
 /// A group of repos that share a set of interest rules. Conventions differ per
@@ -586,12 +576,6 @@ impl Config {
     fn validate(&self, path: &Path) -> Result<()> {
         let at = || path.display();
 
-        if self.identity.login.trim().is_empty() {
-            bail!(
-                "identity.login is empty in {} — set it to your GitHub login",
-                at()
-            );
-        }
         if self.handoff.review_command.is_empty() {
             bail!("handoff.review_command is empty in {}", at());
         }
@@ -626,7 +610,9 @@ impl Config {
         // Compile every project's rules so glob errors and the
         // one-condition-per-rule gate surface at load, not mid-sync.
         for project in &self.projects {
-            self.interest_for(project)
+            // Compiled against a login nobody has, because validation is about
+            // the globs and the one-condition rule — not about who you are.
+            self.interest_for_login(project, "")
                 .with_context(|| format!("in project {} in {}", project.label(), at()))?;
         }
         Ok(())
@@ -664,6 +650,17 @@ impl Config {
         Ok(build(&resolved, host, None)?)
     }
 
+    /// Who I am on `host`, as far as config says.
+    ///
+    /// `None` in the ordinary case, which means asking the credentials — see
+    /// [`Logins`](crate::identity::Logins). A login belongs to a host rather
+    /// than to the config as a whole because that is the shape of the truth:
+    /// the same person is `ashb` on one forge and somebody else on another, and
+    /// a single setting could only ever be right for one of them.
+    pub fn configured_login(&self, host: &str) -> Option<String> {
+        self.forges.host(host).and_then(|forge| forge.login)
+    }
+
     /// The relationships that involve me in `project`: its own override if set,
     /// else the global default.
     pub fn involving_reasons<'a>(&'a self, project: &'a Project) -> &'a [String] {
@@ -674,11 +671,15 @@ impl Config {
     }
 
     /// Compile a project's interest rules into the pure evaluator.
-    pub fn interest_for(&self, project: &Project) -> Result<Interest> {
+    ///
+    /// `me` is the login on the host in question — a rule saying `mine` becomes
+    /// a rule saying that author, and a project whose repos live on two forges
+    /// compiles once per forge, since the two may know you by different names.
+    pub fn interest_for_login(&self, project: &Project, me: &str) -> Result<Interest> {
         let inputs = project
             .interest
             .iter()
-            .map(|rule| rule.to_input(&self.identity.login))
+            .map(|rule| rule.to_input(me))
             .collect::<Result<Vec<_>>>()?;
         Interest::compile(inputs).context("compiling interest globs")
     }
@@ -775,8 +776,6 @@ mod tests {
     fn minimal(extra: &str) -> String {
         format!(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             name = "airflow"
             repos = [{{ owner = "apache", name = "airflow" }}]
@@ -912,7 +911,9 @@ mod tests {
 
         let project = &config.projects[0];
         assert_eq!(project.interest.len(), 3);
-        config.interest_for(project).expect("compiles");
+        config
+            .interest_for_login(project, "ashb")
+            .expect("compiles");
     }
 
     #[test]
@@ -927,8 +928,6 @@ mod tests {
 
         let overridden: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             involvement = ["mention"]
@@ -957,7 +956,9 @@ mod tests {
         config.validate(Path::new("cfg")).expect("validates");
 
         let project = &config.projects[0];
-        let rules = config.interest_for(project).expect("compiles");
+        let rules = config
+            .interest_for_login(project, "ashb")
+            .expect("compiles");
         let mut first_timer_in_task_sdk = pr();
         first_timer_in_task_sdk.author_association = "FIRST_TIME_CONTRIBUTOR".into();
         first_timer_in_task_sdk.files = Some(vec!["task-sdk/src/thing.py".into()]);
@@ -991,7 +992,9 @@ mod tests {
         .expect("parses");
         config.validate(Path::new("cfg")).expect("validates");
 
-        let rules = config.interest_for(&config.projects[0]).expect("compiles");
+        let rules = config
+            .interest_for_login(&config.projects[0], "ashb")
+            .expect("compiles");
         let mut theirs = pr();
         theirs.author = "potiuk".into();
         theirs.files = Some(vec!["task-sdk/thing.py".into()]);
@@ -1011,8 +1014,6 @@ mod tests {
         // trailing colon used to say by implication.
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             show_labels = ["area:*", "backport", "*sdk*"]
@@ -1071,7 +1072,9 @@ mod tests {
         .expect("parses");
         config.validate(Path::new("cfg")).expect("validates");
 
-        let rules = config.interest_for(&config.projects[0]).expect("compiles");
+        let rules = config
+            .interest_for_login(&config.projects[0], "ashb")
+            .expect("compiles");
         let mut theirs = pr();
         theirs.author = "potiuk".into();
         assert_eq!(
@@ -1101,7 +1104,9 @@ mod tests {
         .expect("parses");
         config.validate(Path::new("cfg")).expect("validates");
 
-        let rules = config.interest_for(&config.projects[0]).expect("compiles");
+        let rules = config
+            .interest_for_login(&config.projects[0], "ashb")
+            .expect("compiles");
         let mut ours = pr();
         ours.author = "ashb".into();
         assert!(
@@ -1126,8 +1131,6 @@ mod tests {
     fn a_rule_with_no_condition_is_rejected() {
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             [[project.interest]]
@@ -1144,8 +1147,6 @@ mod tests {
     fn more_than_one_repo_validates() {
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [
               { owner = "apache", name = "airflow" },
@@ -1168,8 +1169,6 @@ mod tests {
     fn no_repo_is_rejected() {
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             "#,
         )
         .expect("parses");
@@ -1182,8 +1181,6 @@ mod tests {
     fn a_repo_on_an_unknown_host_without_a_forge_entry_is_rejected() {
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "acme", name = "widgets", host = "git.acme.example" }]
             [[project.interest]]
@@ -1200,8 +1197,6 @@ mod tests {
     fn a_self_hosted_github_enterprise_host_resolves() {
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "acme", name = "widgets", host = "github.acme.example" }]
             [[project.interest]]
@@ -1224,13 +1219,39 @@ mod tests {
     }
 
     #[test]
-    fn empty_login_is_rejected() {
-        let config: Config =
-            toml::from_str(&minimal("").replace(r#"login = "ashb""#, r#"login = "  ""#))
-                .expect("config parses");
+    fn a_login_belongs_to_a_host_and_is_asked_for_when_absent() {
+        // A token knows whose it is, so a config need not say — and where two
+        // forges know you by different names, one setting could not be right
+        // for both.
+        let config: Config = toml::from_str(
+            r#"
+            [[project]]
+            repos = [
+              { owner = "apache", name = "airflow" },
+              { owner = "acme", name = "widgets", host = "github.acme.example" },
+            ]
+            [[project.interest]]
+            labels = ["x"]
 
-        let err = config.validate(Path::new("cfg.toml")).unwrap_err();
-        assert!(err.to_string().contains("identity.login is empty"));
+            [forge."github.acme.example"]
+            provider = "github"
+            api_base = "https://github.acme.example/api/v3"
+            login = "ash-work"
+            "#,
+        )
+        .expect("parses");
+        config.validate(Path::new("cfg")).expect("validates");
+
+        assert_eq!(
+            config.configured_login("github.com"),
+            None,
+            "nothing said, so the token is asked"
+        );
+        assert_eq!(
+            config.configured_login("github.acme.example").as_deref(),
+            Some("ash-work"),
+            "and a host that says, says for itself"
+        );
     }
 
     #[test]
@@ -1272,8 +1293,6 @@ mod tests {
             &path,
             format!(
                 r#"
-                [identity]
-                login = "ashb"
                 [[project]]
                 repos = [{{ owner = "apache", name = "airflow", path = "{}" }}]
                 [[project.interest]]
@@ -1297,8 +1316,6 @@ mod tests {
         // a person has to be expanded here or looked for literally.
         let config: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
             [[project.interest]]

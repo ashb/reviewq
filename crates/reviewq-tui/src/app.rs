@@ -50,8 +50,6 @@ pub(crate) fn fixture_config() -> HeldConfig {
     Arc::new(
         toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             show_labels = ["area:*", "backport"]

@@ -17,6 +17,7 @@ use reviewq_forge::{Forge, PrDetail};
 use reviewq_ledger::{Committed, Ledger, TrackedReason};
 
 use crate::config::{Config, Project, RepoRef};
+use crate::identity::Logins;
 use crate::{actions, paths};
 
 /// Cursor: the high-water mark of `updatedAt` we have swept up to.
@@ -36,13 +37,21 @@ pub async fn run(cfg: &Config, labels: bool, progress: &mut dyn SyncProgress) ->
     // through it, each scoped by its own `repo_id`.
     let ledger = Ledger::open(&paths::database_file()?)?;
 
+    // Asked once per host and remembered: a project's six repos on one forge
+    // resolve one login between them.
+    let mut logins = Logins::new();
+
     for project in &cfg.projects {
-        let rules = cfg.interest_for(project)?;
         for repo in &project.repos {
             let repo_id = ledger.ensure_repo(&repo.key())?;
             // Built here rather than inside the per-repo sync, so that sync is
             // reachable with a forge a test supplies.
             let forge = cfg.forge_for(&repo.host)?;
+            let me = logins.on(cfg, &repo.host, forge.as_ref()).await?;
+            // Compiled per repo rather than per project, because a rule saying
+            // `mine` compiles the login in — and the same project's repos may
+            // sit on forges that know you by different names.
+            let rules = cfg.interest_for_login(project, &me)?;
             sync_repo(
                 cfg,
                 forge.as_ref(),
@@ -51,6 +60,7 @@ pub async fn run(cfg: &Config, labels: bool, progress: &mut dyn SyncProgress) ->
                 project,
                 repo,
                 &rules,
+                &me,
                 labels,
                 now,
                 progress,
@@ -74,6 +84,7 @@ async fn sync_repo(
     project: &Project,
     repo: &RepoRef,
     rules: &Interest,
+    me: &str,
     labels: bool,
     now: Timestamp,
     progress: &mut dyn SyncProgress,
@@ -175,7 +186,7 @@ async fn sync_repo(
         ledger,
         repo_id,
         repo,
-        &cfg.identity.login,
+        me,
         cfg.involving_reasons(project),
         cfg.sync.page_size,
         now,
@@ -189,7 +200,7 @@ async fn sync_repo(
         ledger,
         repo_id,
         repo,
-        &cfg.identity.login,
+        me,
         &cfg.bots.logins,
         rules,
         project.include_merged,
@@ -479,12 +490,13 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
     };
 
     let forge = cfg.forge_for(&repo.host)?;
+    let me = Logins::new().on(cfg, &repo.host, forge.as_ref()).await?;
     let outcome = refresh_one(
         forge.as_ref(),
         &ledger,
         repo_id,
         &repo,
-        &cfg.identity.login,
+        &me,
         &cfg.bots.logins,
         project.include_merged || show.after_merge,
         // No involvement search has run, so a review requested of a *team* isn't
@@ -493,7 +505,7 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         &HashSet::new(),
         &show.pr,
         show.tracked_reason.as_deref().unwrap_or(""),
-        &cfg.interest_for(project)?.heard_bots(&show.pr),
+        &cfg.interest_for_login(project, &me)?.heard_bots(&show.pr),
         Timestamp::now(),
     )
     .await?;
@@ -913,8 +925,6 @@ mod engine_tests {
     fn config(extra: &str) -> Config {
         toml::from_str(&format!(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{{ owner = "apache", name = "airflow" }}]
             [[project.interest]]
@@ -950,7 +960,7 @@ mod engine_tests {
         let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
         let mut progress = RecordingProgress::default();
         let project = &cfg.projects[0];
-        let rules = cfg.interest_for(project).expect("rules");
+        let rules = cfg.interest_for_login(project, "ashb").expect("rules");
         sync_repo(
             cfg,
             forge,
@@ -959,6 +969,7 @@ mod engine_tests {
             project,
             &project.repos[0],
             &rules,
+            "ashb",
             labels,
             now(),
             &mut progress,
@@ -1076,7 +1087,7 @@ mod engine_tests {
         let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
             .with_detail(1, 4900);
         let project = &cfg.projects[0];
-        let rules = cfg.interest_for(project).expect("rules");
+        let rules = cfg.interest_for_login(project, "ashb").expect("rules");
         sync_repo(
             &cfg,
             &forge,
@@ -1085,6 +1096,7 @@ mod engine_tests {
             project,
             &project.repos[0],
             &rules,
+            "ashb",
             false,
             now(),
             &mut RecordingProgress::default(),
@@ -1190,7 +1202,7 @@ mod engine_tests {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
         let project = &cfg.projects[0];
-        let rules = cfg.interest_for(project).expect("rules");
+        let rules = cfg.interest_for_login(project, "ashb").expect("rules");
         let err = sync_repo(
             &cfg,
             &forge,
@@ -1199,6 +1211,7 @@ mod engine_tests {
             project,
             &project.repos[0],
             &rules,
+            "ashb",
             false,
             now(),
             &mut RecordingProgress::default(),
@@ -1276,8 +1289,6 @@ mod engine_tests {
 
         let with_paths: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             [[project.interest]]
@@ -1313,8 +1324,6 @@ mod engine_tests {
         // tracked this PR asked to keep it, and a review request on it survives.
         let cfg: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             [[project.interest]]
@@ -1344,8 +1353,6 @@ mod engine_tests {
         // not be what decides the PR stops mattering once it merged.
         let cfg: Config = toml::from_str(
             r#"
-            [identity]
-            login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
             [[project.interest]]
@@ -1401,7 +1408,7 @@ mod engine_tests {
             &ledger,
             repo_id,
             &cfg.projects[0].repos[0],
-            &cfg.identity.login,
+            "ashb",
             &cfg.bots.logins,
             false,
             &HashSet::new(),
