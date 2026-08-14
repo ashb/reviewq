@@ -22,26 +22,60 @@ they cannot drift from what it draws. `reviewq list` marks its rows with the sam
 glyphs, from the same `[output.marks]`, and tags a PR whose snooze is still
 running — so a row at the bottom of either says why it is down there.
 
+## Installing it
+
+```sh
+cargo install --path crates/reviewq
+```
+
+A GitHub token is the only other requirement, and reviewq will find one you
+already have: `$REVIEWQ_GITHUB_TOKEN`, `$GH_TOKEN`, or whatever `gh auth token`
+answers with. `reviewq doctor` says which it found.
+
 <!-- help:start -->
 
 ## Getting started
 
 ```sh
-cargo install --path crates/reviewq
-reviewq sync      # fetch from the forge, and work out what wants you
-reviewq doctor    # token, budget, checkout, where things live
-reviewq list      # the queue, most-urgent first
-reviewq tui       # the same queue, browsable
+reviewq doctor    # writes a starting config, and says what is missing
+$EDITOR ~/.config/reviewq/config.toml     # you, your repos, your rules
+reviewq sync      # fetch from the forge, work out what wants you
+reviewq tui       # the queue, browsable (`reviewq list` for one shot)
 ```
+
+The config is written for you the first time anything needs it, comments and
+all, at `$XDG_CONFIG_HOME/reviewq/config.toml`. Three things in it are yours to
+set before the first sync:
+
+1. **`identity.login`** — every reason is computed relative to this account, so
+   nothing works until it is yours.
+2. **The repos**, in a `[[project]]` block. A project bundles repos that share
+   conventions; add another for a codebase whose conventions differ.
+3. **The interest rules** — which PRs you want to see. This is the step that
+   makes the queue yours rather than a feed: labels, paths, authors, author
+   associations, milestones. `reviewq help interest` is the whole reference,
+   and the rules *add* to each other — none of them hides anything.
+
+Without any interest rules reviewq still works, and shows you the PRs that name
+you — a review request, a mention, an assignment. The rules are how you see the
+ones nobody thought to name you on.
+
+In the interface, `⏎` hands the selected PR to your review command. By default
+that opens the PR in your browser; point `[handoff] review_command` at a review
+tool to stay in the terminal.
+
+<!-- help:skip -->
 
 Everything below is also in the terminal: `reviewq help` lists the pages and
 `reviewq help done` goes straight to one, rendered the way the interface draws
 markdown — screenshots included, drawn live rather than linked. They are slices
 of this file, so the two cannot drift.
 
-The config lives at `$XDG_CONFIG_HOME/reviewq/config.toml` and is written for you,
-comments and all, the first time it is needed. `reviewq doctor` reports on
-everything it needs to be true before a sync can work, and says which of it isn't.
+<!-- /help:skip -->
+
+`reviewq doctor` reports on everything that has to be true before a sync can
+work — the token, the rate-limit budget, the checkouts — and says which of it
+isn't.
 
 XDG applies on macOS too, so `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` move both the
 config and the ledger (`reviewq.db`); `REVIEWQ_CONFIG` and `REVIEWQ_DB` name either
@@ -251,7 +285,7 @@ login = "ashb"          # every reason is computed relative to this account
 [[project]]
 name  = "airflow"
 repos = [{ owner = "apache", name = "airflow", path = "~/code/airflow" }]
-show_labels = ["area:", "backport"]
+show_labels = ["area:*", "backport"]
 ```
 
 A project bundles repos with the rules that apply to them; add another
@@ -260,19 +294,26 @@ checkout — reviewq never reads a working tree, the queue comes from the forge,
 the handoff runs there, which is what lets a review tool publish back to the pull
 request.
 
-`show_labels` names the label families worth a chip on a queue row. A pattern
-ending in a separator is a prefix (`area:` takes every `area:*`); anything else is
-a whole label name. A row has space for two or three beside the title, so naming
+`show_labels` names the label families worth a chip on a queue row. A pattern is
+a whole label name, unless it carries a `*` — which matches any run of
+characters, so `area:*` takes the family and `*sdk*` takes anything with `sdk`
+in it. A row has space for two or three beside the title, so naming
 the handful you steer by is the point — the detail pane shows every label
 regardless. `reviewq sync --labels` brings in each repo's palette so the chips are
 drawn in the colours the repo paints them.
 
 ### Interest rules
 
-A PR is interesting if **any** rule matches. Within a rule, any listed value of a
-dimension matches, and a rule setting several dimensions requires all of them — an
-AND of ORs. Every rule must set at least one of `labels`, `paths`, `authors`,
-`author_associations` or `milestones`.
+**Rules add; they never take away.** A PR is interesting if **any** rule
+matches, so the rules are read together rather than in sequence, and one that
+names a milestone does not hide the PRs in other milestones — it adds its own.
+A PR matching no rule is simply not tracked by interest, which is not the same
+as being excluded: it still reaches the queue if it names you.
+
+Within a rule, any listed value of a dimension matches, and a rule setting
+several dimensions requires all of them — an AND of ORs. Every rule must set at
+least one of `labels`, `paths`, `authors`, `author_associations` or
+`milestones`.
 
 ```toml
 # Labels do most of the work where a bot maintains them: apache/airflow's
@@ -293,7 +334,8 @@ author_associations = ["FIRST_TIME_CONTRIBUTOR"]
 [[project.interest]]
 authors = ["potiuk"]
 
-# Substring match against the milestone title.
+# Substring match against the milestone title. This *adds* the 3.2 PRs; the
+# rules above go on matching whatever they matched, in any milestone.
 [[project.interest]]
 milestones = ["3.2"]
 ```

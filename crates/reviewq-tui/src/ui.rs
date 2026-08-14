@@ -1854,7 +1854,7 @@ sensor = S3KeySensor(deferrable=True)
             .find(|line| line.contains("#70301"))
             .expect("the row");
 
-        // `show_labels = ["area:", "backport"]` in the test config.
+        // `show_labels = ["area:*", "backport"]` in the test config.
         assert!(row.contains("area:Executors-core"), "{row}");
         assert!(row.contains("backport"), "{row}");
         assert!(

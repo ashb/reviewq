@@ -65,16 +65,17 @@ pub fn markdown(md: &str, mode: Mode, width: u16, colour: bool) -> String {
                     .max(1) as u16;
                 draw(&mut out, block.lines, at, false, "", &theme, colour);
             }
-            // A wrapped bullet hangs under its own text: coming back to the
-            // margin, it would read as another bullet.
+            // A wrapped item hangs under its own text: coming back to the
+            // margin, it would read as another item.
             Kind::Bullets => {
                 for line in block.lines {
+                    let hang = " ".repeat(marker(&line).unwrap_or(0));
                     draw(
                         &mut out,
                         vec![line],
-                        width.saturating_sub(BULLET_INDENT.len() as u16).max(20),
+                        width.saturating_sub(hang.len() as u16).max(20),
                         true,
-                        BULLET_INDENT,
+                        &hang,
                         &theme,
                         colour,
                     );
@@ -97,8 +98,27 @@ fn is_fence(line: &Line<'_>) -> bool {
     text.starts_with("```") && !text[3..].contains('`')
 }
 
-/// Two spaces, which is where a bullet's text starts after its `- `.
-const BULLET_INDENT: &str = "  ";
+/// How many columns a list item's marker takes, if the line is one: `- ` is
+/// two, `10. ` is four. That width is where the item's text starts, and so
+/// where a wrapped continuation belongs.
+fn marker(line: &Line<'_>) -> Option<usize> {
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let mut chars = text.chars();
+    match chars.next()? {
+        '-' | '*' => (chars.next() == Some(' ')).then_some(2),
+        first if first.is_ascii_digit() => {
+            let digits = 1 + chars.clone().take_while(char::is_ascii_digit).count();
+            let mut after = text[digits..].chars();
+            let dot = matches!(after.next(), Some('.' | ')'));
+            (dot && after.next() == Some(' ')).then_some(digits + 2)
+        }
+        _ => None,
+    }
+}
 
 /// Render lines into `out` at `width`, indenting every row after the first by
 /// `hang`.
@@ -278,7 +298,7 @@ fn blocks(lines: Vec<Line<'_>>) -> Vec<Block<'_>> {
             .collect();
         let kind = match head.chars().next() {
             Some('┌' | '│' | '├' | '└' | '┬' | '┴' | '┼') => Kind::Table,
-            Some('-' | '*') if head.chars().nth(1) == Some(' ') => Kind::Bullets,
+            _ if marker(&line).is_some() => Kind::Bullets,
             _ => Kind::Prose,
         };
         match out.last_mut() {
@@ -570,6 +590,23 @@ mod tests {
         let rendered = markdown("Set ``x`` and see.\n", Mode::Dark, 60, false);
         assert!(rendered.contains("Set"), "{rendered:?}");
         assert!(rendered.contains("and see"), "{rendered:?}");
+    }
+
+    #[test]
+    fn a_numbered_item_hangs_under_its_own_text() {
+        // Four columns for `10. `, two for `- `: a continuation back at the
+        // margin reads as the next item rather than the rest of this one.
+        let md = "1. A first item long enough that it has to wrap somewhere \
+                  around here.\n2. A second.\n";
+        let rendered = markdown(md, Mode::Dark, 40, false);
+
+        let lines: Vec<&str> = rendered.lines().filter(|l| !l.is_empty()).collect();
+        assert!(lines[0].starts_with("1. "), "{lines:?}");
+        assert!(
+            lines[1].starts_with("   ") && !lines[1].starts_with("    "),
+            "the continuation hangs under the text: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.starts_with("2. ")), "{lines:?}");
     }
 
     #[test]

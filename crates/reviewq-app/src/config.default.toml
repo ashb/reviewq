@@ -32,12 +32,12 @@ repos = [{ owner = "apache", name = "airflow" }]
 # Labels worth showing on a queue row, in the colours the repo paints them —
 # per repo, since the same name is a different colour in another project. A row
 # has space for two or three beside the title, so name the families you steer by
-# rather than everything: a pattern ending in a separator is a prefix
-# (`area:` takes every `area:*`), anything else is a whole label name. The detail
+# rather than everything: a pattern is a whole label name unless it carries a
+# `*`, which matches any run of characters (`area:*` takes the family). The detail
 # pane shows every label a PR carries regardless. Colours come from
 # `reviewq sync --labels`, which an ordinary sync does not ask for: they change
 # about never, and a label with no colour yet is drawn as plain text.
-#   show_labels = ["area:", "backport"]
+#   show_labels = ["area:*", "backport"]
 
 # Keep surfacing every one of this project's PRs after it merges, so a post-merge
 # reply or mention can flag something that shipped broken. Off by default — the
@@ -45,9 +45,14 @@ repos = [{ owner = "apache", name = "airflow" }]
 #   include_merged = true
 # For one rule's PRs rather than all of them, see `after_merge` on a rule below.
 
-# Interest rules. A PR is interesting if ANY rule matches. Within a rule, any
-# listed value of a dimension matches — and a rule setting several dimensions
-# requires all of them, so it reads as an AND of ORs:
+# Interest rules. Every rule *adds* to the queue; none of them takes anything
+# away. A PR is interesting if ANY rule matches, so the rules below are read
+# together rather than in sequence, and a PR matching none of them is simply
+# not tracked by interest — it is not "excluded", and another rule naming it
+# still brings it in.
+#
+# Within a rule, any listed value of a dimension matches — and a rule setting
+# several dimensions requires all of them, so one rule reads as an AND of ORs:
 #   [[project.interest]]
 #   name                = "first-timer in the task sdk"
 #   author_associations = ["FIRST_TIME_CONTRIBUTOR"]
@@ -81,7 +86,9 @@ author_associations = ["FIRST_TIME_CONTRIBUTOR"]
 #   paths       = ["airflow-core/src/airflow/serialization/**"]
 #   after_merge = true
 
-# Milestones I'm watching (substring match against the milestone title).
+# Milestones I'm watching (substring match against the milestone title). This
+# adds the 3.2 PRs; it does not hide PRs in any other milestone, which the rules
+# above and below go on matching as they did.
 [[project.interest]]
 milestones = ["3.2"]
 

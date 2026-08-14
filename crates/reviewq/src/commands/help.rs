@@ -37,7 +37,7 @@ struct Topic {
 const TOPICS: &[Topic] = &[
     Topic {
         name: "start",
-        what: "installing it, where the config and the ledger live",
+        what: "the first run: your config, your rules, and where things live",
         aliases: &["install", "getting-started"],
     },
     Topic {
@@ -126,22 +126,38 @@ fn index() -> String {
 
 /// The README between `<!-- help:name -->` and its closing marker.
 ///
-/// One thing goes on the way: a nested marker — `verbs` lives inside `reasons`
-/// — which is machinery, and would print as machinery. The pictures stay; they
-/// are drawn as screens rather than printed as links (see [`parts`]).
+/// Two things go on the way. A nested marker — `verbs` lives inside `reasons` —
+/// is machinery, and would print as machinery. And anything inside a
+/// `<!-- help:skip -->` block goes, which is how the file says "this sentence is
+/// for somebody reading the project page": telling a reader in the terminal that
+/// the documentation is available in the terminal is a paragraph that can only
+/// be true where it is not needed.
+///
+/// The pictures stay; they are drawn as screens rather than printed as links
+/// (see [`parts`]).
 fn section(name: &str) -> Option<String> {
     let open = format!("<!-- help:{name} -->");
     let close = format!("<!-- /help:{name} -->");
     let start = README.find(&open)? + open.len();
     let end = README[start..].find(&close)? + start;
 
-    let kept: Vec<&str> = README[start..end]
-        .lines()
-        .filter(|line| {
-            let line = line.trim();
-            !line.starts_with("<!-- help:") && !line.starts_with("<!-- /help:")
-        })
-        .collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for line in README[start..end].lines() {
+        let trimmed = line.trim();
+        if trimmed == "<!-- help:skip -->" {
+            skipping = true;
+            continue;
+        }
+        if trimmed == "<!-- /help:skip -->" {
+            skipping = false;
+            continue;
+        }
+        if skipping || trimmed.starts_with("<!-- help:") || trimmed.starts_with("<!-- /help:") {
+            continue;
+        }
+        kept.push(line);
+    }
 
     // Collapsed as they are dropped, so a page reads as written rather than as
     // one with holes where the pictures were.
@@ -605,6 +621,30 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_block_is_in_the_readme_and_not_in_the_page() {
+        // A paragraph telling you the documentation is available in the
+        // terminal can only be true where it is not needed.
+        let page = section("start").expect("start");
+
+        assert!(
+            README.contains("Everything below is also in the terminal"),
+            "the project page keeps it"
+        );
+        assert!(!page.contains("also in the terminal"), "{page}");
+        assert!(
+            !page.contains("help:skip"),
+            "and the marker goes too: {page}"
+        );
+        // What surrounds it survives.
+        assert!(page.contains("reviewq doctor"), "{page}");
+        assert!(
+            !page.contains("cargo install"),
+            "installing it is the project page's business — by the time this \
+             page is readable, it is installed: {page}"
+        );
+    }
+
+    #[test]
     fn a_picture_becomes_a_screen_to_draw() {
         // The pages keep their images; what changes is that a reader gets the
         // interface rather than a path to a file.
@@ -713,7 +753,7 @@ mod tests {
         let page = rendered("start");
 
         assert!(
-            page.contains("cargo install --path crates/reviewq"),
+            page.contains("$EDITOR ~/.config/reviewq/config.toml"),
             "{page}"
         );
         assert!(!page.contains("```"), "the fences are markup: {page}");

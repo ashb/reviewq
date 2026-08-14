@@ -661,20 +661,56 @@ impl Config {
     }
 }
 
+/// Whether `pattern` matches `text`, where `*` matches any run of characters
+/// and everything else is itself.
+///
+/// Written out rather than taken from a glob crate because a label is not a
+/// path: `area:Scheduler` and `provider:amazon[s3]` carry punctuation that a
+/// real glob would read as syntax — `[` opens a character class — and a config
+/// file should not need escaping rules for a feature whose whole vocabulary is
+/// one asterisk.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let Some(first) = parts.next() else {
+        return pattern == text;
+    };
+    // No `*` at all: the pattern is the label.
+    if pattern.find('*').is_none() {
+        return pattern == text;
+    }
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let (last, middles) = parts.split_last().expect("split always yields one part");
+    for middle in middles {
+        // Leftmost match: a later one could only make what follows harder to
+        // place, since every part has to appear in order.
+        let Some(at) = rest.find(middle) else {
+            return false;
+        };
+        rest = &rest[at + middle.len()..];
+    }
+    // The tail has to land at the end, and cannot overlap what is already
+    // matched — `*x` against `x` is a match, `*xx` against `x` is not.
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
 impl Project {
     /// Whether a label is one this project asked to see.
     ///
-    /// A pattern ending in a non-alphanumeric character is a prefix — `area:`
-    /// takes every `area:*` — and anything else is the label's whole name. That
-    /// rule needs no second config key to say which kind you meant, and it reads
-    /// the way the labels themselves are written.
+    /// A pattern is the label's whole name, unless it carries a `*`, which
+    /// stands for any run of characters: `area:*` takes the family, `*sdk*`
+    /// takes anything with `sdk` in it, and `backport` takes only `backport`.
+    ///
+    /// The `*` is the whole of the syntax. It said the same thing before by
+    /// reading a trailing punctuation mark as "and everything under this",
+    /// which meant `area:` and `area` behaved differently for a reason nobody
+    /// could see in the config file — where `area:*` says it outright.
     pub fn shows_label(&self, label: &str) -> bool {
         self.show_labels
             .iter()
-            .any(|pattern| match pattern.chars().last() {
-                Some(last) if !last.is_alphanumeric() => label.starts_with(pattern.as_str()),
-                _ => label == pattern,
-            })
+            .any(|pattern| glob_matches(pattern, label))
     }
 
     /// A name for messages: the configured name, else the first repo's slug.
@@ -947,18 +983,16 @@ mod tests {
     }
 
     #[test]
-    fn a_project_names_the_labels_worth_showing_by_name_or_by_prefix() {
-        // Which of the two you meant comes from how the pattern ends rather than
-        // from a second key: `area:` is a family, `backport` is a label.
-        // Spelled out rather than through `minimal`, which appends to the
-        // interest table — and this key belongs to the project.
+    fn a_label_pattern_is_a_whole_name_unless_it_carries_a_star() {
+        // The `*` is the whole of the syntax, and it says outright what a
+        // trailing colon used to say by implication.
         let config: Config = toml::from_str(
             r#"
             [identity]
             login = "ashb"
             [[project]]
             repos = [{ owner = "apache", name = "airflow" }]
-            show_labels = ["area:", "backport"]
+            show_labels = ["area:*", "backport", "*sdk*"]
             [[project.interest]]
             labels = ["area:task-sdk"]
             "#,
@@ -968,16 +1002,31 @@ mod tests {
 
         assert!(project.shows_label("area:Scheduler"));
         assert!(project.shows_label("area:task-sdk"));
-        assert!(project.shows_label("backport"));
-        assert!(
-            !project.shows_label("area"),
-            "the prefix needs its separator"
-        );
-        assert!(
-            !project.shows_label("backported"),
-            "an exact pattern is exact"
-        );
+        assert!(project.shows_label("backport"), "an exact pattern is exact");
+        assert!(!project.shows_label("backported"));
         assert!(!project.shows_label("provider:amazon"));
+        // A star in the middle takes anything carrying the word.
+        assert!(project.shows_label("task-sdk"));
+        assert!(project.shows_label("sdk"));
+        assert!(!project.shows_label("providers"));
+        // And a family pattern needs its own separator, as it always did.
+        assert!(!project.shows_label("area"));
+    }
+
+    #[test]
+    fn a_star_matches_a_run_of_anything_including_none_of_it() {
+        assert!(glob_matches("area:*", "area:"));
+        assert!(glob_matches("*", "anything at all"));
+        assert!(glob_matches("*port", "backport"));
+        assert!(glob_matches("back*port", "backport"));
+        assert!(glob_matches("back*port", "back-of-the-port"));
+        assert!(!glob_matches("back*port", "backports"));
+        // The parts have to appear in order, and the tail has to be the tail.
+        assert!(!glob_matches("a*b*c", "a c b"));
+        assert!(!glob_matches("*xx", "x"), "the tail cannot overlap itself");
+        // Punctuation a real glob would read as syntax is just a character.
+        assert!(glob_matches("provider:amazon[s3]", "provider:amazon[s3]"));
+        assert!(glob_matches("type/*", "type/bug"));
     }
 
     #[test]
