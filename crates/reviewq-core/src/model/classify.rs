@@ -46,6 +46,20 @@ pub struct Mention {
     pub at: Timestamp,
 }
 
+/// Somebody else speaking on a PR: a top-level comment, or a review they
+/// submitted.
+///
+/// Already filtered to other people at tier-2 — my own words are not somebody
+/// answering me — so the classifier only decides whether the speaker is one I
+/// am waiting on, and whether they spoke recently enough to matter.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Said {
+    /// Login of whoever spoke.
+    pub by: String,
+    /// When they spoke.
+    pub at: Timestamp,
+}
+
 /// A formal review request that currently names me.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ReviewRequest {
@@ -72,6 +86,13 @@ pub struct ClassifyCtx<'a> {
     pub mentions: &'a [Mention],
     /// A live review request naming me, if any.
     pub review_request: Option<ReviewRequest>,
+    /// What other people have said on the PR — top-level comments and reviews,
+    /// mine already excluded.
+    pub said: &'a [Said],
+    /// Logins I pulled into the discussion myself, by @mentioning them in
+    /// something I wrote here. Quoted mentions are not mine to answer for, so
+    /// they are not in this.
+    pub invited: &'a [String],
     /// Commits pushed since my last review, for the `re-review` count. Zero when
     /// unknown or not applicable.
     pub new_commits: u32,
@@ -138,6 +159,7 @@ pub fn classify(
     out.extend(thread_reply_attention(threads, mine, ctx));
     out.extend(resolved_unanswered_attention(pr, threads, mine));
     out.extend(re_review_attention(pr, mine, ctx));
+    out.extend(answered_after_review_attention(pr, mine, ctx));
     out.extend(review_requested_attention(pr, mine, ctx));
     // needs-first-look is for the open queue only: starting a first review of an
     // already-merged PR is not the point of surfacing it.
@@ -265,6 +287,41 @@ fn re_review_attention(
     })
 }
 
+/// Somebody I am waiting on has spoken since I last acted, on a PR I reviewed.
+///
+/// Deliberately narrow on both sides, because the wide version of this is the
+/// notifications firehose reviewq exists not to be:
+///
+/// * Only a PR I have **reviewed**. A submitted review is a public commitment
+///   and there are tens of them; "PRs I once commented on" is unbounded, and
+///   would pull a whole repository's chatter onto the queue.
+/// * Only the **author**, or somebody **I** pulled in. Those are the two people
+///   whose answer I am actually waiting for. A third party joining the
+///   discussion is a conversation, not a question for me.
+///
+/// Cleared like a mention: by acting on the PR, or by `done`.
+fn answered_after_review_attention(
+    pr: &PrSnapshot,
+    mine: &MyState,
+    ctx: &ClassifyCtx<'_>,
+) -> Option<Attention> {
+    mine.last_reviewed_sha.as_ref()?;
+    let latest = ctx
+        .said
+        .iter()
+        .filter(|said| !is_bot(&said.by, ctx.bots))
+        .filter(|said| said.by == pr.author || ctx.invited.iter().any(|who| who == &said.by))
+        .filter(|said| !acknowledged(said.at, mine))
+        .max_by_key(|said| said.at)?;
+    Some(Attention {
+        reason: AttentionReason::AnsweredAfterReview {
+            by: latest.by.clone(),
+            author: latest.by == pr.author,
+        },
+        since: latest.at,
+    })
+}
+
 /// A live review request names me, and I have not reviewed the current head.
 fn review_requested_attention(
     pr: &PrSnapshot,
@@ -326,8 +383,141 @@ mod tests {
     use super::*;
     use crate::model::{PrState, Verdict};
 
+    /// A PR I reviewed, whose author has since said something.
+    fn answered() -> (PrSnapshot, MyState, Vec<Said>) {
+        let mut pr = pr();
+        pr.author = "uranusjr".into();
+        let mine = MyState {
+            last_reviewed_sha: Some("abc".into()),
+            last_verdict: Some(Verdict::Approved),
+            last_action_at: Some(ts("2026-08-11T09:00:00Z")),
+            ..MyState::default()
+        };
+        let said = vec![Said {
+            by: "uranusjr".into(),
+            at: ts("2026-08-11T10:00:00Z"),
+        }];
+        (pr, mine, said)
+    }
+
+    #[test]
+    fn a_pr_i_never_reviewed_is_not_waiting_on_my_answer() {
+        // The scope that keeps this from being the notifications firehose: a
+        // submitted review is a commitment, a passing comment is not.
+        let (pr, mut mine, said) = answered();
+        mine.last_reviewed_sha = None;
+        mine.last_verdict = None;
+
+        let ctx = ClassifyCtx {
+            said: &said,
+            ..Default::default()
+        };
+
+        assert!(
+            !fired(&pr, &mine, &ctx).contains(&"answered_after_review"),
+            "nothing to answer: I never said anything to answer"
+        );
+    }
+
+    #[test]
+    fn a_stranger_joining_the_discussion_is_not_my_business() {
+        let (pr, mine, _) = answered();
+        let said = vec![Said {
+            by: "a-passer-by".into(),
+            at: ts("2026-08-11T10:00:00Z"),
+        }];
+
+        let ctx = ClassifyCtx {
+            said: &said,
+            ..Default::default()
+        };
+
+        assert!(!fired(&pr, &mine, &ctx).contains(&"answered_after_review"));
+    }
+
+    #[test]
+    fn somebody_i_asked_is_my_business() {
+        let (pr, mine, _) = answered();
+        let said = vec![Said {
+            by: "o-nikolas".into(),
+            at: ts("2026-08-11T10:00:00Z"),
+        }];
+        let invited = vec!["o-nikolas".to_string()];
+
+        let ctx = ClassifyCtx {
+            said: &said,
+            invited: &invited,
+            ..Default::default()
+        };
+
+        assert!(fired(&pr, &mine, &ctx).contains(&"answered_after_review"));
+    }
+
+    #[test]
+    fn a_bot_answering_answers_nothing() {
+        let (mut pr, mine, mut said) = answered();
+        pr.author = "boring-cyborg[bot]".into();
+        said[0].by = "boring-cyborg[bot]".into();
+        let bots = vec!["boring-cyborg[bot]".to_string()];
+
+        let ctx = ClassifyCtx {
+            said: &said,
+            bots: &bots,
+            ..Default::default()
+        };
+
+        assert!(!fired(&pr, &mine, &ctx).contains(&"answered_after_review"));
+    }
+
+    #[test]
+    fn what_they_said_before_i_last_spoke_is_already_answered() {
+        let (pr, mine, mut said) = answered();
+        said[0].at = ts("2026-08-11T08:00:00Z");
+
+        let ctx = ClassifyCtx {
+            said: &said,
+            ..Default::default()
+        };
+
+        assert!(!fired(&pr, &mine, &ctx).contains(&"answered_after_review"));
+    }
+
+    #[test]
+    fn a_done_settles_it_until_they_speak_again() {
+        let (pr, mut mine, said) = answered();
+        mine.done_at = Some(ts("2026-08-11T11:00:00Z"));
+
+        let ctx = ClassifyCtx {
+            said: &said,
+            ..Default::default()
+        };
+        assert!(!fired(&pr, &mine, &ctx).contains(&"answered_after_review"));
+
+        let later = vec![Said {
+            by: "uranusjr".into(),
+            at: ts("2026-08-11T12:00:00Z"),
+        }];
+        let ctx = ClassifyCtx {
+            said: &later,
+            ..Default::default()
+        };
+        assert!(
+            fired(&pr, &mine, &ctx).contains(&"answered_after_review"),
+            "and they spoke again after it"
+        );
+    }
+
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    /// The reasons a PR fires, by discriminant — what a test asserting "this
+    /// case does/does not surface it" actually wants to know.
+    fn fired(pr: &PrSnapshot, mine: &MyState, ctx: &ClassifyCtx<'_>) -> Vec<&'static str> {
+        classify(pr, mine, &[], now(), ctx)
+            .iter()
+            .map(|attention| attention.reason.discriminant())
+            .collect()
     }
 
     fn pr() -> PrSnapshot {

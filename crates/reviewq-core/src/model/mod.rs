@@ -8,6 +8,6 @@ mod classify;
 mod reason;
 mod snapshot;
 
-pub use classify::{ClassifyCtx, Mention, ReviewRequest, classify};
+pub use classify::{ClassifyCtx, Mention, ReviewRequest, Said, classify};
 pub use reason::{Attention, AttentionReason};
 pub use snapshot::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};

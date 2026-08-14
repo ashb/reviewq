@@ -130,6 +130,8 @@ impl FakeForge {
                 threads: vec![],
                 reviewers: vec![],
                 mentions: vec![],
+                said: vec![],
+                invited: vec![],
                 new_commits: 0,
                 review_request: None,
                 cost: 1,

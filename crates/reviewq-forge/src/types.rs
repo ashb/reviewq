@@ -6,7 +6,7 @@
 
 use jiff::Timestamp;
 use reviewq_core::model::{
-    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
+    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, Said, ThreadState, Verdict,
 };
 use serde::Deserialize;
 
@@ -126,6 +126,13 @@ pub struct PrDetail {
     pub reviewers: Vec<ReviewerVerdict>,
     /// @mentions of me, from others, across comments and reviews.
     pub mentions: Vec<Mention>,
+    /// What other people said here — top-level comments and submitted reviews,
+    /// mine excluded. Whether any of them is somebody I am waiting on is the
+    /// classifier's call.
+    pub said: Vec<Said>,
+    /// Logins I pulled in myself, by @mentioning them in something I wrote.
+    /// Quoted mentions are somebody else's words, so they are not here.
+    pub invited: Vec<String>,
     /// Commits pushed since my last review; zero if I have not reviewed.
     pub new_commits: u32,
     /// A live review request naming me directly, if any.

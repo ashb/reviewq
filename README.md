@@ -55,7 +55,7 @@ getting a fresh default would hide a typo.
 
 ## Why a PR is on the queue
 
-Six reasons, in the order the queue sorts them. A PR carries every one that fires
+Seven reasons, in the order the queue sorts them. A PR carries every one that fires
 and is ranked by its most urgent; within a band, oldest first. Nothing here reads
 a clock beyond "now" or touches the network, so a fixture plus a timestamp
 reproduces a queue exactly.
@@ -66,11 +66,18 @@ reproduces a queue exactly.
 | 2 | `thread_reply` | *@potiuk replied in 2 threads you own* | replying in that thread, or `done` |
 | 3 | `resolved_unanswered` | *@potiuk resolved your thread without replying* | `done`, and only `done` — it means *go check the fix* |
 | 4 | `re_review` | *3 new commits since your review of 5e14b22* | reviewing the new head, or `done` at it |
-| 5 | `review_requested` | *review requested via @airflow-committers* | reviewing the current head |
-| 6 | `needs_first_look` | *matches label area:task-sdk* | anything at all — it only ever fires once |
+| 5 | `answered_after_review` | *@potiuk answered your review* | anything you do on the PR, or `done` |
+| 6 | `review_requested` | *review requested via @airflow-committers* | reviewing the current head |
+| 7 | `needs_first_look` | *matches label area:task-sdk* | anything at all — it only ever fires once |
 
-Reasons 1–3 come from what people said, 4–5 from what the forge asked of you, and
-6 from your own interest rules. Bands 1 and 2 — where a person is waiting on a
+Reasons 1–3 and 5 come from what people said, 4 and 6 from what the forge asked
+of you, and 7 from your own interest rules.
+
+Band 5 is the one no notification would give you: you review a PR, and the
+author answers in a comment of their own — not in your thread, and without
+typing your name. It fires only on a PR you have *reviewed*, and only for the
+author or somebody you pulled in by name yourself, which is what keeps a busy
+PR's crosstalk off the queue. A name you only quoted is not somebody you asked. Bands 1 and 2 — where a person is waiting on a
 reply from you — are coloured apart from the rest in both `list` and the
 interface, and a deferred row is quieted in both; which rows shout is one
 decision, though each paints it in its own palette.

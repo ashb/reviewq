@@ -1,0 +1,25 @@
+{
+  "description": "I reviewed it and said my piece; the author answered in a comment of their own — not in my thread, and without typing my name. Nothing else would surface this.",
+  "now": "2026-08-14T09:00:00Z",
+  "pr": {
+    "number": 69253,
+    "title": "Fix short-read handling in task-sdk IPC framing",
+    "author": "Andrushika",
+    "author_association": "CONTRIBUTOR",
+    "head_sha": "5e14b22a0e6b4c8d9f0a1b2c3d4e5f6a7b8c9d0e",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-13T18:20:00Z",
+    "labels": ["area:task-sdk"],
+    "files": ["task-sdk/src/airflow/sdk/execution_time/comms.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "5e14b22a0e6b4c8d9f0a1b2c3d4e5f6a7b8c9d0e",
+    "last_verdict": "APPROVED",
+    "last_action_at": "2026-08-13T16:05:00Z"
+  },
+  "ctx": {
+    "said": [{ "by": "Andrushika", "at": "2026-08-13T18:20:00Z" }]
+  }
+}

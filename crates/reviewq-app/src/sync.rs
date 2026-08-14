@@ -624,6 +624,8 @@ pub async fn refresh_one(
         bots,
         interest: interest.as_deref(),
         mentions: &detail.mentions,
+        said: &detail.said,
+        invited: &detail.invited,
         review_request,
         new_commits: detail.new_commits,
         include_merged,

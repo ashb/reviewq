@@ -13,7 +13,7 @@ use jiff::Timestamp;
 use octocrab::models::activity::Notification;
 use octocrab::{GraphqlError, GraphqlPathSegment, GraphqlResponse, Octocrab};
 use reviewq_core::model::{
-    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, ThreadState, Verdict,
+    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, Said, ThreadState, Verdict,
 };
 use serde::Deserialize;
 
@@ -824,6 +824,61 @@ fn strip_code(body: &str) -> String {
     out
 }
 
+/// Record everybody `body` pulls into the discussion, bar me.
+fn invite(invited: &mut Vec<String>, body: &str, login: &str) {
+    for handle in handles_in(body) {
+        if !handle.eq_ignore_ascii_case(login) && !invited.contains(&handle) {
+            invited.push(handle);
+        }
+    }
+}
+
+/// `body` without the lines somebody else wrote.
+///
+/// A markdown blockquote is a quotation: the words in it are not the words of
+/// whoever posted the comment. That matters for reading who *I* pulled into a
+/// discussion — quoting somebody else's "hey @otheruser, what do you think" is
+/// not me asking @otheruser anything, and treating it as one would wait on a
+/// reply I never asked for.
+fn strip_quotes(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with('>'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every login `body` @mentions, in the order they appear.
+///
+/// The inverse of [`mentions_login`], with the same boundary rules and the same
+/// blindness to code — plus quotes, since this is only ever asked of something I
+/// wrote and I am only answerable for my own words. A team (`@org/team`) is
+/// dropped: knowing whether somebody is in one takes membership this never
+/// fetches, so a team mention invites nobody rather than everybody.
+fn handles_in(body: &str) -> Vec<String> {
+    let text = strip_quotes(&strip_code(body));
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    for (at, _) in text.match_indices('@') {
+        let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        if !before_ok {
+            continue;
+        }
+        let handle: String = text[at + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        // A `/` after the handle makes it a team, which invites nobody.
+        let is_team = text[at + 1 + handle.len()..].starts_with('/');
+        if handle.is_empty() || is_team {
+            continue;
+        }
+        if !out.contains(&handle) {
+            out.push(handle);
+        }
+    }
+    out
+}
+
 /// Whether `body` @mentions `login`, requiring a word boundary on each side so
 /// `@ashbourne` and an email `x@ashb` do not count as mentions of `ashb`.
 /// Code is stripped first (see [`strip_code`]).
@@ -855,6 +910,10 @@ impl DetailPr {
     fn into_detail(self, login: &str, cost: u32, remaining: u32) -> PrDetail {
         let mut action_times: Vec<Timestamp> = Vec::new();
         let mut mentions: Vec<Mention> = Vec::new();
+        // Two halves of "somebody is waiting on my answer": what other people
+        // have said here, and who I asked to say it.
+        let mut said: Vec<Said> = Vec::new();
+        let mut invited: Vec<String> = Vec::new();
 
         // My latest parseable review sets last_reviewed_sha / verdict; every one
         // of my reviews counts toward last_action_at.
@@ -869,6 +928,14 @@ impl DetailPr {
             let mine = author_login(&review.author) == Some(login);
             if mine && let Some(at) = review.submitted_at {
                 action_times.push(at);
+            }
+            match (mine, author_login(&review.author), review.submitted_at) {
+                (true, _, _) => invite(&mut invited, &review.body, login),
+                (false, Some(by), Some(at)) => said.push(Said {
+                    by: by.to_string(),
+                    at,
+                }),
+                (false, _, _) => {}
             }
             if let Some(other) =
                 mention_from(&review.author, review.submitted_at, &review.body, login)
@@ -914,6 +981,12 @@ impl DetailPr {
         for comment in &self.comments.nodes {
             if author_login(&comment.author) == Some(login) {
                 action_times.push(comment.created_at);
+                invite(&mut invited, &comment.body, login);
+            } else if let Some(by) = author_login(&comment.author) {
+                said.push(Said {
+                    by: by.to_string(),
+                    at: comment.created_at,
+                });
             }
             if let Some(m) = mention_from(
                 &comment.author,
@@ -961,6 +1034,8 @@ impl DetailPr {
             threads,
             reviewers,
             mentions,
+            said,
+            invited,
             new_commits,
             review_request,
             cost,
@@ -1061,7 +1136,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       reviews(first: 100) {
         nodes { author { login } state submittedAt commit { oid } body }
       }
-      comments(first: 100) {
+      comments(last: 100) {
         nodes { author { login } createdAt body }
       }
       commits(first: 100) {
@@ -1105,6 +1180,39 @@ mod tests {
             "Could not resolve to a PullRequest with the number of 70787.",
             &["repository", "pullRequest"],
         )
+    }
+
+    #[test]
+    fn a_quoted_mention_is_not_an_invitation() {
+        // Replying to somebody who tagged a third party does not make that
+        // third party's answer mine to wait for — the tag is in their words.
+        let body = "> hey @otheruser, what do you think\n\nI don't know about \
+                    them but I would keep it.";
+
+        assert!(handles_in(body).is_empty(), "{:?}", handles_in(body));
+    }
+
+    #[test]
+    fn an_invitation_i_wrote_myself_counts() {
+        assert_eq!(
+            handles_in("@o-nikolas does this match the executor?"),
+            ["o-nikolas"]
+        );
+        // Quoted above, asked below: the ask is mine.
+        assert_eq!(
+            handles_in("> not sure about @someone-else\n\nfair — @potiuk, thoughts?"),
+            ["potiuk"]
+        );
+    }
+
+    #[test]
+    fn a_handle_in_code_or_a_team_invites_nobody() {
+        // Code is somebody's example, and a team needs membership this never
+        // fetches — inviting everybody in it would be the wrong guess.
+        assert!(handles_in("run `git log @potiuk` for that").is_empty());
+        assert!(handles_in("cc @apache/airflow-committers").is_empty());
+        // An email address is not a mention either.
+        assert!(handles_in("mail ash@astronomer.io about it").is_empty());
     }
 
     #[test]
@@ -1362,6 +1470,18 @@ mod tests {
         // The state comes back with the detail, which is the only way a refresh
         // of one PR can learn it has been closed since the last sweep.
         assert_eq!(detail.state, PrState::Open);
+
+        // Everybody else's comments and reviews, and mine left out of them.
+        assert!(
+            detail.said.iter().all(|said| said.by != "ashb"),
+            "{:?}",
+            detail.said
+        );
+        assert!(
+            detail.said.iter().any(|said| said.by == "uranusjr"),
+            "the comment that mentioned me is also somebody speaking: {:?}",
+            detail.said
+        );
         // uranusjr @mentioned me in a comment after I last acted.
         assert_eq!(detail.mentions.len(), 1);
         assert_eq!(detail.mentions[0].by, "uranusjr");

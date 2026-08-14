@@ -60,6 +60,20 @@ pub enum AttentionReason {
         since_sha: String,
     },
 
+    /// Somebody I am waiting on has spoken on a PR I reviewed — the author of
+    /// it, or somebody I pulled into the discussion myself.
+    ///
+    /// The case no other reason covers: you review, the author answers in a
+    /// comment of their own rather than in your thread, and never types your
+    /// name. Nothing about that is a mention, a thread reply or a new commit,
+    /// and until this existed the PR simply went quiet.
+    AnsweredAfterReview {
+        /// Login of whoever spoke.
+        by: String,
+        /// Whether they are the PR's author, as opposed to somebody I asked.
+        author: bool,
+    },
+
     /// A formal review request names me or a team I'm in.
     ReviewRequested {
         /// Team slug, if the request was to a team rather than to me directly.
@@ -84,8 +98,12 @@ impl AttentionReason {
             Self::ThreadReply { .. } => 2,
             Self::ResolvedUnanswered { .. } => 3,
             Self::ReReview { .. } => 4,
-            Self::ReviewRequested { .. } => 5,
-            Self::NeedsFirstLook { .. } => 6,
+            // Above a fresh request, below new commits: this is a PR you are
+            // already in, and somebody is waiting on your answer to what you
+            // already said.
+            Self::AnsweredAfterReview { .. } => 5,
+            Self::ReviewRequested { .. } => 6,
+            Self::NeedsFirstLook { .. } => 7,
         }
     }
 
@@ -102,6 +120,7 @@ impl AttentionReason {
             Self::ThreadReply { .. } => "thread_reply",
             Self::ResolvedUnanswered { .. } => "resolved_unanswered",
             Self::ReReview { .. } => "re_review",
+            Self::AnsweredAfterReview { .. } => "answered_after_review",
             Self::ReviewRequested { .. } => "review_requested",
             Self::NeedsFirstLook { .. } => "needs_first_look",
         }
@@ -139,6 +158,13 @@ impl fmt::Display for AttentionReason {
                     1 => write!(f, "1 new commit since your review of {sha}"),
                     n => write!(f, "{n} new commits since your review of {sha}"),
                 }
+            }
+
+            Self::AnsweredAfterReview { by, author: true } => {
+                write!(f, "@{by} answered your review")
+            }
+            Self::AnsweredAfterReview { by, author: false } => {
+                write!(f, "@{by} replied, as you asked")
             }
 
             // "you were asked to review" spent 24 characters saying what the
@@ -188,7 +214,7 @@ mod tests {
 
     /// One of each variant, so a test covering "all of them" keeps covering all
     /// of them when a variant is added.
-    fn every_variant() -> [AttentionReason; 6] {
+    fn every_variant() -> [AttentionReason; 7] {
         [
             AttentionReason::Mention { by: "a".into() },
             AttentionReason::ThreadReply {
@@ -203,6 +229,10 @@ mod tests {
                 new_commits: 1,
                 since_sha: "a".into(),
             },
+            AttentionReason::AnsweredAfterReview {
+                by: "a".into(),
+                author: true,
+            },
             AttentionReason::ReviewRequested { team: None },
             AttentionReason::NeedsFirstLook { rule: "a".into() },
         ]
@@ -214,7 +244,7 @@ mod tests {
 
         let mut priorities: Vec<u8> = all.iter().map(AttentionReason::priority).collect();
         priorities.sort_unstable();
-        assert_eq!(priorities, (1..=6).collect::<Vec<u8>>());
+        assert_eq!(priorities, (1..=7).collect::<Vec<u8>>());
     }
 
     #[test]

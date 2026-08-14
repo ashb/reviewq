@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use reviewq_core::model::{
-    ClassifyCtx, Mention, MyState, PrSnapshot, ReviewRequest, ThreadState, classify,
+    ClassifyCtx, Mention, MyState, PrSnapshot, ReviewRequest, Said, ThreadState, classify,
 };
 use serde::Deserialize;
 
@@ -46,6 +46,10 @@ struct ScenarioCtx {
     #[serde(default)]
     review_request: Option<ReviewRequest>,
     #[serde(default)]
+    said: Vec<Said>,
+    #[serde(default)]
+    invited: Vec<String>,
+    #[serde(default)]
     new_commits: u32,
     #[serde(default)]
     include_merged: bool,
@@ -68,20 +72,15 @@ impl Scenario {
             interest: self.ctx.interest.as_deref(),
             mentions: &self.ctx.mentions,
             review_request: self.ctx.review_request.clone(),
+            said: &self.ctx.said,
+            invited: &self.ctx.invited,
             new_commits: self.ctx.new_commits,
             include_merged: self.ctx.include_merged,
         }
     }
 
     fn classified(&self) -> String {
-        let ctx = ClassifyCtx {
-            bots: &self.ctx.bots,
-            interest: self.ctx.interest.as_deref(),
-            mentions: &self.ctx.mentions,
-            review_request: self.ctx.review_request.clone(),
-            new_commits: self.ctx.new_commits,
-            include_merged: self.ctx.include_merged,
-        };
+        let ctx = self.ctx();
         let attention = classify(&self.pr, &self.mine, &self.threads, self.now, &ctx);
         if attention.is_empty() {
             return "(nothing)".to_string();
@@ -184,6 +183,7 @@ fn every_attention_reason_is_covered_by_a_fixture() {
         .collect();
 
     let expected = [
+        "answered_after_review",
         "mention",
         "needs_first_look",
         "re_review",

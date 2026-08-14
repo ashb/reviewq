@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: "I reviewed it and said my piece; the author answered in a comment of their own — not in my thread, and without typing my name. Nothing else would surface this."
+---
+[p5] @Andrushika answered your review (since 2026-08-13T18:20:00Z)

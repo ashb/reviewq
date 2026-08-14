@@ -1,0 +1,5 @@
+---
+source: crates/reviewq-core/tests/scenarios.rs
+expression: I reviewed it and pulled in a third party by name; they answered. A stranger joining the same discussion would not surface it — only the author and the people I asked.
+---
+[p5] @o-nikolas replied, as you asked (since 2026-08-13T19:00:00Z)

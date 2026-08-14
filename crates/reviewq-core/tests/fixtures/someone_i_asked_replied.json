@@ -1,0 +1,29 @@
+{
+  "description": "I reviewed it and pulled in a third party by name; they answered. A stranger joining the same discussion would not surface it — only the author and the people I asked.",
+  "now": "2026-08-14T09:00:00Z",
+  "pr": {
+    "number": 70135,
+    "title": "Add deferrable mode to the S3 sensor",
+    "author": "uranusjr",
+    "author_association": "MEMBER",
+    "head_sha": "abc1234f8901234567890123456789012345678a",
+    "is_draft": false,
+    "state": "OPEN",
+    "updated_at": "2026-08-13T19:00:00Z",
+    "labels": ["area:providers"],
+    "files": ["providers/amazon/src/airflow/providers/amazon/aws/sensors/s3.py"],
+    "files_truncated": false
+  },
+  "mine": {
+    "last_reviewed_sha": "abc1234f8901234567890123456789012345678a",
+    "last_verdict": "COMMENTED",
+    "last_action_at": "2026-08-13T11:00:00Z"
+  },
+  "ctx": {
+    "said": [
+      { "by": "o-nikolas", "at": "2026-08-13T19:00:00Z" },
+      { "by": "a-passer-by", "at": "2026-08-13T19:30:00Z" }
+    ],
+    "invited": ["o-nikolas"]
+  }
+}
