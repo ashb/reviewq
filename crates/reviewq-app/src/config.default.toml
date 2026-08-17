@@ -176,6 +176,17 @@ theme = "dark"
 #   [output.icons]
 #   branch = "->"
 
+# The glyphs before a GFM alert's heading in a PR description — `> [!NOTE]`
+# and its four siblings. Each defaults to a Nerd Font codepoint, which a
+# terminal without a patched font draws as a box — override any of them with
+# anything yours can draw, or with "" to show the heading with no icon.
+#   [output.icons.alert]
+#   note      = "i"   # U+F449, oct-info
+#   tip       = "*"   # U+EA61, cod-lightbulb
+#   important = "!"   # U+F12A, fa-exclamation
+#   warning   = "!"   # U+F421, oct-alert
+#   caution   = "!"   # U+F46E, oct-stop
+
 # How a saved screen is drawn. An SVG names fonts, it cannot carry them, so what
 # a viewer sees depends on what it can resolve: the text face comes from Bunny (a
 # Google Fonts mirror that sets no cookies), and the symbol face is only named —

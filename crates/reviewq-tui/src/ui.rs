@@ -6,7 +6,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -606,8 +606,11 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     {
         lines.push(Line::from(""));
         lines.push(section("Description", t));
+        let options = tui_markdown::Options::new(AlertIconStyleSheet {
+            icons: app.icons().alert.clone(),
+        });
         lines.extend(
-            tui_markdown::from_str(body)
+            tui_markdown::from_str_with_options(body, &options)
                 .lines
                 .into_iter()
                 .map(|line| themed_markdown(line, t)),
@@ -639,14 +642,25 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
 /// It reads `tui-markdown`'s own scheme to know which is which, so a change there
 /// would need a change here; [`markdown_keeps_its_structure_in_our_colours`] fails
 /// if that scheme moves.
+///
+/// GFM alerts (`> [!NOTE]` and its four siblings) are `tui-markdown`'s own
+/// extension of the same colour-as-signal scheme: each kind's blockquote line
+/// carries a fixed colour, which [`alert_role`] reads back into a theme role.
+/// A plain blockquote shares the alert palette's green — `tui-markdown` gives
+/// both the same default — so it lands on the same role as a Tip; that's a
+/// cosmetic near-miss, not a misread, since only an actual `[!TIP]` block
+/// carries the "💡 Tip" heading line alongside it.
 pub(crate) fn themed_markdown<'a>(mut line: Line<'a>, t: &Theme) -> Line<'a> {
-    let heading = line.style.fg.is_some();
+    let alert = alert_role(line.style.fg, t);
+    let heading = alert.is_none() && line.style.fg.is_some();
     let fenced = line.style.bg.is_some();
     let modifiers = line.style.add_modifier;
     line.style = Style::default();
     for span in &mut line.spans {
         let inline_code = span.style.bg.is_some();
-        let role = if heading {
+        let role = if let Some(role) = alert {
+            role
+        } else if heading {
             t.focus
         } else if fenced || inline_code {
             t.key
@@ -658,6 +672,48 @@ pub(crate) fn themed_markdown<'a>(mut line: Line<'a>, t: &Theme) -> Line<'a> {
             .add_modifier(span.style.add_modifier | modifiers);
     }
     line
+}
+
+/// The theme role a GFM alert's `tui-markdown` line colour stands for.
+///
+/// `tui-markdown`'s default style sheet paints each alert kind — Note, Tip,
+/// Important, Warning, Caution — a fixed named colour; this maps that fixed
+/// palette onto reviewq's own, so an alert reads with the accent its
+/// severity already carries elsewhere in the interface rather than a raw
+/// ANSI colour a light background can't guarantee is legible.
+fn alert_role(fg: Option<Color>, t: &Theme) -> Option<Rgb> {
+    match fg {
+        Some(Color::Blue) => Some(t.quiet),     // Note
+        Some(Color::Green) => Some(t.good),     // Tip
+        Some(Color::Magenta) => Some(t.merged), // Important
+        Some(Color::Yellow) => Some(t.warn),    // Warning
+        Some(Color::Red) => Some(t.urgent),     // Caution
+        _ => None,
+    }
+}
+
+/// Supplies the configured glyph for each GFM alert kind, in place of
+/// `tui-markdown`'s built-in emoji.
+///
+/// Everything else about rendering — colour, label text, the blockquote
+/// prefix — is left at `tui-markdown`'s default and re-themed afterward by
+/// [`themed_markdown`]; only the icon is a matter of what the user's font can
+/// draw, so only the icon is overridden here.
+#[derive(Clone)]
+struct AlertIconStyleSheet {
+    icons: reviewq_app::config::AlertIcons,
+}
+
+impl tui_markdown::StyleSheet for AlertIconStyleSheet {
+    fn alert_icon(&self, kind: tui_markdown::AlertKind) -> &str {
+        match kind {
+            tui_markdown::AlertKind::Note => &self.icons.note,
+            tui_markdown::AlertKind::Tip => &self.icons.tip,
+            tui_markdown::AlertKind::Important => &self.icons.important,
+            tui_markdown::AlertKind::Warning => &self.icons.warning,
+            tui_markdown::AlertKind::Caution => &self.icons.caution,
+        }
+    }
 }
 
 /// Remove `<!-- ... -->` runs from markdown.
@@ -1583,6 +1639,46 @@ sensor = S3KeySensor(deferrable=True)
     }
 
     #[test]
+    fn each_gfm_alert_kind_takes_its_own_theme_role() {
+        let t = Theme::new(Mode::Light);
+        for (marker, label, role) in [
+            ("NOTE", "Note", t.quiet),
+            ("TIP", "Tip", t.good),
+            ("IMPORTANT", "Important", t.merged),
+            ("WARNING", "Warning", t.warn),
+            ("CAUTION", "Caution", t.urgent),
+        ] {
+            let markdown = format!("> [!{marker}]\n> Body text.\n");
+            let themed: Vec<Line<'_>> = tui_markdown::from_str(&markdown)
+                .lines
+                .into_iter()
+                .map(|line| themed_markdown(line, &t))
+                .collect();
+
+            let heading = themed
+                .iter()
+                .find(|line| line.spans.iter().any(|s| s.content.contains(label)))
+                .unwrap_or_else(|| panic!("no {label} heading line in {themed:?}"));
+            assert!(
+                heading
+                    .spans
+                    .iter()
+                    .any(|s| s.style.fg == Some(color(role))),
+                "{label} heading should take its theme role: {heading:?}"
+            );
+
+            let body = themed
+                .iter()
+                .find(|line| line.spans.iter().any(|s| s.content.contains("Body text")))
+                .unwrap_or_else(|| panic!("no body line in {themed:?}"));
+            assert!(
+                body.spans.iter().any(|s| s.style.fg == Some(color(role))),
+                "{label} body should take the same role as its heading: {body:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_overlay_is_opaque_rather_than_letting_the_terminal_through() {
         // `Clear` resets the cells beneath it to nothing, which is the one place
         // the fill above would not reach.
@@ -1696,6 +1792,67 @@ sensor = S3KeySensor(deferrable=True)
         ));
         assert!(!plain.contains('\u{f419}'), "{plain}");
         assert!(plain.contains("v3-1-test"), "the branch stays: {plain}");
+    }
+
+    #[test]
+    fn a_gfm_alert_carries_the_configured_icon() {
+        // An app over one PR whose description is a single alert, drawn with
+        // whatever config it is given.
+        fn drawn(config: crate::app::HeldConfig) -> String {
+            let ledger = Ledger::open_in_memory().expect("ledger");
+            let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+            let now = ts("2026-08-10T12:00:00Z");
+            ledger
+                .upsert_pr(
+                    repo_id,
+                    &pr(1, "Has an alert"),
+                    Some(TrackedReason::Interest {
+                        rule: "label area:async".into(),
+                        after_merge: false,
+                    }),
+                    now,
+                )
+                .expect("upsert");
+            ledger
+                .commit_detail(
+                    repo_id,
+                    1,
+                    &MyState::default(),
+                    &[],
+                    &[],
+                    &[Attention {
+                        reason: AttentionReason::Mention { by: "kaxil".into() },
+                        since: now,
+                    }],
+                    Some("> [!WARNING]\n> Read this first."),
+                    now,
+                )
+                .expect("detail")
+                .expect_applied();
+            let mut app = App::with_ledger(Theme::default(), ledger, config).expect("app");
+            screen(&mut app, 100, 30)
+        }
+
+        let shown = drawn(test_config());
+        assert!(shown.contains('\u{f421}'), "{shown}");
+
+        let plain = drawn(std::sync::Arc::new(
+            toml::from_str(
+                r#"
+                [identity]
+                login = "ashb"
+                [[project]]
+                repos = [{ owner = "apache", name = "airflow" }]
+                [[project.interest]]
+                labels = ["area:async"]
+                [output.icons.alert]
+                warning = "!"
+                "#,
+            )
+            .expect("config parses"),
+        ));
+        assert!(!plain.contains('\u{f421}'), "{plain}");
+        assert!(plain.contains("! Warning"), "{plain}");
     }
 
     #[test]

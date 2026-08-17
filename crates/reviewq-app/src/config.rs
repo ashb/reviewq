@@ -379,6 +379,8 @@ impl Marks {
 pub struct Icons {
     /// Before the branch a PR would merge into.
     pub branch: String,
+    /// Before a GFM alert's heading. `[output.icons.alert]` in TOML.
+    pub alert: AlertIcons,
 }
 
 impl Default for Icons {
@@ -386,6 +388,41 @@ impl Default for Icons {
         Self {
             // U+F419, Nerd Fonts' git-branch.
             branch: "\u{f419}".into(),
+            alert: AlertIcons::default(),
+        }
+    }
+}
+
+/// The glyphs before a GFM alert's heading — `> [!NOTE]` and its four
+/// siblings — one per kind.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AlertIcons {
+    /// `> [!NOTE]`.
+    pub note: String,
+    /// `> [!TIP]`.
+    pub tip: String,
+    /// `> [!IMPORTANT]`.
+    pub important: String,
+    /// `> [!WARNING]`.
+    pub warning: String,
+    /// `> [!CAUTION]`.
+    pub caution: String,
+}
+
+impl Default for AlertIcons {
+    fn default() -> Self {
+        Self {
+            // U+F449, Nerd Fonts' oct-info.
+            note: "\u{f449}".into(),
+            // U+EA61, Nerd Fonts' cod-lightbulb.
+            tip: "\u{ea61}".into(),
+            // U+F12A, Nerd Fonts' fa-exclamation.
+            important: "\u{f12a}".into(),
+            // U+F421, Nerd Fonts' oct-alert.
+            warning: "\u{f421}".into(),
+            // U+F46E, Nerd Fonts' oct-stop.
+            caution: "\u{f46e}".into(),
         }
     }
 }
@@ -899,6 +936,30 @@ mod tests {
         ))
         .expect("parses");
         assert_eq!(none.output.icons.branch, "", "dropping it is allowed");
+    }
+
+    #[test]
+    fn each_alert_icon_defaults_to_a_nerd_font_glyph_and_is_replaceable_alone() {
+        let config: Config = toml::from_str(&minimal("")).expect("parses");
+        let alert = &config.output.icons.alert;
+        assert_eq!(alert.note, "\u{f449}");
+        assert_eq!(alert.tip, "\u{ea61}");
+        assert_eq!(alert.important, "\u{f12a}");
+        assert_eq!(alert.warning, "\u{f421}");
+        assert_eq!(alert.caution, "\u{f46e}");
+
+        // Overriding one kind must not blank out the rest — the same bargain
+        // `[output.icons] branch` strikes.
+        let warning_only: Config = toml::from_str(&minimal(
+            r#"
+            [output.icons.alert]
+            warning = "!"
+            "#,
+        ))
+        .expect("parses");
+        let alert = &warning_only.output.icons.alert;
+        assert_eq!(alert.warning, "!");
+        assert_eq!(alert.note, AlertIcons::default().note);
     }
 
     #[test]
