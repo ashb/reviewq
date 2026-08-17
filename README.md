@@ -3,7 +3,7 @@
 `reviewq` is a tool to  deterministically manage pull-request review queue.
 It answers one question — *what should I look at next?* — and every answer names the rule that produced it.
 
-This project was build as the volume of PRs and notifications I receive for maintaining `apache/airflow` repo was unsustainable;
+This project was built as the volume of PRs and notifications I receive for maintaining `apache/airflow` repo was unsustainable;
 and GitHub notifications were not a good fit for how I like to work.
 This is not an attempt at another notifications client (such as the fine [Octobox by Andrew Nesbitt](https://octobox.io/)), but instead another way of managing things.
 
