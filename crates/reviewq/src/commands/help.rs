@@ -626,11 +626,16 @@ mod tests {
         // terminal can only be true where it is not needed.
         let page = section("start").expect("start");
 
-        assert!(
-            README.contains("Everything below is also in the terminal"),
-            "the project page keeps it"
-        );
-        assert!(!page.contains("also in the terminal"), "{page}");
+        let skip_start =
+            README.find("<!-- help:skip -->").expect("a skip block") + "<!-- help:skip -->".len();
+        let skip_end = README[skip_start..]
+            .find("<!-- /help:skip -->")
+            .expect("its close")
+            + skip_start;
+        let skipped = README[skip_start..skip_end].trim();
+
+        assert!(!skipped.is_empty(), "the skip block has something to skip");
+        assert!(!page.contains(skipped), "the project page keeps it: {page}");
         assert!(
             !page.contains("help:skip"),
             "and the marker goes too: {page}"
