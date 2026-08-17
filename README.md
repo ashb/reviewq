@@ -20,8 +20,10 @@ Above all this was built to for me and my workflow, but I hope it will be useful
 
 ## Contributing:
 
-For now, I have disabled both PRs and issues unless you are already a contributor on the repo (so almost no one). If you know me (slack, email, socials etc) feel free to fork this and point me at a branch and I can merge that in, but I have enough projects to maintain right now, so I'm not opening this up to PRs from everyone and their dog.
-k
+For now, I have disabled both PRs and issues unless you are already a contributor on the repo (so almost no one). If you know me (slack, email, socials etc) feel free to fork this and point me at a branch and I can merge that in, but I have enough projects to maintain right now, so I'm not opening this up to PRs from everyone and their AI-enabled-dog.
+
+I will probably change this come October 2026 (after my busy conference and work season quietens down)
+
 ## Example
 
 ![The queue, with the selected PR's detail beside it](docs/imgs/queue.svg)
