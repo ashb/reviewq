@@ -434,10 +434,41 @@ const BODY: &str = "\
 ## What this does
 
 Adds a `deferrable` flag to `S3KeySensor`, so a sensor waiting on a key releases
-its worker slot instead of holding it for the whole poke interval.
+its worker slot instead of holding it for the whole poke interval. The trigger
+and the sensor now share one `poke` implementation, so the two cannot drift
+apart the way they did when `S3KeysUnchangedSensor` grew a deferrable mode of
+its own.
+
+## Why
+
+Every poke sensor in this provider holds its worker for the full interval even
+though the check itself takes milliseconds. On a fleet running a few hundred
+sensors that is a few hundred workers doing nothing but sleeping, which is the
+single biggest reason `KubernetesExecutor` users ask for more worker pods than
+the DAGs actually need.
+
+> [!NOTE]
+> This mirrors the flag already on `S3KeysUnchangedSensor` — same name, same
+> default — so a docs reader does not have to learn two spellings of the same
+> idea.
+
+## How it works
+
+`poke()` moves to a shared mixin so the sync and the deferred path call the
+same key-existence check:
+
+```python
+class S3KeySensor(BaseSensorOperator):
+    deferrable: bool = conf.getboolean(\"operators\", \"default_deferrable\")
+```
+
+The trigger already existed for `S3KeySensorAsync`; this just makes it the
+trigger for the plain sensor too, gated on the new flag rather than a second
+operator class.
 
 - [x] Trigger and sensor share one `poke` implementation
 - [x] Tests for both modes
+- [x] Backport label added — this lands on 3.1 as well as main
 - [ ] Docs updated — waiting on #70344
 
 Follow-up to the executor work in #69982.
