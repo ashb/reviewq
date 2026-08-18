@@ -9,8 +9,9 @@ use anyhow::{Context, Result, bail};
 use reviewq_app::config::{Config, Loaded};
 
 use crate::cli::NumberArgs;
+use crate::colour::Output;
 
-pub async fn run(loaded: &Loaded, args: &NumberArgs) -> Result<ExitCode> {
+pub async fn run(loaded: &Loaded, args: &NumberArgs, _output: &impl Output) -> Result<ExitCode> {
     let handoff = reviewq_app::review::handoff_for(&loaded.config, args.number)?;
 
     let status = handoff

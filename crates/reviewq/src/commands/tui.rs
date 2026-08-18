@@ -24,6 +24,8 @@ use reviewq_ledger::RepoKey;
 use reviewq_tui::{Hooks, Message};
 use tokio::runtime::Handle;
 
+use crate::colour::Output;
+
 /// How long the input hook waits for a keystroke before letting the loop look for
 /// finished work.
 ///
@@ -31,7 +33,7 @@ use tokio::runtime::Handle;
 /// interface is not busy.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
+pub async fn run(loaded: &Loaded, _output: &impl Output) -> Result<ExitCode> {
     let theme = reviewq_tui::Theme::new(match loaded.config.output.theme {
         ThemeMode::Dark => reviewq_tui::Mode::Dark,
         ThemeMode::Light => reviewq_tui::Mode::Light,

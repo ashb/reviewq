@@ -1,21 +1,21 @@
 //! `reviewq show <number>`: everything the ledger knows about one PR — why it's
 //! tracked, every attention reason it holds, and its review threads. Read-only.
 
-use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use owo_colors::{OwoColorize as _, Stream::Stdout};
+use crossterm::style::Stylize;
 use reviewq_core::model::{PrState, ThreadState, Verdict};
 use reviewq_ledger::{PrShow, RepoKey};
 use serde::Serialize;
 
 use crate::cli::ShowArgs;
+use crate::colour::{self, Output, Span};
 use crate::commands::EXIT_EMPTY;
 use reviewq_app::config::{self, Loaded};
 use reviewq_app::present;
 
-pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
+pub fn run(loaded: &Loaded, args: &ShowArgs, output: &impl Output) -> Result<ExitCode> {
     let target = &args.target;
     // One handle for the whole command: resolving the repo and reading the PR are
     // two reads on the same connection.
@@ -31,7 +31,7 @@ pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
         None => {
             let mut repos = ledger.repos_with_pr(target.number)?;
             match repos.len() {
-                0 => return not_in_ledger(args.json, target.number),
+                0 => return not_in_ledger(output, args.json, target.number),
                 1 => repos.remove(0),
                 _ => bail!(
                     "#{} exists in more than one configured repo ({}) — pass its full URL to pick one",
@@ -48,29 +48,37 @@ pub fn run(loaded: &Loaded, args: &ShowArgs) -> Result<ExitCode> {
     // A read: `show` is read-only, so a repo the ledger has never heard of is
     // "not in the ledger", not a row to create on the way to saying so.
     let Some(repo_id) = ledger.repo_id(&repo)? else {
-        return not_in_ledger(args.json, target.number);
+        return not_in_ledger(output, args.json, target.number);
     };
     let Some(show) = ledger.show(repo_id, target.number)? else {
-        return not_in_ledger(args.json, target.number);
+        return not_in_ledger(output, args.json, target.number);
     };
 
     let link = pr_link(&loaded.config, &repo, target.number);
     let url = link.as_ref().map(|l| l.url.as_str());
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&json(&show, url))?);
+        output.println(serde_json::to_string_pretty(&json(&show, url))?);
     } else {
         let underline = link.as_ref().is_none_or(|l| l.underline_links);
-        print_human(&show, url, underline, &loaded.config.output.icons.branch);
+        print_human(
+            output,
+            &show,
+            url,
+            underline,
+            &loaded.config.output.icons.branch,
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn not_in_ledger(json: bool, number: u64) -> Result<ExitCode> {
+fn not_in_ledger(output: &impl Output, json: bool, number: u64) -> Result<ExitCode> {
     if json {
-        println!("null");
+        output.println("null");
     } else {
-        eprintln!("#{number} is not in the ledger — run `reviewq sync`");
+        output.eprintln(format!(
+            "#{number} is not in the ledger — run `reviewq sync`"
+        ));
     }
     Ok(ExitCode::from(EXIT_EMPTY))
 }
@@ -96,8 +104,8 @@ fn pr_link(config: &config::Config, repo: &RepoKey, number: u64) -> Option<PrLin
 /// Wrap `text` in an OSC 8 terminal hyperlink to `url`. Terminal-gated: piped
 /// to a file, a pager without OSC 8 support, or `--json` (which never calls
 /// this), the escape sequence would be noise rather than a feature.
-fn hyperlink(text: &str, url: Option<&str>) -> String {
-    render_hyperlink(text, url, std::io::stdout().is_terminal())
+fn hyperlink(output: &impl Output, text: &str, url: Option<&str>) -> String {
+    render_hyperlink(text, url, output.stdout_is_terminal())
 }
 
 fn render_hyperlink(text: &str, url: Option<&str>, is_terminal: bool) -> String {
@@ -120,50 +128,56 @@ fn labelled(icon: &str, value: &str) -> String {
     }
 }
 
-fn styled(text: &str, bold: bool, underline: bool) -> String {
-    text.if_supports_color(Stdout, |s| match (bold, underline) {
-        (true, true) => s.bold().underline().to_string(),
-        (true, false) => s.bold().to_string(),
-        (false, true) => s.underline().to_string(),
-        (false, false) => s.to_string(),
-    })
-    .to_string()
+fn styled(text: &str, bold: bool, underline: bool) -> Span {
+    let text = text.to_string();
+    match (bold, underline) {
+        (true, true) => text.bold().underlined().into(),
+        (true, false) => text.bold().into(),
+        (false, true) => text.underlined().into(),
+        (false, false) => colour::plain(text),
+    }
 }
 
-fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool, branch_icon: &str) {
+fn print_human(
+    output: &impl Output,
+    show: &PrShow,
+    url: Option<&str>,
+    underline_links: bool,
+    branch_icon: &str,
+) {
     let pr = &show.pr;
     // Underlining a plain (non-hyperlinked) title would suggest it's
     // clickable when it isn't, so it's tied to whether there's a url at all.
     let underline = url.is_some() && underline_links;
     let header = format!(
         "{} {}",
-        styled(&format!("#{}", pr.number), true, underline),
-        styled(&pr.title, false, underline),
+        output.render(styled(&format!("#{}", pr.number), true, underline)),
+        output.render(styled(&pr.title, false, underline)),
     );
-    println!("{}", hyperlink(&header, url));
-    println!(
+    output.println(hyperlink(output, &header, url));
+    output.println(format!(
         "  {} · @{} · {}{}",
-        state_word(pr.state),
+        output.render(state_word(pr.state)),
         pr.author,
         show.tracked_reason.as_deref().unwrap_or("untracked"),
-        draft_tag(pr.is_draft),
-    );
+        output.render(draft_tag(pr.is_draft)),
+    ));
     // Only once it's known: a row written before the target branch was captured
     // has it empty until the next sync, and an icon with nothing after it would
     // read as a bug rather than as missing data.
     if !pr.base_ref.is_empty() {
-        println!("  {}", labelled(branch_icon, &pr.base_ref));
+        output.println(format!("  {}", labelled(branch_icon, &pr.base_ref)));
     }
     // Opened first, then updated: the pair reads as the PR's life, and the one
     // that says how long somebody has been waiting comes first. Silent about an
     // opening date a row predating its capture does not have.
     match pr.created_at {
-        Some(created) => println!(
+        Some(created) => output.println(format!(
             "  opened {} · updated {}",
             present::day(created),
             present::stamp(pr.updated_at)
-        ),
-        None => println!("  updated {}", present::stamp(pr.updated_at)),
+        )),
+        None => output.println(format!("  updated {}", present::stamp(pr.updated_at))),
     }
 
     if !pr.labels.is_empty() || pr.milestone.is_some() {
@@ -171,125 +185,122 @@ fn print_human(show: &PrShow, url: Option<&str>, underline_links: bool, branch_i
         if let Some(m) = &pr.milestone {
             bits.push(format!("milestone: {m}"));
         }
-        println!("  {}", bits.join(", "));
+        output.println(format!("  {}", bits.join(", ")));
     }
 
     let silenced = present::silenced(&show.my_state);
     if !silenced.is_empty() {
-        println!(
-            "  {}",
-            silenced
-                .join(", ")
-                .if_supports_color(Stdout, |s| s.yellow().to_string())
-        );
+        output.line(vec![
+            colour::plain("  "),
+            Span::from(silenced.join(", ").dark_yellow()),
+        ]);
     }
 
     if let Some(sha) = &show.my_state.last_reviewed_sha {
         let verdict = show
             .my_state
             .last_verdict
-            .map(verdict_word)
+            .map(|v| output.render(verdict_word(v)))
             .unwrap_or_else(|| "no verdict".to_string());
         let at = show.my_state.last_action_at.map_or_else(
             || "an unknown time".to_string(),
             |at| format!("at {}", present::stamp(at)),
         );
-        println!("  reviewed {} → {verdict}, {at}", present::short_sha(sha));
+        output.println(format!(
+            "  reviewed {} → {verdict}, {at}",
+            present::short_sha(sha)
+        ));
     }
     if let Some(note) = present::done_note(pr, &show.my_state) {
-        println!(
-            "  {}",
-            if note.superseded {
-                note.text
-                    .if_supports_color(Stdout, |s| s.yellow())
-                    .to_string()
-            } else {
-                note.text
-            }
-        );
+        let note = if note.superseded {
+            Span::from(note.text.dark_yellow())
+        } else {
+            colour::plain(note.text)
+        };
+        output.line(vec![colour::plain("  "), note]);
     }
 
     if !show.reviewers.is_empty() {
-        println!("  reviewers:");
+        output.println("  reviewers:");
         for r in &show.reviewers {
-            println!(
+            output.println(format!(
                 "    {} @{} {}",
-                verdict_word(r.verdict),
+                output.render(verdict_word(r.verdict)),
                 r.login,
                 present::stamp(r.at)
-            );
+            ));
         }
     }
 
     if show.attention.is_empty() {
-        println!("  attention: none");
+        output.println("  attention: none");
     } else {
-        println!("  attention:");
+        output.println("  attention:");
         for a in &show.attention {
-            println!(
+            output.println(format!(
                 "    {} {}",
-                format!("[p{}]", a.priority())
-                    .if_supports_color(Stdout, |s| s.dimmed().to_string()),
-                a.reason
-                    .to_string()
-                    .if_supports_color(Stdout, |s| s.cyan().to_string()),
-            );
+                output.render(Span::from(format!("[p{}]", a.priority()).dim())),
+                output.render(Span::from(a.reason.to_string().dark_cyan())),
+            ));
         }
     }
 
     if !show.threads.is_empty() {
         let counts = present::thread_counts(&show.threads);
-        println!(
+        output.println(format!(
             "  threads: {} ({} you own, {} resolved)",
             counts.total, counts.owned, counts.resolved,
-        );
+        ));
         for t in show.threads.iter().filter(|t| !t.is_resolved) {
-            println!("    unresolved: {}", thread_line(t));
+            output.println(format!("    unresolved: {}", output.render(thread_line(t))));
         }
     }
 }
 
 /// One thread's most recent activity, with mine marked.
-fn thread_line(t: &ThreadState) -> String {
+fn thread_line(t: &ThreadState) -> Vec<Span> {
     let who = t.last_comment_author.as_deref().unwrap_or("someone");
     let at = t
         .last_comment_at
         .map_or_else(|| "an unknown time".to_string(), present::stamp);
-    let owned = if t.i_own {
-        format!(" {}", "(you own)".if_supports_color(Stdout, |s| s.dimmed()))
-    } else {
-        String::new()
-    };
-    format!("@{who} at {at}{owned}")
+    let mut spans = vec![colour::plain(format!("@{who} at {at}"))];
+    if t.i_own {
+        spans.push(colour::plain(" "));
+        spans.push("(you own)".to_string().dim().into());
+    }
+    spans
 }
 
 /// The PR's lifecycle state, coloured so a merged or closed PR reads
 /// differently from an open one at a glance.
-fn state_word(state: PrState) -> String {
-    let s = state.as_str();
+fn state_word(state: PrState) -> Span {
+    let s = state.as_str().to_string();
     match state {
-        PrState::Open => format!("{}", s.if_supports_color(Stdout, |s| s.green())),
-        PrState::Merged => format!("{}", s.if_supports_color(Stdout, |s| s.magenta())),
-        PrState::Closed => format!("{}", s.if_supports_color(Stdout, |s| s.red())),
+        PrState::Open => s.dark_green().into(),
+        PrState::Merged => s.dark_magenta().into(),
+        PrState::Closed => s.dark_red().into(),
     }
 }
 
-fn draft_tag(is_draft: bool) -> String {
+fn draft_tag(is_draft: bool) -> Vec<Span> {
     if is_draft {
-        format!(" · {}", "draft".if_supports_color(Stdout, |s| s.yellow()))
+        vec![
+            colour::plain(" · "),
+            "draft".to_string().dark_yellow().into(),
+        ]
     } else {
-        String::new()
+        Vec::new()
     }
 }
 
 /// A review verdict, coloured the same way everywhere it appears (my own
 /// history, and every other reviewer's).
-fn verdict_word(v: Verdict) -> String {
-    let s = v.as_str();
+fn verdict_word(v: Verdict) -> Span {
+    let s = v.as_str().to_string();
     match v {
-        Verdict::Approved => format!("{}", s.if_supports_color(Stdout, |s| s.green())),
-        Verdict::ChangesRequested => format!("{}", s.if_supports_color(Stdout, |s| s.red())),
-        Verdict::Commented => format!("{}", s.if_supports_color(Stdout, |s| s.dimmed())),
+        Verdict::Approved => s.dark_green().into(),
+        Verdict::ChangesRequested => s.dark_red().into(),
+        Verdict::Commented => s.dim().into(),
     }
 }
 
@@ -410,6 +421,7 @@ fn json<'a>(show: &'a PrShow, url: Option<&'a str>) -> ShowJson<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::colour::testing::FakeOutput;
     use jiff::Timestamp;
     use reviewq_core::model::{MyState, PrSnapshot};
 
@@ -472,6 +484,24 @@ mod tests {
     }
 
     #[test]
+    fn human_output_is_written_through_the_output_sink() {
+        let output = FakeOutput::new(false);
+
+        print_human(&output, &show_of(pr()), None, false, "->");
+
+        assert_eq!(
+            *output.lines.borrow(),
+            [
+                "#1 t",
+                "  OPEN · @octocat · interest: label x",
+                "  -> main",
+                "  updated 2026-08-05T09:00:00Z",
+                "  attention: none",
+            ]
+        );
+    }
+
+    #[test]
     fn json_reports_the_target_branch() {
         let mut backport = pr();
         backport.base_ref = "v3-1-test".into();
@@ -517,11 +547,18 @@ mod tests {
     }
 
     #[test]
-    fn styled_is_plain_text_off_a_terminal() {
-        // if_supports_color checks real stdout, never a terminal under
-        // `cargo test`, so every combination is untouched here regardless.
+    fn styled_is_plain_text_with_colour_off_and_carries_a_style_when_on() {
         for (bold, underline) in [(true, true), (true, false), (false, true), (false, false)] {
-            assert_eq!(styled("text", bold, underline), "text");
+            let span = styled("text", bold, underline);
+            assert_eq!(colour::render(false, span), "text");
+        }
+
+        for (bold, underline) in [(true, true), (true, false), (false, true)] {
+            assert_ne!(
+                colour::render(true, styled("text", bold, underline)),
+                "text",
+                "bold={bold} underline={underline} should carry an escape sequence"
+            );
         }
     }
 }

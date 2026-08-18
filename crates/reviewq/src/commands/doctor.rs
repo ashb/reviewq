@@ -1,10 +1,11 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
-use owo_colors::{OwoColorize as _, Stream::Stdout};
+use crossterm::style::Stylize;
 use reviewq_forge::{build, resolve_token};
 use reviewq_ledger::Ledger;
 
+use crate::colour::{self, Output, Span};
 use reviewq_app::config::{self, Loaded};
 use reviewq_app::paths;
 use reviewq_app::sync::{CURSOR_KEY, TRUNCATED_KEY};
@@ -17,10 +18,14 @@ use reviewq_app::sync::{CURSOR_KEY, TRUNCATED_KEY};
 /// hide the rest, and hide every later repo entirely. Only being unable to work
 /// out where the ledger lives ends the run, because there is then nothing to
 /// report about.
-pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
+pub async fn run(loaded: &Loaded, output: &impl Output) -> Result<ExitCode> {
     let mut problems = 0u32;
 
-    row("config", &loaded.path.display().to_string());
+    row(
+        output,
+        "config",
+        colour::plain(loaded.path.display().to_string()),
+    );
 
     let db = paths::database_file()?;
     // `Ledger::open` would create an empty file, so a ledger that isn't there
@@ -29,70 +34,80 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
         Ok(ledger) => ledger,
         Err(err) => {
             problems += 1;
-            row("ledger", &warn(&format!("{}: {err:#}", db.display())));
+            row(
+                output,
+                "ledger",
+                warn(&format!("{}: {err:#}", db.display())),
+            );
             None
         }
     };
     if ledger.is_some() {
-        row("ledger", &db.display().to_string());
+        row(output, "ledger", colour::plain(db.display().to_string()));
     } else if !db.exists() {
-        row("ledger", &format!("{} (not created yet)", db.display()));
+        row(
+            output,
+            "ledger",
+            colour::plain(format!("{} (not created yet)", db.display())),
+        );
     }
     // Before anything derived from config, because everything below is read
     // from a file this may have just said is misspelt.
     for key in &loaded.unknown {
         problems += 1;
         row(
+            output,
             "config",
-            &warn(&format!("{key} is not a setting reviewq reads")),
+            warn(&format!("{key} is not a setting reviewq reads")),
         );
     }
-    row("handoff", &handoff_note(&loaded.config, &mut problems));
+    row(
+        output,
+        "handoff",
+        handoff_note(&loaded.config, &mut problems),
+    );
 
     for repo in loaded.config.repos() {
-        row("repo", &repo.slug());
+        row(output, "repo", colour::plain(repo.slug()));
         row(
+            output,
             "  checkout",
-            &checkout_note(repo, &loaded.config.handoff, &mut problems),
+            checkout_note(repo, &loaded.config.handoff, &mut problems),
         );
 
         row(
+            output,
             "  last sync",
-            &last_sync_note(ledger.as_ref(), &repo.key(), &mut problems),
+            last_sync_note(ledger.as_ref(), &repo.key(), &mut problems),
         );
-        for (index, line) in stored_notes(ledger.as_ref(), &repo.key(), &mut problems)
-            .iter()
-            .enumerate()
-        {
-            row(if index == 0 { "  stored" } else { "" }, line);
-        }
+        print_stored_notes(output, ledger.as_ref(), &repo.key(), &mut problems);
 
         let host = match loaded.config.forge_host_for(&repo.host) {
             Ok(host) => {
-                row(
-                    "  forge",
-                    &match &host.api_base {
-                        Some(api_base) => format!("{} ({api_base})", repo.host),
-                        None => repo.host.clone(),
-                    },
-                );
+                let label = match &host.api_base {
+                    Some(api_base) => format!("{} ({api_base})", repo.host),
+                    None => repo.host.clone(),
+                };
+                row(output, "  forge", colour::plain(label));
                 host
             }
             Err(err) => {
                 problems += 1;
-                row("  forge", &warn(&format!("{err:#}")));
+                row(output, "  forge", warn(&format!("{err:#}")));
                 continue;
             }
         };
 
+        row_prefix(output, "  token");
+        output.flush()?;
         let token = match resolve_token(&host) {
             Ok(token) => {
-                row("  token", &token.source.to_string());
+                output.println(token.source.to_string());
                 token
             }
             Err(err) => {
                 problems += 1;
-                row("  token", &warn(&format!("{err:#}")));
+                output.println(warn(&format!("{err:#}")));
                 continue;
             }
         };
@@ -104,7 +119,7 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
             Ok(forge) => forge,
             Err(err) => {
                 problems += 1;
-                row("  viewer", &warn(&format!("{err:#}")));
+                row(output, "  viewer", warn(&format!("{err:#}")));
                 continue;
             }
         };
@@ -112,7 +127,7 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
             Ok(viewer) => viewer,
             Err(err) => {
                 problems += 1;
-                row("  viewer", &warn(&format!("{err:#}")));
+                row(output, "  viewer", warn(&format!("{err:#}")));
                 continue;
             }
         };
@@ -123,23 +138,31 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
         // an alias — but a *silent* one would be, so it is reported either way.
         match loaded.config.configured_login(&repo.host) {
             None => row(
+                output,
                 "  viewer",
-                &format!("{} {}", viewer.login, ok("from the token")),
+                vec![
+                    colour::plain(format!("{} ", viewer.login)),
+                    ok("from the token"),
+                ],
             ),
             Some(login) if login == viewer.login => row(
+                output,
                 "  viewer",
-                &format!("{} {}", viewer.login, ok("token and config agree")),
+                vec![
+                    colour::plain(format!("{} ", viewer.login)),
+                    ok("token and config agree"),
+                ],
             ),
             Some(login) => row(
+                output,
                 "  viewer",
-                &format!(
-                    "{} {}",
-                    login,
+                vec![
+                    colour::plain(format!("{login} ")),
                     warn(&format!(
                         "configured; the token belongs to {}",
                         viewer.login
-                    ))
-                ),
+                    )),
+                ],
             ),
         }
 
@@ -148,27 +171,39 @@ pub async fn run(loaded: &Loaded) -> Result<ExitCode> {
             "{}/{} points, resets {}",
             rl.remaining, rl.limit, rl.reset_at
         );
-        row(
-            "  graphql",
-            &if rl.remaining < rl.limit / 10 {
-                problems += 1;
-                format!("{graphql} {}", warn("budget nearly exhausted"))
-            } else {
-                graphql
-            },
-        );
+        if rl.remaining < rl.limit / 10 {
+            problems += 1;
+            row(
+                output,
+                "  graphql",
+                vec![
+                    colour::plain(format!("{graphql} ")),
+                    warn("budget nearly exhausted"),
+                ],
+            );
+        } else {
+            row(output, "  graphql", colour::plain(graphql));
+        }
 
         match forge.rest_core_remaining().await {
-            Ok((remaining, limit)) => row("  rest", &format!("{remaining}/{limit} core requests")),
+            Ok((remaining, limit)) => row(
+                output,
+                "  rest",
+                colour::plain(format!("{remaining}/{limit} core requests")),
+            ),
             Err(err) => {
                 problems += 1;
-                row("  rest", &warn(&format!("rate limit unavailable: {err}")));
+                row(
+                    output,
+                    "  rest",
+                    warn(&format!("rate limit unavailable: {err}")),
+                );
             }
         }
     }
 
     if problems > 0 {
-        eprintln!("\n{problems} problem(s) found");
+        output.eprintln(format!("\n{problems} problem(s) found"));
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
@@ -185,35 +220,31 @@ fn last_sync_note(
     ledger: Option<&Ledger>,
     repo: &reviewq_ledger::RepoKey,
     problems: &mut u32,
-) -> String {
-    let note = |ledger: &Ledger| -> Result<String> {
+) -> Vec<Span> {
+    let note = |ledger: &Ledger, problems: &mut u32| -> Result<Vec<Span>> {
         let Some((repo_id, _)) = ledger.repos()?.into_iter().find(|(_, key)| key == repo) else {
-            return Ok("never".to_string());
+            return Ok(vec![colour::plain("never")]);
         };
         let Some(at) = ledger.get_meta(repo_id, CURSOR_KEY)? else {
-            return Ok("never".to_string());
+            return Ok(vec![colour::plain("never")]);
         };
         if ledger.get_meta(repo_id, TRUNCATED_KEY)?.as_deref() == Some("1") {
-            Ok(format!(
-                "{at} {}",
-                warn("last sweep hit the search cap — some PRs were missed")
-            ))
+            *problems += 1;
+            Ok(vec![
+                colour::plain(format!("{at} ")),
+                warn("last sweep hit the search cap — some PRs were missed"),
+            ])
         } else {
-            Ok(at)
+            Ok(vec![colour::plain(at)])
         }
     };
     match ledger {
-        None => "never".to_string(),
-        Some(ledger) => match note(ledger) {
-            Ok(note) => {
-                if note.contains("search cap") {
-                    *problems += 1;
-                }
-                note
-            }
+        None => vec![colour::plain("never")],
+        Some(ledger) => match note(ledger, problems) {
+            Ok(spans) => spans,
             Err(err) => {
                 *problems += 1;
-                warn(&format!("unreadable: {err:#}"))
+                vec![warn(&format!("unreadable: {err:#}"))]
             }
         },
     }
@@ -231,11 +262,12 @@ fn last_sync_note(
 ///
 /// Never a problem in itself: a big ledger is not a fault, and reporting one as
 /// though it were would make a clean bill of health impossible to reach.
-fn stored_notes(
+fn print_stored_notes(
+    output: &impl Output,
     ledger: Option<&Ledger>,
     repo: &reviewq_ledger::RepoKey,
     problems: &mut u32,
-) -> Vec<String> {
+) {
     let census = |ledger: &Ledger| -> Result<Option<reviewq_ledger::Census>> {
         let Some((repo_id, _)) = ledger.repos()?.into_iter().find(|(_, key)| key == repo) else {
             return Ok(None);
@@ -246,38 +278,49 @@ fn stored_notes(
         Ok(census) => census.flatten(),
         Err(err) => {
             *problems += 1;
-            return vec![warn(&format!("unreadable: {err:#}"))];
+            row(output, "  stored", warn(&format!("unreadable: {err:#}")));
+            return;
         }
     };
     let Some(census) = census.filter(|census| census.total > 0) else {
-        return vec!["nothing yet".to_string()];
+        row(output, "  stored", colour::plain("nothing yet"));
+        return;
     };
 
-    let mut lines = vec![
-        // "untracked" alone reads as a state you put a PR in. It isn't: the
-        // sweep asks the forge for every PR updated in its window and stores the
-        // lot, so these are the ones no rule of yours matched and no search of
-        // yours named — the repo's traffic, not your queue's leavings.
-        format!(
+    // "untracked" alone reads as a state you put a PR in. It isn't: the sweep
+    // asks the forge for every PR updated in its window and stores the lot,
+    // so these are the ones no rule of yours matched and no search of yours
+    // named — the repo's traffic, not your queue's leavings.
+    row(
+        output,
+        "  stored",
+        colour::plain(format!(
             "{} PRs: {} tracked, {} swept past and never tracked",
             census.total,
             census.tracked,
             census.total - census.tracked
-        ),
-        format!(
+        )),
+    );
+    row(
+        output,
+        "",
+        colour::plain(format!(
             "{} open, {} merged, {} closed",
             census.open, census.merged, census.closed
-        ),
-    ];
+        )),
+    );
     // The irreplaceable rows, and how many of them sit on a row that a
     // "drop the untracked" policy would take with it.
     if census.mine > 0 {
-        lines.push(format!(
-            "{} carry your own done/snooze/mute/defer ({} of those never tracked)",
-            census.mine, census.mine_untracked
-        ));
+        row(
+            output,
+            "",
+            colour::plain(format!(
+                "{} carry your own done/snooze/mute/defer ({} of those never tracked)",
+                census.mine, census.mine_untracked
+            )),
+        );
     }
-    lines
 }
 
 /// The review command, and whether it can actually name a PR.
@@ -291,7 +334,7 @@ fn stored_notes(
 ///
 /// A config written before `{url}` existed still says `{number}`, which is the
 /// common way to end up here: the default changed, existing files didn't.
-fn handoff_note(config: &config::Config, problems: &mut u32) -> String {
+fn handoff_note(config: &config::Config, problems: &mut u32) -> Vec<Span> {
     let argv = &config.handoff.review_command;
     let shown = argv.join(" ");
     let mentions = |token: &str| argv.iter().any(|arg| arg.contains(token));
@@ -301,15 +344,15 @@ fn handoff_note(config: &config::Config, problems: &mut u32) -> String {
 
     if mentions("{number}") && !mentions("{url}") && !all_have_checkouts {
         *problems += 1;
-        format!(
-            "{shown} {}",
+        vec![
+            colour::plain(format!("{shown} ")),
             warn(
                 "substitutes {number} but not {url} — that only resolves inside a \
-                 checkout, and not every repo sets `path`"
-            )
-        )
+                 checkout, and not every repo sets `path`",
+            ),
+        ]
     } else {
-        shown
+        vec![colour::plain(shown)]
     }
 }
 
@@ -324,44 +367,75 @@ fn handoff_note(config: &config::Config, problems: &mut u32) -> String {
 /// Unless the handoff is the default, which opens the PR in a browser and has
 /// no use for a checkout. Counting that as a problem would put a clean bill of
 /// health out of reach of anybody who had not configured their way back to it.
-fn checkout_note(repo: &config::RepoRef, handoff: &config::Handoff, problems: &mut u32) -> String {
+fn checkout_note(
+    repo: &config::RepoRef,
+    handoff: &config::Handoff,
+    problems: &mut u32,
+) -> Vec<Span> {
     let wanted = handoff.review_command != config::Handoff::default().review_command;
     match (&repo.path, wanted) {
-        (Some(path), _) if path.is_dir() => path.display().to_string(),
+        (Some(path), _) if path.is_dir() => vec![colour::plain(path.display().to_string())],
         (Some(path), _) => {
             *problems += 1;
-            warn(&format!("{} is not a directory", path.display()))
+            vec![warn(&format!("{} is not a directory", path.display()))]
         }
-        (None, false) => "none — the handoff opens the PR in a browser".to_string(),
+        (None, false) => vec![colour::plain(
+            "none — the handoff opens the PR in a browser",
+        )],
         (None, true) => {
             *problems += 1;
-            warn(
+            vec![warn(
                 "none — set `path` to the local checkout, or a review cannot be \
                  published back to the PR",
-            )
+            )]
         }
     }
 }
 
-fn row(label: &str, value: &str) {
-    println!(
-        "{:<10} {value}",
-        label.if_supports_color(Stdout, |l| l.dimmed())
-    );
+fn row(output: &impl Output, label: &str, value: impl IntoIterator<Item = Span>) {
+    row_prefix(output, label);
+    output.line(value);
 }
 
-fn ok(text: &str) -> String {
-    format!("{}", text.if_supports_color(Stdout, |t| t.green()))
+fn row_prefix(output: &impl Output, label: &str) {
+    output.write([Span::from(format!("{label:<10}").dim()), colour::plain(" ")]);
 }
 
-fn warn(text: &str) -> String {
-    format!("{}", text.if_supports_color(Stdout, |t| t.yellow()))
+fn ok(text: &str) -> Span {
+    text.to_string().dark_green().into()
+}
+
+fn warn(text: &str) -> Span {
+    text.to_string().dark_yellow().into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::colour::testing::FakeOutput;
     use reviewq_ledger::Ledger;
+
+    #[test]
+    fn a_row_pads_its_label_before_the_value_and_prints_once() {
+        let output = FakeOutput::new(false);
+        row(&output, "config", colour::plain("value"));
+        assert_eq!(*output.lines.borrow(), vec!["config     value"]);
+    }
+
+    #[test]
+    fn token_row_prefix_is_flushed_without_ending_the_line() {
+        let output = FakeOutput::new(false);
+
+        row_prefix(&output, "  token");
+        output.flush().unwrap();
+
+        assert!(output.lines.borrow().is_empty());
+        assert_eq!(&*output.stdout.borrow(), "  token    ");
+        assert_eq!(output.flushes.get(), 1);
+
+        output.println("source");
+        assert_eq!(*output.lines.borrow(), ["  token    source"]);
+    }
 
     /// A handoff that hands off to a review tool, which is what makes a
     /// checkout worth having.
@@ -408,7 +482,7 @@ mod tests {
         let mut problems = 0;
 
         assert_eq!(
-            last_sync_note(Some(&ledger), &key(), &mut problems),
+            colour::render(false, last_sync_note(Some(&ledger), &key(), &mut problems)),
             "never"
         );
         assert_eq!(problems, 0);
@@ -419,7 +493,7 @@ mod tests {
         let ledger = ledger_with(&key(), Some("2026-08-10T18:30:30Z"), true);
         let mut problems = 0;
 
-        let note = last_sync_note(Some(&ledger), &key(), &mut problems);
+        let note = colour::render(false, last_sync_note(Some(&ledger), &key(), &mut problems));
 
         assert!(note.contains("search cap"), "{note}");
         assert_eq!(problems, 1);
@@ -432,7 +506,7 @@ mod tests {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let mut problems = 0;
 
-        let note = last_sync_note(Some(&ledger), &key(), &mut problems);
+        let note = colour::render(false, last_sync_note(Some(&ledger), &key(), &mut problems));
 
         assert_eq!(note, "never");
         assert!(
@@ -445,11 +519,11 @@ mod tests {
     fn a_repo_with_nothing_stored_says_so_without_counting_against_it() {
         let ledger = ledger_with(&key(), None, false);
         let mut problems = 0;
+        let output = FakeOutput::new(false);
 
-        assert_eq!(
-            stored_notes(Some(&ledger), &key(), &mut problems),
-            ["nothing yet"]
-        );
+        print_stored_notes(&output, Some(&ledger), &key(), &mut problems);
+
+        assert_eq!(*output.lines.borrow(), vec!["  stored   nothing yet"]);
         assert_eq!(problems, 0);
     }
 
@@ -495,11 +569,16 @@ mod tests {
             .expect("residue");
         ledger.set_muted(repo_id, 2, true).expect("muted by hand");
         let mut problems = 0;
+        let output = FakeOutput::new(false);
 
-        let notes = stored_notes(Some(&ledger), &key(), &mut problems);
+        print_stored_notes(&output, Some(&ledger), &key(), &mut problems);
+        let notes = output.lines.borrow();
 
-        assert_eq!(notes[0], "2 PRs: 1 tracked, 1 swept past and never tracked");
-        assert_eq!(notes[1], "1 open, 1 merged, 0 closed");
+        assert_eq!(
+            notes[0],
+            "  stored   2 PRs: 1 tracked, 1 swept past and never tracked"
+        );
+        assert_eq!(notes[1], "           1 open, 1 merged, 0 closed");
         assert!(notes[2].contains("1 carry your own"), "{:?}", notes[2]);
         assert!(
             notes[2].contains("1 of those never tracked"),
@@ -514,21 +593,25 @@ mod tests {
         // Same care as `last_sync_note`: diagnosing must not write.
         let ledger = Ledger::open_in_memory().expect("ledger");
         let mut problems = 0;
+        let output = FakeOutput::new(false);
 
-        assert_eq!(
-            stored_notes(Some(&ledger), &key(), &mut problems),
-            ["nothing yet"]
-        );
+        print_stored_notes(&output, Some(&ledger), &key(), &mut problems);
+
+        assert_eq!(*output.lines.borrow(), vec!["  stored   nothing yet"]);
         assert!(ledger.repos().expect("repos").is_empty());
+    }
+
+    fn note_of(spans: Vec<Span>) -> String {
+        colour::render(false, spans)
     }
 
     #[test]
     fn a_url_handoff_is_reported_without_comment() {
         let mut problems = 0;
-        let note = handoff_note(
+        let note = note_of(handoff_note(
             &config_with(&["wiff", "forge", "pull", "{url}"]),
             &mut problems,
-        );
+        ));
         assert_eq!(note, "wiff forge pull {url}");
         assert_eq!(problems, 0);
     }
@@ -538,10 +621,10 @@ mod tests {
         // The trap: it works from inside the right checkout and nowhere else, and
         // a config written before `{url}` existed still looks like this.
         let mut problems = 0;
-        let note = handoff_note(
+        let note = note_of(handoff_note(
             &config_with(&["wiff", "forge", "pull", "{number}"]),
             &mut problems,
-        );
+        ));
         assert!(note.contains("only resolves inside a checkout"), "{note}");
         assert_eq!(
             problems, 1,
@@ -552,10 +635,10 @@ mod tests {
     #[test]
     fn a_handoff_using_both_is_fine() {
         let mut problems = 0;
-        let note = handoff_note(
+        let note = note_of(handoff_note(
             &config_with(&["review", "--id", "{number}", "--url", "{url}"]),
             &mut problems,
-        );
+        ));
         assert!(!note.contains("only resolves"), "{note}");
         assert_eq!(problems, 0);
     }
@@ -572,7 +655,7 @@ mod tests {
         }
         let mut problems = 0;
 
-        let note = handoff_note(&config, &mut problems);
+        let note = note_of(handoff_note(&config, &mut problems));
 
         assert_eq!(note, "wiff forge pull {number}");
         assert_eq!(problems, 0);
@@ -588,7 +671,7 @@ mod tests {
         };
         let mut problems = 0;
 
-        let note = checkout_note(&repo, &reviewing(), &mut problems);
+        let note = note_of(checkout_note(&repo, &reviewing(), &mut problems));
 
         assert!(note.contains("set `path`"), "{note}");
         assert_eq!(
@@ -609,7 +692,11 @@ mod tests {
         };
         let mut problems = 0;
 
-        let note = checkout_note(&repo, &config::Handoff::default(), &mut problems);
+        let note = note_of(checkout_note(
+            &repo,
+            &config::Handoff::default(),
+            &mut problems,
+        ));
 
         assert!(note.contains("browser"), "{note}");
         assert_eq!(problems, 0);
@@ -627,7 +714,7 @@ mod tests {
         let mut problems = 0;
 
         assert_eq!(
-            checkout_note(&repo, &reviewing(), &mut problems),
+            note_of(checkout_note(&repo, &reviewing(), &mut problems)),
             dir.path().display().to_string()
         );
         assert_eq!(problems, 0);
@@ -643,7 +730,7 @@ mod tests {
         };
         let mut problems = 0;
 
-        let note = checkout_note(&repo, &reviewing(), &mut problems);
+        let note = note_of(checkout_note(&repo, &reviewing(), &mut problems));
 
         assert!(note.contains("not a directory"), "{note}");
         assert_eq!(problems, 1);
@@ -653,7 +740,10 @@ mod tests {
     fn a_handoff_naming_neither_is_left_alone() {
         // Someone's wrapper script may resolve the PR itself; not our business.
         let mut problems = 0;
-        let note = handoff_note(&config_with(&["my-review-script"]), &mut problems);
+        let note = note_of(handoff_note(
+            &config_with(&["my-review-script"]),
+            &mut problems,
+        ));
         assert_eq!(note, "my-review-script");
         assert_eq!(problems, 0);
     }

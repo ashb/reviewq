@@ -10,13 +10,13 @@
 //! and stays clap's. This answers "how is this thing meant to be used?", which
 //! no flag list has ever managed.
 
-use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use reviewq_app::config::ThemeMode;
 
 use crate::cli::HelpArgs;
+use crate::colour::Output;
 
 /// The README, verbatim, at compile time. The pages below are slices of it.
 const README: &str = include_str!("../../../../README.md");
@@ -69,13 +69,14 @@ const TOPICS: &[Topic] = &[
     },
 ];
 
-pub fn run(theme: ThemeMode, args: &HelpArgs) -> Result<ExitCode> {
+pub fn run(theme: ThemeMode, args: &HelpArgs, output: &impl Output) -> Result<ExitCode> {
     let Some(asked) = args.topic.as_deref() else {
-        print(
+        print_page(
             "reviewq",
             "a deterministic pull-request review queue",
             &index(),
             theme,
+            output,
         );
         return Ok(ExitCode::SUCCESS);
     };
@@ -96,7 +97,13 @@ pub fn run(theme: ThemeMode, args: &HelpArgs) -> Result<ExitCode> {
     // find out.
     let page = section(topic.name)
         .unwrap_or_else(|| panic!("the README has no `help:{}` section", topic.name));
-    print(&format!("reviewq-{}", topic.name), topic.what, &page, theme);
+    print_page(
+        &format!("reviewq-{}", topic.name),
+        topic.what,
+        &page,
+        theme,
+        output,
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -235,13 +242,23 @@ fn shot_name(line: &str) -> Option<&str> {
 /// Colour only for a terminal: piped into `less` without `-R`, or into a file,
 /// escapes are noise. `NO_COLOR` is honoured for the same reason it is
 /// everywhere else — see <https://no-color.org>.
-fn print(title: &str, what: &str, page: &str, theme: ThemeMode) {
-    let colour = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+fn print_page(title: &str, what: &str, page: &str, theme: ThemeMode, output: &impl Output) {
     let mode = match theme {
         ThemeMode::Dark => reviewq_tui::Mode::Dark,
         ThemeMode::Light => reviewq_tui::Mode::Light,
     };
-    page_out(&man_page(title, what, page, mode, width(), colour));
+    page_out(
+        output,
+        &man_page(
+            title,
+            what,
+            page,
+            mode,
+            width(output),
+            shot_width(output),
+            output.colour_enabled(),
+        ),
+    );
 }
 
 /// A page, framed the way `man` frames one: a header, `NAME`, the body under
@@ -256,6 +273,7 @@ fn man_page(
     page: &str,
     mode: reviewq_tui::Mode,
     width: u16,
+    shot_width: u16,
     colour: bool,
 ) -> String {
     // roff's own measure: the body at seven columns, every heading out at the
@@ -324,7 +342,7 @@ fn man_page(
             // narrower so it still ends where the text does. A screen flush
             // against the edge reads as something that escaped the page.
             Block::Shot(name) => {
-                let at = shot_width().saturating_sub(SCREEN.len() as u16);
+                let at = shot_width.saturating_sub(SCREEN.len() as u16);
                 match reviewq_tui::shot(&name, at, mode, colour) {
                     Some(screen) => {
                         // A blank line on each side, as the source has around
@@ -446,17 +464,17 @@ enum Block {
 /// screen after the pager exits.
 ///
 /// Never for a pipe or a file: paging output nobody is watching would hang.
-fn page_out(text: &str) {
+fn page_out(output: &impl Output, text: &str) {
     use std::io::Write as _;
 
-    if !std::io::stdout().is_terminal() {
-        print!("{text}");
+    if !output.stdout_is_terminal() {
+        output.write(crate::colour::plain(text));
         return;
     }
 
     let Some(argv) = pager_argv(std::env::var_os("REVIEWQ_PAGER"), std::env::var_os("PAGER"))
     else {
-        print!("{text}");
+        output.write(crate::colour::plain(text));
         return;
     };
 
@@ -469,7 +487,7 @@ fn page_out(text: &str) {
 
     // A pager that will not start is no reason to withhold the documentation.
     let Ok(mut child) = command.spawn() else {
-        print!("{text}");
+        output.write(crate::colour::plain(text));
         return;
     };
     if let Some(stdin) = child.stdin.as_mut() {
@@ -540,11 +558,10 @@ fn pager_argv(
 /// The width to draw a screen at: the terminal's, up to the size the pictures
 /// are composed for, and never so narrow that the interface has no room to be
 /// itself.
-fn shot_width() -> u16 {
-    if !std::io::stdout().is_terminal() {
-        return 100;
-    }
-    crossterm::terminal::size().map_or(100, |(cols, _)| cols.clamp(60, 140))
+fn shot_width(output: &impl Output) -> u16 {
+    output
+        .terminal_width()
+        .map_or(100, |cols| cols.clamp(60, 140))
 }
 
 /// The column count to wrap to: the terminal's, held to something readable.
@@ -553,11 +570,10 @@ fn shot_width() -> u16 {
 /// 90; floored because a narrow window should still get whole words rather than
 /// a wrapper giving up. Off a terminal — piped, redirected — 80, which is what
 /// anything downstream will assume anyway.
-fn width() -> u16 {
-    if !std::io::stdout().is_terminal() {
-        return 80;
-    }
-    crossterm::terminal::size().map_or(80, |(cols, _)| cols.clamp(40, 90))
+fn width(output: &impl Output) -> u16 {
+    output
+        .terminal_width()
+        .map_or(80, |cols| cols.clamp(40, 90))
 }
 
 #[cfg(test)]
@@ -696,6 +712,7 @@ mod tests {
             &section(found.name).expect("a page"),
             reviewq_tui::Mode::Dark,
             80,
+            100,
             false,
         )
     }

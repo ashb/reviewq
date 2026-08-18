@@ -4,6 +4,7 @@
 //! `reviewq-forge`, and runs subcommands over the pure logic in `reviewq-core`.
 
 mod cli;
+mod colour;
 mod commands;
 
 /// What this build is, as `git describe` saw it — the released version at a
@@ -16,15 +17,18 @@ use std::process::ExitCode;
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;
 
+use crate::colour::{Output, TerminalOutput};
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = cli::Cli::parse();
     init_tracing(cli.verbose);
 
-    match commands::dispatch(cli).await {
+    let output = TerminalOutput::detect();
+    match commands::dispatch(cli, &output).await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            output.eprintln(format!("error: {err:#}"));
             ExitCode::FAILURE
         }
     }

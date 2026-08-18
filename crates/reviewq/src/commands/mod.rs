@@ -13,6 +13,7 @@ use anyhow::Result;
 use reviewq_app::config;
 
 use crate::cli::{Cli, Command};
+use crate::colour::Output;
 
 /// The read commands exit with this when there is nothing to show, so shell
 /// wrappers can branch on "nothing to do" without parsing output.
@@ -25,7 +26,7 @@ pub const EXIT_EMPTY: u8 = 2;
 /// parse is a config whose repos, rules and identity are unknown, so a `list`
 /// that carried on regardless would be showing a queue it can no longer explain.
 /// It costs a file read and a parse, which is nothing next to opening the ledger.
-pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
+pub async fn dispatch(cli: Cli, output: &impl Output) -> Result<ExitCode> {
     // Before the config, and deliberately: the documentation is most wanted by
     // somebody whose config does not work, and a help page that refused to
     // print until the config parsed would be missing exactly then. It reads the
@@ -33,21 +34,21 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
     if let Command::Help(args) = &cli.command {
         let theme = config::load(cli.config.as_deref())
             .map_or(Default::default(), |loaded| loaded.config.output.theme);
-        return help::run(theme, args);
+        return help::run(theme, args, output);
     }
 
     let loaded = config::load(cli.config.as_deref())?;
     if loaded.created {
-        println!(
+        output.println(format!(
             "wrote a default config to {} — edit it before syncing",
             loaded.path.display()
-        );
+        ));
     }
     // Every command, not just `doctor`: a key nobody reads is usually a typo,
     // and a typo in a rule changes what you track. Said once, briefly, with the
     // command that can say more.
     if !loaded.unknown.is_empty() {
-        eprintln!(
+        output.eprintln(format!(
             "warning: {} in {} {} not read: {} — see `reviewq doctor`",
             match loaded.unknown.len() {
                 1 => "one setting".to_string(),
@@ -59,29 +60,30 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 _ => "are",
             },
             loaded.unknown.join(", ")
-        );
+        ));
     }
 
     let cfg = &loaded;
     // Logging shares stderr with sync's progress line; the in-place rewrite is
     // only tidy when nothing else is writing there.
     let logging = cli.verbose > 0;
+
     match cli.command {
-        Command::Sync(args) => sync::run(cfg, &args, logging).await,
-        Command::List(args) => list::run(cfg, &args),
-        Command::Next(args) => list::next(cfg, &args),
-        Command::Show(args) => show::run(cfg, &args),
-        Command::Done(args) => actions::done(cfg, &args).await,
-        Command::Snooze(args) => actions::snooze(&args),
-        Command::Mute(args) => actions::mute(&args),
-        Command::Unmute(args) => actions::unmute(&args),
-        Command::Defer(args) => actions::defer(&args),
-        Command::Undefer(args) => actions::undefer(&args),
-        Command::Track(args) => actions::track(cfg, &args).await,
-        Command::Untrack(args) => actions::untrack(&args),
-        Command::Review(args) => review::run(cfg, &args).await,
-        Command::Tui => tui::run(cfg).await,
-        Command::Doctor => doctor::run(cfg).await,
+        Command::Sync(args) => sync::run(cfg, &args, logging, output).await,
+        Command::List(args) => list::run(cfg, &args, output),
+        Command::Next(args) => list::next(cfg, &args, output),
+        Command::Show(args) => show::run(cfg, &args, output),
+        Command::Done(args) => actions::done(cfg, &args, output).await,
+        Command::Snooze(args) => actions::snooze(&args, output),
+        Command::Mute(args) => actions::mute(&args, output),
+        Command::Unmute(args) => actions::unmute(&args, output),
+        Command::Defer(args) => actions::defer(&args, output),
+        Command::Undefer(args) => actions::undefer(&args, output),
+        Command::Track(args) => actions::track(cfg, &args, output).await,
+        Command::Untrack(args) => actions::untrack(&args, output),
+        Command::Review(args) => review::run(cfg, &args, output).await,
+        Command::Tui => tui::run(cfg, output).await,
+        Command::Doctor => doctor::run(cfg, output).await,
         // Taken above, before the config was loaded — matched here so that
         // adding a command and forgetting to dispatch it still fails to
         // compile.

@@ -4,7 +4,6 @@
 //! rendering of its progress — page counts on stderr, one summary line per repo
 //! on stdout.
 
-use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -13,13 +12,19 @@ use reviewq_app::sync::{Refreshed, RepoSummary, SyncProgress, summary_line};
 use reviewq_core::model::PrState;
 
 use crate::cli::SyncArgs;
+use crate::colour::Output;
 use crate::commands::EXIT_EMPTY;
 
-pub async fn run(loaded: &Loaded, args: &SyncArgs, logging: bool) -> Result<ExitCode> {
+pub async fn run(
+    loaded: &Loaded,
+    args: &SyncArgs,
+    logging: bool,
+    output: &impl Output,
+) -> Result<ExitCode> {
     if let Some(number) = args.number {
-        return one(&loaded.config, number).await;
+        return one(&loaded.config, number, output).await;
     }
-    let mut progress = StderrProgress::new(logging);
+    let mut progress = StderrProgress::new(logging, output);
     let which = match args.all {
         true => reviewq_ledger::Detail::Every,
         false => reviewq_ledger::Detail::Stale,
@@ -28,14 +33,18 @@ pub async fn run(loaded: &Loaded, args: &SyncArgs, logging: bool) -> Result<Exit
 }
 
 /// `reviewq sync <number>`: refresh one PR's detail and say what changed.
-async fn one(cfg: &Config, number: u64) -> Result<ExitCode> {
+async fn one(cfg: &Config, number: u64, output: &impl Output) -> Result<ExitCode> {
     match reviewq_app::sync::sync_one(cfg, number).await? {
         Refreshed::Untracked => {
-            eprintln!("#{number} is not in the ledger — run `reviewq sync` first");
+            output.eprintln(format!(
+                "#{number} is not in the ledger — run `reviewq sync` first"
+            ));
             Ok(ExitCode::from(EXIT_EMPTY))
         }
         Refreshed::Gone => {
-            eprintln!("#{number} no longer exists on the forge — dropped from the queue");
+            output.eprintln(format!(
+                "#{number} no longer exists on the forge — dropped from the queue"
+            ));
             Ok(ExitCode::SUCCESS)
         }
         Refreshed::Updated {
@@ -53,7 +62,9 @@ async fn one(cfg: &Config, number: u64) -> Result<ExitCode> {
                 PrState::Open if queued => "wants attention",
                 PrState::Open => "wants nothing",
             };
-            println!("sync {repo}#{number}: {standing}; {cost} pts, {remaining} left");
+            output.println(format!(
+                "sync {repo}#{number}: {standing}; {cost} pts, {remaining} left"
+            ));
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -61,36 +72,35 @@ async fn one(cfg: &Config, number: u64) -> Result<ExitCode> {
 
 /// The CLI's progress sink: pages on stderr, so stdout carries only the
 /// per-repo summary and stays pipeable.
-struct StderrProgress {
-    /// Rewrite a single line with `\r` rather than printing one per page. Only
-    /// tidy when nothing else is writing to stderr, so it's off when logs are
-    /// interleaved (`-v`) or stderr isn't a terminal.
+struct StderrProgress<'a, O> {
+    /// Rewrite a single line rather than printing one per page. Only tidy when
+    /// fancy output is enabled and nothing else is writing to stderr.
     in_place: bool,
     /// An in-place line is on screen without its newline yet.
     open_line: bool,
+    output: &'a O,
 }
 
-impl StderrProgress {
-    fn new(logging: bool) -> Self {
+impl<'a, O: Output> StderrProgress<'a, O> {
+    fn new(logging: bool, output: &'a O) -> Self {
         Self {
-            in_place: std::io::stderr().is_terminal() && !logging,
+            in_place: output.stderr_is_terminal() && output.colour_enabled() && !logging,
             open_line: false,
+            output,
         }
     }
 }
 
-impl SyncProgress for StderrProgress {
+impl<O: Output> SyncProgress for StderrProgress<'_, O> {
     fn page(&mut self, what: &str, fetched: usize, total: u32) {
         let msg = format!("{what}: {fetched}/{total} PRs");
-        let mut err = std::io::stderr().lock();
         if self.in_place {
-            // \x1b[K clears the rest of the line after the (possibly shorter) update.
-            let _ = write!(err, "\r  {msg}\x1b[K");
+            let _ = self.output.replace_stderr_line(&format!("  {msg}"));
             self.open_line = true;
         } else {
-            let _ = writeln!(err, "  {msg}");
+            self.output.eprintln(format!("  {msg}"));
         }
-        let _ = err.flush();
+        let _ = self.output.flush();
     }
 
     fn repo_finished(&mut self, summary: &RepoSummary) {
@@ -98,8 +108,38 @@ impl SyncProgress for StderrProgress {
         // if one was actually left open, so a repo that reported no pages at
         // all doesn't emit a stray blank line.
         if std::mem::take(&mut self.open_line) {
-            let _ = writeln!(std::io::stderr());
+            self.output.eprintln("");
         }
-        println!("{}", summary_line(summary));
+        self.output.println(summary_line(summary));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reviewq_app::sync::SyncProgress as _;
+
+    use super::*;
+    use crate::colour::testing::FakeOutput;
+
+    #[test]
+    fn progress_rewrites_terminal_stderr_when_fancy_output_is_enabled() {
+        let output = FakeOutput::new(true).with_stderr_terminal();
+        let mut progress = StderrProgress::new(false, &output);
+
+        progress.page("search", 20, 100);
+
+        assert_eq!(&*output.stderr.borrow(), "  search: 20/100 PRs");
+        assert_eq!(output.flushes.get(), 1);
+    }
+
+    #[test]
+    fn progress_uses_complete_lines_when_fancy_output_is_disabled() {
+        let output = FakeOutput::new(false).with_stderr_terminal();
+        let mut progress = StderrProgress::new(false, &output);
+
+        progress.page("search", 20, 100);
+
+        assert_eq!(&*output.stderr.borrow(), "  search: 20/100 PRs\n");
+        assert_eq!(output.flushes.get(), 1);
     }
 }

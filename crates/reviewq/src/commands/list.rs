@@ -14,8 +14,8 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
+use crossterm::style::Stylize;
 use jiff::Timestamp;
-use owo_colors::{OwoColorize as _, Stream::Stdout};
 use reviewq_app::present;
 use reviewq_core::model::{MyState, PrSnapshot, PrState};
 use reviewq_ledger::{Ledger, Located, QueueItem, RepoKey, TrackedPr};
@@ -24,10 +24,11 @@ use serde::Serialize;
 use reviewq_app::config::{Loaded, Marks};
 
 use crate::cli::{ListArgs, NextArgs};
+use crate::colour::{self, Output, Span};
 use crate::commands::EXIT_EMPTY;
 use reviewq_app::paths;
 
-pub fn run(loaded: &Loaded, args: &ListArgs) -> Result<ExitCode> {
+pub fn run(loaded: &Loaded, args: &ListArgs, output: &impl Output) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
     let multi = ledger.repos()?.len() > 1;
     let now = Timestamp::now();
@@ -36,9 +37,11 @@ pub fn run(loaded: &Loaded, args: &ListArgs) -> Result<ExitCode> {
     if args.all {
         let tracked = ledger.tracked_all()?;
         if args.json {
-            print_tracked_json(&tracked)?;
+            print_tracked_json(output, &tracked)?;
+        } else if tracked.is_empty() {
+            output.eprintln("nothing tracked yet — run `reviewq sync`");
         } else {
-            print_grouped(multi, now, marks, &tracked);
+            print_grouped(output, multi, now, marks, &tracked);
         }
         return Ok(empty_code(tracked.is_empty()));
     }
@@ -46,12 +49,12 @@ pub fn run(loaded: &Loaded, args: &ListArgs) -> Result<ExitCode> {
     if args.waiting {
         let waiting = ledger.waiting_all()?;
         if args.json {
-            print_tracked_json(&waiting)?;
+            print_tracked_json(output, &waiting)?;
         } else if waiting.is_empty() {
-            eprintln!("nothing waiting");
+            output.eprintln("nothing waiting");
         } else {
             for item in &waiting {
-                print_tracked_row(multi, now, marks, item);
+                output.line(tracked_row(multi, now, marks, item));
             }
         }
         return Ok(empty_code(waiting.is_empty()));
@@ -63,12 +66,12 @@ pub fn run(loaded: &Loaded, args: &ListArgs) -> Result<ExitCode> {
     if args.muted {
         let muted = ledger.muted_all()?;
         if args.json {
-            print_queue_json(&muted)?;
+            print_queue_json(output, &muted)?;
         } else if muted.is_empty() {
-            eprintln!("nothing muted");
+            output.eprintln("nothing muted");
         } else {
             for item in &muted {
-                print_queue_row(multi, now, marks, item);
+                output.line(queue_row(multi, now, marks, item));
             }
         }
         return Ok(empty_code(muted.is_empty()));
@@ -76,18 +79,18 @@ pub fn run(loaded: &Loaded, args: &ListArgs) -> Result<ExitCode> {
 
     let queue = ledger.queue_all()?;
     if args.json {
-        print_queue_json(&queue)?;
+        print_queue_json(output, &queue)?;
     } else if queue.is_empty() {
-        eprintln!("queue is empty — run `reviewq sync`, or try `reviewq list --waiting`");
+        output.eprintln("queue is empty — run `reviewq sync`, or try `reviewq list --waiting`");
     } else {
         for item in &queue {
-            print_queue_row(multi, now, marks, item);
+            output.line(queue_row(multi, now, marks, item));
         }
     }
     Ok(empty_code(queue.is_empty()))
 }
 
-pub fn next(loaded: &Loaded, args: &NextArgs) -> Result<ExitCode> {
+pub fn next(loaded: &Loaded, args: &NextArgs, output: &impl Output) -> Result<ExitCode> {
     let ledger = Ledger::open(&paths::database_file()?)?;
     let multi = ledger.repos()?.len() > 1;
     let now = Timestamp::now();
@@ -97,17 +100,17 @@ pub fn next(loaded: &Loaded, args: &NextArgs) -> Result<ExitCode> {
     match top {
         None => {
             if args.json {
-                println!("null");
+                output.println("null");
             } else {
-                eprintln!("queue is empty");
+                output.eprintln("queue is empty");
             }
             Ok(ExitCode::from(EXIT_EMPTY))
         }
         Some(item) => {
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&queue_json(&item))?);
+                output.println(serde_json::to_string_pretty(&queue_json(&item))?);
             } else {
-                print_queue_row(multi, now, marks, &item);
+                output.line(queue_row(multi, now, marks, &item));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -138,17 +141,11 @@ fn number_label(multi: bool, repo: &RepoKey, number: u64) -> String {
 /// wherever a terminal is, including ones with sixteen colours and a palette
 /// their owner chose. What is shared with the interface is which rows shout —
 /// [`present::emphasis`] — not what red is.
-fn painted(reason: &str, emphasis: present::Emphasis) -> String {
+fn painted(reason: &str, emphasis: present::Emphasis) -> Span {
     match emphasis {
-        present::Emphasis::Urgent => reason
-            .if_supports_color(Stdout, |s| s.red().to_string())
-            .to_string(),
-        present::Emphasis::Normal => reason
-            .if_supports_color(Stdout, |s| s.cyan().to_string())
-            .to_string(),
-        present::Emphasis::Quiet => reason
-            .if_supports_color(Stdout, |s| s.dimmed().to_string())
-            .to_string(),
+        present::Emphasis::Urgent => reason.to_string().dark_red().into(),
+        present::Emphasis::Normal => reason.to_string().dark_cyan().into(),
+        present::Emphasis::Quiet => reason.to_string().dim().into(),
     }
 }
 
@@ -160,12 +157,9 @@ fn painted(reason: &str, emphasis: present::Emphasis) -> String {
 /// for a reason should say so before the reader wonders why nothing is
 /// happening on it. `--waiting` is where these mostly land: a snooze clears the
 /// attention, which is exactly what puts a PR there.
-fn snooze_tag(my: &MyState, now: Timestamp) -> String {
-    present::snoozed_tag(my, now).map_or_else(String::new, |tag| {
-        format!(
-            "{} ",
-            format!("[{tag}]").if_supports_color(Stdout, |s| s.dimmed().to_string())
-        )
+fn snooze_tag(my: &MyState, now: Timestamp) -> Vec<Span> {
+    present::snoozed_tag(my, now).map_or_else(Vec::new, |tag| {
+        vec![format!("[{tag}]").dim().into(), colour::plain(" ")]
     })
 }
 
@@ -177,63 +171,64 @@ fn snooze_tag(my: &MyState, now: Timestamp) -> String {
 /// way. Dimmed once the PR has moved past the head the mark names, and for a
 /// deferred row — which is how the interface says the same two things, in the
 /// colours it has.
-fn mark_cell(pr: &PrSnapshot, my: &MyState, deferred: bool, marks: &Marks) -> String {
+fn mark_cell(pr: &PrSnapshot, my: &MyState, deferred: bool, marks: &Marks) -> Span {
     let Some(mark) = present::mark(pr, my, deferred) else {
-        return " ".to_string();
+        return colour::plain(" ");
     };
-    let glyph = marks.glyph(mark);
+    let glyph = marks.glyph(mark).to_string();
     match mark {
-        present::Mark::Handled { current: true, .. } => glyph
-            .if_supports_color(Stdout, |s| s.green().to_string())
-            .to_string(),
-        present::Mark::Handled { .. } | present::Mark::Deferred => glyph
-            .if_supports_color(Stdout, |s| s.dimmed().to_string())
-            .to_string(),
+        present::Mark::Handled { current: true, .. } => glyph.dark_green().into(),
+        present::Mark::Handled { .. } | present::Mark::Deferred => glyph.dim().into(),
     }
 }
 
-fn print_queue_row(multi: bool, now: Timestamp, marks: &Marks, item: &Located<QueueItem>) {
+fn queue_row(multi: bool, now: Timestamp, marks: &Marks, item: &Located<QueueItem>) -> Vec<Span> {
     // A merged PR only reaches the queue when a project opted into post-merge
     // review; tag it so it doesn't read as still-open.
-    let tag = if item.item.pr.state.is_open() {
-        String::new()
+    let tag: Vec<Span> = if item.item.pr.state.is_open() {
+        Vec::new()
     } else {
-        format!(
-            "{} ",
+        vec![
             format!("[{}]", item.item.pr.state.as_str())
-                .if_supports_color(Stdout, |s| s.yellow().to_string())
-        )
+                .dark_yellow()
+                .into(),
+            colour::plain(" "),
+        ]
     };
     // Padded before it is painted: a width applies to what it is given, and
-    // what a coloured string is given is escapes as well as text — so padding
-    // the coloured one lines the columns up by counting characters nobody can
-    // see. Only visible on a terminal, which is the only place it matters.
-    println!(
-        "  {} {}  {}  {}{}{}",
+    // styling only ever happens at render time, on a copy — so padding the
+    // plain value first always lines the columns up correctly.
+    let mut line = vec![
+        colour::plain("  "),
         mark_cell(
             &item.item.pr,
             &item.item.my_state,
             item.item.deferred,
-            marks
+            marks,
         ),
+        colour::plain(" "),
         format!(
             "{:>7}",
             number_label(multi, &item.repo, item.item.pr.number)
         )
-        .if_supports_color(Stdout, |s| s.dimmed().to_string()),
+        .dim()
+        .into(),
+        colour::plain("  "),
         painted(
             &item.item.top.reason.to_string(),
             present::emphasis(Some(item.item.top.priority()), item.item.deferred),
         ),
-        tag,
-        snooze_tag(&item.item.my_state, now),
-        truncate(&item.item.pr.title, 60),
-    );
+        colour::plain("  "),
+    ];
+    line.extend(tag);
+    line.extend(snooze_tag(&item.item.my_state, now));
+    line.push(colour::plain(truncate(&item.item.pr.title, 60)));
+    line
 }
 
-fn print_tracked_row(multi: bool, now: Timestamp, marks: &Marks, item: &Located<TrackedPr>) {
-    println!(
-        "  {} {}  {}  {}{}",
+fn tracked_row(multi: bool, now: Timestamp, marks: &Marks, item: &Located<TrackedPr>) -> Vec<Span> {
+    let mut line = vec![
+        colour::plain("  "),
         // A tracked row's defer comes from `my_state`: there is no attention for
         // it to still be standing against, which is what the queue's own
         // `deferred` means.
@@ -241,34 +236,40 @@ fn print_tracked_row(multi: bool, now: Timestamp, marks: &Marks, item: &Located<
             &item.item.pr,
             &item.item.my_state,
             item.item.my_state.deferred_at.is_some(),
-            marks
+            marks,
         ),
+        colour::plain(" "),
         format!(
             "{:>7}",
             number_label(multi, &item.repo, item.item.pr.number)
         )
-        .if_supports_color(Stdout, |s| s.dimmed().to_string()),
+        .dim()
+        .into(),
+        colour::plain("  "),
         // No attention at all — this row is saying why it is watched, which is
         // the interface's quiet case too.
         painted(
             &format!("{:<44}", item.item.tracked_reason),
             present::emphasis(None, item.item.my_state.deferred_at.is_some()),
         ),
-        snooze_tag(&item.item.my_state, now),
-        truncate(&item.item.pr.title, 60),
-    );
+        colour::plain("  "),
+    ];
+    line.extend(snooze_tag(&item.item.my_state, now));
+    line.push(colour::plain(truncate(&item.item.pr.title, 60)));
+    line
 }
 
 /// Open first, then merged, then closed; each group by number ascending (which
 /// `list_tracked` already guarantees).
 const STATE_ORDER: [PrState; 3] = [PrState::Open, PrState::Merged, PrState::Closed];
 
-fn print_grouped(multi: bool, now: Timestamp, marks: &Marks, tracked: &[Located<TrackedPr>]) {
-    if tracked.is_empty() {
-        eprintln!("nothing tracked yet — run `reviewq sync`");
-        return;
-    }
-
+fn print_grouped(
+    output: &impl Output,
+    multi: bool,
+    now: Timestamp,
+    marks: &Marks,
+    tracked: &[Located<TrackedPr>],
+) {
     let mut first = true;
     for state in STATE_ORDER {
         let group: Vec<&Located<TrackedPr>> = tracked
@@ -281,17 +282,12 @@ fn print_grouped(multi: bool, now: Timestamp, marks: &Marks, tracked: &[Located<
         // Blank line between groups so a header doesn't sit flush against the
         // previous group's last row.
         if !first {
-            println!();
+            output.println("");
         }
         first = false;
-        println!(
-            "{}",
-            state
-                .as_str()
-                .if_supports_color(Stdout, |s| s.bold().to_string())
-        );
+        output.println(Span::from(state.as_str().to_string().bold()));
         for item in group {
-            print_tracked_row(multi, now, marks, item);
+            output.line(tracked_row(multi, now, marks, item));
         }
     }
 }
@@ -322,9 +318,9 @@ fn queue_json(item: &Located<QueueItem>) -> QueueJson<'_> {
     }
 }
 
-fn print_queue_json(queue: &[Located<QueueItem>]) -> Result<()> {
+fn print_queue_json(output: &impl Output, queue: &[Located<QueueItem>]) -> Result<()> {
     let items: Vec<QueueJson<'_>> = queue.iter().map(queue_json).collect();
-    println!("{}", serde_json::to_string_pretty(&items)?);
+    output.println(serde_json::to_string_pretty(&items)?);
     Ok(())
 }
 
@@ -340,7 +336,7 @@ struct TrackedJson<'a> {
     updated_at: String,
 }
 
-fn print_tracked_json(tracked: &[Located<TrackedPr>]) -> Result<()> {
+fn print_tracked_json(output: &impl Output, tracked: &[Located<TrackedPr>]) -> Result<()> {
     let items: Vec<TrackedJson<'_>> = tracked
         .iter()
         .map(|t| TrackedJson {
@@ -354,7 +350,7 @@ fn print_tracked_json(tracked: &[Located<TrackedPr>]) -> Result<()> {
             updated_at: t.item.pr.updated_at.to_string(),
         })
         .collect();
-    println!("{}", serde_json::to_string_pretty(&items)?);
+    output.println(serde_json::to_string_pretty(&items)?);
     Ok(())
 }
 
@@ -369,10 +365,12 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::colour::testing::FakeOutput;
+    use reviewq_core::model::AttentionReason;
+    use reviewq_ledger::AttentionRow;
 
-    /// `if_supports_color` asks about real stdout, which is never a terminal
-    /// under `cargo test` — so every emphasis comes back as plain text here.
-    /// What is worth asserting is what survives that: the text, and its width.
+    /// Rendering with an explicit colour setting keeps this assertion
+    /// independent of the terminal running the test.
     #[test]
     fn painting_a_reason_changes_nothing_but_its_colour() {
         for emphasis in [
@@ -381,8 +379,13 @@ mod tests {
             present::Emphasis::Quiet,
         ] {
             assert_eq!(
-                painted("@kaxil mentioned you", emphasis),
+                colour::render(false, painted("@kaxil mentioned you", emphasis)),
                 "@kaxil mentioned you"
+            );
+            assert_ne!(
+                colour::render(true, painted("@kaxil mentioned you", emphasis)),
+                "@kaxil mentioned you",
+                "{emphasis:?} is supposed to carry a colour"
             );
         }
     }
@@ -393,7 +396,10 @@ mod tests {
         // string pads by counting escape bytes, so the columns only line up
         // when nothing is coloured.
         let padded = format!("{:<44}", "interest: label area:task-sdk");
-        assert_eq!(painted(&padded, present::Emphasis::Quiet).len(), 44);
+        assert_eq!(
+            colour::render(false, painted(&padded, present::Emphasis::Quiet)).len(),
+            44
+        );
     }
 
     #[test]
@@ -404,17 +410,26 @@ mod tests {
         };
 
         assert_eq!(
-            snooze_tag(&my, "2026-08-13T10:00:00Z".parse().unwrap()),
+            colour::render(
+                false,
+                snooze_tag(&my, "2026-08-13T10:00:00Z".parse().unwrap())
+            ),
             "[snoozed until 2026-08-15] ",
             "with its own trailing space, so the title needs no separator of its own"
         );
         assert_eq!(
-            snooze_tag(&my, "2026-08-16T10:00:00Z".parse().unwrap()),
+            colour::render(
+                false,
+                snooze_tag(&my, "2026-08-16T10:00:00Z".parse().unwrap())
+            ),
             "",
             "and nothing once it has lapsed"
         );
         assert_eq!(
-            snooze_tag(&MyState::default(), "2026-08-13T10:00:00Z".parse().unwrap()),
+            colour::render(
+                false,
+                snooze_tag(&MyState::default(), "2026-08-13T10:00:00Z".parse().unwrap())
+            ),
             ""
         );
     }
@@ -444,22 +459,32 @@ mod tests {
         // only one of them said why it was down there.
         let marks = Marks::default();
         let untouched = mark_cell(&pr(), &MyState::default(), false, &marks);
-        assert_eq!(untouched, " ", "the column is held whether marked or not");
+        assert_eq!(
+            colour::render(false, untouched),
+            " ",
+            "the column is held whether marked or not"
+        );
 
         let deferred = mark_cell(&pr(), &MyState::default(), true, &marks);
-        assert_eq!(deferred, marks.deferred);
+        assert_eq!(colour::render(false, deferred), marks.deferred);
 
         let reviewed = MyState {
             last_reviewed_sha: Some("head0000".into()),
             ..MyState::default()
         };
-        assert_eq!(mark_cell(&pr(), &reviewed, false, &marks), marks.reviewed);
+        assert_eq!(
+            colour::render(false, mark_cell(&pr(), &reviewed, false, &marks)),
+            marks.reviewed
+        );
 
         let done = MyState {
             done_sha: Some("head0000".into()),
             ..MyState::default()
         };
-        assert_eq!(mark_cell(&pr(), &done, false, &marks), marks.done);
+        assert_eq!(
+            colour::render(false, mark_cell(&pr(), &done, false, &marks)),
+            marks.done
+        );
     }
 
     #[test]
@@ -470,7 +495,81 @@ mod tests {
             deferred: "z".into(),
             ..Marks::default()
         };
-        assert_eq!(mark_cell(&pr(), &MyState::default(), true, &marks), "z");
+        assert_eq!(
+            colour::render(false, mark_cell(&pr(), &MyState::default(), true, &marks)),
+            "z"
+        );
+    }
+
+    fn located<T>(item: T) -> Located<T> {
+        Located {
+            repo: RepoKey {
+                host: "github.com".into(),
+                owner: "apache".into(),
+                name: "airflow".into(),
+            },
+            repo_id: 1,
+            item,
+        }
+    }
+
+    #[test]
+    fn queue_row_preserves_column_spacing() {
+        let now: Timestamp = "2026-08-13T10:00:00Z".parse().unwrap();
+        let marks = Marks::default();
+        let item = located(QueueItem {
+            pr: pr(),
+            tracked_reason: "interest: label x".into(),
+            top: AttentionRow {
+                reason: AttentionReason::Mention { by: "kaxil".into() },
+                since: now,
+            },
+            my_state: MyState::default(),
+            deferred: false,
+        });
+
+        assert_eq!(
+            colour::render(false, queue_row(false, now, &marks, &item)),
+            "     #62922  @kaxil mentioned you  AIP-104"
+        );
+    }
+
+    #[test]
+    fn tracked_row_preserves_column_spacing() {
+        let now: Timestamp = "2026-08-13T10:00:00Z".parse().unwrap();
+        let marks = Marks::default();
+        let item = located(TrackedPr {
+            pr: pr(),
+            tracked_reason: "interest: label x".into(),
+            after_merge: false,
+            my_state: MyState::default(),
+        });
+
+        assert_eq!(
+            colour::render(false, tracked_row(false, now, &marks, &item)),
+            "     #62922  interest: label x                             AIP-104"
+        );
+    }
+
+    #[test]
+    fn grouped_output_writes_separators_through_the_output_sink() {
+        let now: Timestamp = "2026-08-13T10:00:00Z".parse().unwrap();
+        let marks = Marks::default();
+        let open = located(TrackedPr {
+            pr: pr(),
+            tracked_reason: "interest: label x".into(),
+            after_merge: false,
+            my_state: MyState::default(),
+        });
+        let mut merged = open.clone();
+        merged.item.pr.state = PrState::Merged;
+        let output = FakeOutput::new(false);
+
+        print_grouped(&output, false, now, &marks, &[open, merged]);
+
+        assert_eq!(output.lines.borrow()[0], "OPEN");
+        assert_eq!(output.lines.borrow()[2], "");
+        assert_eq!(output.lines.borrow()[3], "MERGED");
     }
 
     #[test]

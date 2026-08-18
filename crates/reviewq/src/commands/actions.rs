@@ -14,8 +14,9 @@ use reviewq_app::config::{Config, Loaded};
 use reviewq_app::resolve::{open_for_number, repo_for};
 
 use crate::cli::{NumberArgs, SnoozeArgs, TrackArgs};
+use crate::colour::Output;
 
-pub async fn done(loaded: &Loaded, args: &NumberArgs) -> Result<ExitCode> {
+pub async fn done(loaded: &Loaded, args: &NumberArgs, output: &impl Output) -> Result<ExitCode> {
     let (ledger, repo_id, show) = open_for_number(args.number)?;
     actions::done(&ledger, repo_id, args.number, &show.pr.head_sha)?;
 
@@ -29,7 +30,10 @@ pub async fn done(loaded: &Loaded, args: &NumberArgs) -> Result<ExitCode> {
         );
     }
 
-    println!("#{} marked done at {}", args.number, show.pr.head_sha);
+    output.println(format!(
+        "#{} marked done at {}",
+        args.number, show.pr.head_sha
+    ));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -53,7 +57,7 @@ async fn mark_read(cfg: &Config, number: u64) -> Result<()> {
     actions::mark_notifications_read(cfg, &repo, number).await
 }
 
-pub fn snooze(args: &SnoozeArgs) -> Result<ExitCode> {
+pub fn snooze(args: &SnoozeArgs, output: &impl Output) -> Result<ExitCode> {
     // Validate the duration before touching the ledger, so a typo is reported
     // as itself rather than as an unrelated "PR not found".
     let until = actions::snooze_until(Timestamp::now(), &args.duration)?;
@@ -61,26 +65,26 @@ pub fn snooze(args: &SnoozeArgs) -> Result<ExitCode> {
 
     let until = actions::snooze(&ledger, repo_id, args.number, until)?;
 
-    println!("#{} snoozed until {until}", args.number);
+    output.println(format!("#{} snoozed until {until}", args.number));
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn mute(args: &NumberArgs) -> Result<ExitCode> {
+pub fn mute(args: &NumberArgs, output: &impl Output) -> Result<ExitCode> {
     let (ledger, repo_id, _show) = open_for_number(args.number)?;
     actions::set_muted(&ledger, repo_id, args.number, true)?;
 
-    println!("#{} muted", args.number);
+    output.println(format!("#{} muted", args.number));
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn unmute(args: &NumberArgs) -> Result<ExitCode> {
+pub fn unmute(args: &NumberArgs, output: &impl Output) -> Result<ExitCode> {
     let (ledger, repo_id, _show) = open_for_number(args.number)?;
     actions::set_muted(&ledger, repo_id, args.number, false)?;
 
-    println!(
+    output.println(format!(
         "#{} unmuted — its reasons return on the next sync",
         args.number
-    );
+    ));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -89,34 +93,37 @@ pub fn unmute(args: &NumberArgs) -> Result<ExitCode> {
 /// Distinct from `done`, which says the current head is handled and leaves the
 /// PR waiting on somebody. This says you are finished with it, and no rule may
 /// track it again until `reviewq track` puts it back.
-pub fn untrack(args: &NumberArgs) -> Result<ExitCode> {
+pub fn untrack(args: &NumberArgs, output: &impl Output) -> Result<ExitCode> {
     let (ledger, repo_id, _show) = open_for_number(args.number)?;
     actions::untrack(&ledger, repo_id, args.number)?;
 
-    println!(
+    output.println(format!(
         "#{} untracked — `reviewq track {}` puts it back",
         args.number, args.number
-    );
+    ));
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn defer(args: &NumberArgs) -> Result<ExitCode> {
+pub fn defer(args: &NumberArgs, output: &impl Output) -> Result<ExitCode> {
     let (ledger, repo_id, _show) = open_for_number(args.number)?;
     actions::set_deferred(&ledger, repo_id, args.number, true)?;
 
-    println!("#{} deferred to the bottom of the queue", args.number);
+    output.println(format!(
+        "#{} deferred to the bottom of the queue",
+        args.number
+    ));
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn undefer(args: &NumberArgs) -> Result<ExitCode> {
+pub fn undefer(args: &NumberArgs, output: &impl Output) -> Result<ExitCode> {
     let (ledger, repo_id, _show) = open_for_number(args.number)?;
     actions::set_deferred(&ledger, repo_id, args.number, false)?;
 
-    println!("#{} undeferred", args.number);
+    output.println(format!("#{} undeferred", args.number));
     Ok(ExitCode::SUCCESS)
 }
 
-pub async fn track(loaded: &Loaded, args: &TrackArgs) -> Result<ExitCode> {
+pub async fn track(loaded: &Loaded, args: &TrackArgs, output: &impl Output) -> Result<ExitCode> {
     let number = args.target.number;
     // A URL names its own repo, which is the only way to reach one that isn't
     // the single configured repo.
@@ -142,6 +149,6 @@ pub async fn track(loaded: &Loaded, args: &TrackArgs) -> Result<ExitCode> {
         reviewq_app::sync::Refreshed::Gone => " — but the forge no longer has it",
         reviewq_app::sync::Refreshed::Untracked => "",
     };
-    println!("#{number} {what}{queued}");
+    output.println(format!("#{number} {what}{queued}"));
     Ok(ExitCode::SUCCESS)
 }

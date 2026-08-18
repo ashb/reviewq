@@ -1,0 +1,7 @@
+#:schema https://www.schemastore.org/prek.json
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "command-output-boundary", name = "command output goes through Output", language = "system", entry = '''bash -c 'if rg -n "\b(println|eprintln|print|eprint)!" crates/reviewq/src/commands --glob "!tui.rs"; then echo "use the Output implementation in command modules" >&2; exit 1; fi' ''', pass_filenames = false, files = "^crates/reviewq/src/commands/.*\\.rs$" },
+]
