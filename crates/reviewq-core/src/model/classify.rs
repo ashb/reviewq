@@ -175,7 +175,7 @@ pub fn classify(
     out.extend(resolved_unanswered_attention(pr, threads, mine));
     out.extend(re_review_attention(pr, mine, ctx));
     out.extend(answered_after_review_attention(pr, mine, ctx));
-    out.extend(review_requested_attention(pr, mine, ctx));
+    out.extend(review_requested_attention(pr, ctx));
     // needs-first-look is for the open queue only: starting a first review of an
     // already-merged PR is not the point of surfacing it.
     if pr.state.is_open() {
@@ -382,16 +382,9 @@ fn answered_after_review_attention(
     })
 }
 
-/// A live review request names me, and I have not reviewed the current head.
-fn review_requested_attention(
-    pr: &PrSnapshot,
-    mine: &MyState,
-    ctx: &ClassifyCtx<'_>,
-) -> Option<Attention> {
+/// A live review request names me.
+fn review_requested_attention(pr: &PrSnapshot, ctx: &ClassifyCtx<'_>) -> Option<Attention> {
     let request = ctx.review_request.as_ref()?;
-    if mine.last_reviewed_sha.as_deref() == Some(pr.head_sha.as_str()) {
-        return None;
-    }
     Some(Attention {
         reason: AttentionReason::ReviewRequested {
             team: request.team.clone(),
@@ -763,6 +756,22 @@ mod tests {
             ..mine
         };
         assert!(classify(&pr(), &acked, &[], now(), &ctx).is_empty());
+    }
+
+    #[test]
+    fn a_live_request_after_reviewing_the_current_head_still_fires() {
+        let mine = MyState {
+            last_reviewed_sha: Some("head0000".into()),
+            last_verdict: Some(Verdict::Commented),
+            last_action_at: Some(ts("2026-08-05T08:00:00Z")),
+            ..Default::default()
+        };
+        let ctx = ClassifyCtx {
+            review_request: Some(ReviewRequest { team: None }),
+            ..Default::default()
+        };
+
+        assert!(fired(&pr(), &mine, &ctx).contains(&"review_requested"));
     }
 
     fn thread(last_comment_at: &str, my_last_comment_at: &str) -> ThreadState {

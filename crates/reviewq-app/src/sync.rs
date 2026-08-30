@@ -1290,6 +1290,58 @@ mod engine_tests {
     }
 
     #[tokio::test]
+    async fn a_full_sync_surfaces_a_live_request_after_reviewing_the_head() {
+        let cfg = Config {
+            involvement: crate::config::Involvement {
+                reasons: vec!["review_requested".into()],
+            },
+            ..config("")
+        };
+        let forge = FakeForge::new(vec![Page::of(vec![pr(7, "2026-08-09T09:00:00Z")])])
+            .with_review_request(7, 4900)
+            .with_current_head_review(7);
+
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+
+        let queue = ledger.queue(repo_id).expect("queue");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].top.reason.discriminant(), "review_requested");
+    }
+
+    #[tokio::test]
+    async fn refreshing_one_pr_surfaces_a_live_request_after_reviewing_the_head() {
+        let cfg = config("");
+        let forge = FakeForge::new(vec![Page::of(vec![pr(7, "2026-08-09T09:00:00Z")])])
+            .with_review_request(7, 4900)
+            .with_current_head_review(7);
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+        ledger.clear_attention(repo_id, 7).expect("clear attention");
+
+        let show = ledger.show(repo_id, 7).expect("show").expect("tracked PR");
+        let refreshed = refresh_one(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            &[],
+            false,
+            &HashSet::new(),
+            &show.pr,
+            show.tracked_reason.as_deref().unwrap_or(""),
+            &[],
+            now(),
+        )
+        .await
+        .expect("refresh");
+
+        assert!(matches!(refreshed, Some((_, true))));
+        let queue = ledger.queue(repo_id).expect("queue");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].top.reason.discriminant(), "review_requested");
+    }
+
+    #[tokio::test]
     async fn a_pr_whose_files_were_truncated_is_counted_rather_than_guessed_at() {
         // A path rule can neither match nor be ruled out against a partial file
         // list, so the PR is left untracked and counted — not silently dropped.
