@@ -1046,7 +1046,7 @@ impl DetailPr {
     }
 }
 
-/// A mention of `login` by someone else, if `body` names them and `at` is known.
+/// A mention of `login`, if `body` names them and `at` is known.
 fn mention_from(
     author: &Option<Login>,
     at: Option<Timestamp>,
@@ -1054,7 +1054,7 @@ fn mention_from(
     login: &str,
 ) -> Option<Mention> {
     let by = author_login(author)?;
-    if by == login || !mentions_login(body, login) {
+    if !mentions_login(body, login) {
         return None;
     }
     Some(Mention {
@@ -1528,6 +1528,22 @@ mod tests {
         assert!(!mentions_login("```\ncc @ashb\n```", "ashb"));
         // ...but a real mention alongside code still does.
         assert!(mentions_login("`code` then @ashb please", "ashb"));
+    }
+
+    #[test]
+    fn my_own_mention_is_returned_as_a_mention() {
+        let author = Some(Login {
+            login: "ashb".into(),
+        });
+        let at = "2026-08-30T12:29:21Z".parse().unwrap();
+
+        assert_eq!(
+            mention_from(&author, Some(at), "@ashb take another look", "ashb"),
+            Some(Mention {
+                by: "ashb".into(),
+                at,
+            })
+        );
     }
 
     #[test]

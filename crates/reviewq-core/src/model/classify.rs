@@ -237,7 +237,7 @@ fn mention_attention(mine: &MyState, _now: Timestamp, ctx: &ClassifyCtx<'_>) -> 
         .mentions
         .iter()
         .filter(|m| !is_bot(&m.by, ctx))
-        .filter(|m| !acknowledged(m.at, mine))
+        .filter(|m| !mention_acknowledged(m.at, mine))
         .max_by_key(|m| m.at)?;
     Some(Attention {
         reason: AttentionReason::Mention {
@@ -245,6 +245,11 @@ fn mention_attention(mine: &MyState, _now: Timestamp, ctx: &ClassifyCtx<'_>) -> 
         },
         since: latest.at,
     })
+}
+
+fn mention_acknowledged(mention: Timestamp, mine: &MyState) -> bool {
+    mine.last_action_at.is_some_and(|acted| mention < acted)
+        || mine.done_at.is_some_and(|done| mention <= done)
 }
 
 /// Whether `event` predates or coincides with my last action on the PR *or*
@@ -711,6 +716,25 @@ mod tests {
             ..Default::default()
         };
         assert!(classify(&pr(), &mine, &[], now(), &ctx).is_empty());
+    }
+
+    #[test]
+    fn the_action_containing_self_mention_does_not_clear_attention() {
+        let at = ts("2026-08-05T08:00:00Z");
+        let mentions = [Mention {
+            by: "ashb".into(),
+            at,
+        }];
+        let ctx = ClassifyCtx {
+            mentions: &mentions,
+            ..Default::default()
+        };
+        let containing_action = MyState {
+            last_action_at: Some(at),
+            ..Default::default()
+        };
+
+        assert!(fired(&pr(), &containing_action, &ctx).contains(&"mention"));
     }
 
     #[test]
