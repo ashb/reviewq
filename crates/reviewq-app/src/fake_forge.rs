@@ -188,6 +188,14 @@ impl FakeForge {
         this
     }
 
+    pub(crate) fn with_current_head_review(self, number: u64) -> Self {
+        if let Some(detail) = self.details.lock().expect("lock").get_mut(&number) {
+            detail.last_reviewed_sha = Some(format!("sha{number}"));
+            detail.last_verdict = Some(reviewq_core::model::Verdict::Commented);
+        }
+        self
+    }
+
     pub(crate) fn failing_detail(self, number: u64) -> Self {
         self.detail_errors.lock().expect("lock").insert(number);
         self
