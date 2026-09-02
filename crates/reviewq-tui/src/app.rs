@@ -19,12 +19,14 @@
 //! Both input and the side effects are handed in as [`Hooks`], so a test can
 //! drive the real loop from a script with no terminal and no forge.
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::mouse::{self, Action as MouseAction, ListRegion, WHEEL_ROWS};
 use anyhow::{Context, Result};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -37,7 +39,8 @@ use reviewq_forge::ForgeError;
 use std::collections::BTreeMap;
 
 use reviewq_ledger::{
-    AttentionRow, Ledger, LedgerError, Located, PrShow, QueueItem, RepoId, RepoKey, TrackedPr,
+    ActivityCursor, ActivityEvent, ActivityScope, AttentionRow, Ledger, LedgerError, Located,
+    PrShow, QueueItem, RepoId, RepoKey, TrackedPr,
 };
 use std::sync::mpsc;
 
@@ -125,10 +128,107 @@ fn forbid_in_tests(what: &str) {
     panic!("a test reached {what}");
 }
 
+const HISTORY_PAGE_SIZE: usize = 50;
+
 use crate::keys::{self, Action};
 use crate::svg;
 use crate::theme::{Rgb, Theme};
 use crate::ui;
+
+/// The bounded activity and backfill state for the selected PR's detail pane.
+#[derive(Debug, Default)]
+pub struct ActivityPreview {
+    /// The five most recent retained events, newest first.
+    pub events: Vec<ActivityEvent>,
+    /// Whether initial history ingestion has not completed yet.
+    pub backfill_incomplete: bool,
+    /// Whether the ledger could not read this preview.
+    pub unavailable: bool,
+}
+
+/// Which top-level surface owns the two panes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum View {
+    /// The queue, waiting list, or muted list.
+    #[default]
+    PullRequests,
+    /// Retained pull request activity.
+    History,
+}
+
+/// The activity set displayed by the History view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryScope {
+    /// Activity across every repository.
+    All,
+    /// Activity for one pull request.
+    Pr {
+        /// The ledger repository identifier.
+        repo_id: RepoId,
+        /// The repository identity shown in the title.
+        repo: RepoKey,
+        /// The pull request number.
+        number: u64,
+    },
+}
+
+/// Loaded History rows and their stable pagination boundary.
+#[derive(Debug, Clone)]
+pub struct HistoryState {
+    /// Include context events in this PR history.
+    pub all_activity: bool,
+    /// Which activity set is loaded.
+    pub scope: HistoryScope,
+    /// Loaded events, newest first.
+    pub events: Vec<ActivityEvent>,
+    /// The next older page, if one exists.
+    pub next: Option<ActivityCursor>,
+    /// The highlighted event.
+    pub selected: usize,
+    /// The first event visible in the left pane.
+    pub scroll: usize,
+    /// Whether another page is being read.
+    pub loading: bool,
+    /// Whether retained events or backfill state could not be read.
+    pub unavailable: bool,
+    /// Why the selected event's stored PR context could not be read.
+    pub detail_error: Option<String>,
+    /// Whether initial forge history ingestion is incomplete.
+    pub backfill_incomplete: bool,
+    /// Current stored PR context for the highlighted event.
+    pub detail: Option<PrShow>,
+}
+
+impl Default for HistoryState {
+    fn default() -> Self {
+        Self {
+            scope: HistoryScope::All,
+            all_activity: false,
+            events: Vec::new(),
+            next: None,
+            selected: 0,
+            scroll: 0,
+            loading: false,
+            unavailable: false,
+            detail_error: None,
+            backfill_incomplete: false,
+            detail: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ReturnLocation {
+    PullRequests {
+        listing: Listing,
+        selected_pr: Option<(RepoKey, u64)>,
+        selected: usize,
+        scroll: usize,
+        focus: Focus,
+        detail_scroll: u16,
+    },
+    History(Box<HistoryState>),
+}
 
 /// Everything on screen, plus the ledger handle it was read from.
 pub struct App {
@@ -153,6 +253,15 @@ pub struct App {
     /// `None` when the queue is empty, or when the row somehow has no stored
     /// detail.
     pub detail: Option<PrShow>,
+    /// Recent activity for [`detail`](Self::detail), loaded with it so drawing
+    /// remains a pure read of interface state.
+    pub activity_preview: ActivityPreview,
+    /// Which top-level surface owns the panes.
+    pub view: View,
+    /// History state retained while another surface is shown.
+    pub history: HistoryState,
+    history_page_size: usize,
+    return_stack: Vec<ReturnLocation>,
     /// A PR being looked at that is not on the queue. While one is, it is what
     /// the detail pane shows and the panes are read-only; Esc puts it away.
     pub peek: Option<Peeked>,
@@ -177,12 +286,12 @@ pub struct App {
     pub queue_scroll: usize,
     /// A PR whose handoff has been asked for but not yet run, so the loop can
     /// draw the notice first.
-    pending_review: Option<u64>,
+    pending_review: Option<(RepoKey, u64)>,
     /// Likewise for a PR to fetch, which is also a network call worth announcing
     /// before it blocks.
     pending_fetch: Option<u64>,
     /// And for a PR to look at, which may have to be fetched to show at all.
-    pending_peek: Option<u64>,
+    pending_peek: Option<(Option<RepoKey>, u64)>,
     /// A screen to save once it has been drawn. Held rather than done on the
     /// keypress because what is wanted is the frame *without* the note saying it
     /// was saved — which is the frame drawn a moment later.
@@ -207,10 +316,9 @@ pub struct App {
     /// Written by the renderer, which is the only thing that knows how much of it
     /// fits.
     help_max_scroll: u16,
-    /// PRs with a refresh in flight. Keyed by number so pressing `r` twice on
-    /// one PR doesn't fetch it twice, while two different PRs can refresh at
-    /// once.
-    pub refreshing: BTreeSet<u64>,
+    /// PRs with a refresh in flight. The repository is part of the key because
+    /// the same number can exist in more than one configured repo.
+    pub refreshing: HashSet<(RepoKey, u64)>,
     /// Whether the rows carry their label chips.
     ///
     /// A session-long switch rather than a config key: what a row should show
@@ -236,6 +344,7 @@ pub struct App {
     /// click can be turned back into the row under the pointer. Written by the
     /// renderer, which is the only thing that knows where the layout put them;
     /// empty until the first draw, which makes every hit test miss.
+    pub(crate) history_link_area: Rect,
     queue_area: Rect,
     detail_area: Rect,
     ledger: Ledger,
@@ -272,6 +381,18 @@ impl Channel {
 /// number — because it has to reach the forge the PR lives on.
 pub type PrHook = Box<dyn Fn(&RepoKey, u64) -> Result<()> + Send + Sync>;
 
+/// Read a PR for display, using its repo when the caller has already resolved it.
+pub type PeekHook = Box<dyn Fn(Option<&RepoKey>, u64) -> Result<Peeked> + Send + Sync>;
+
+/// Hand a resolved PR to the configured review command.
+pub type ReviewHook = Box<dyn Fn(&RepoKey, u64) -> Result<ReviewOutcome> + Send + Sync>;
+
+/// Refresh a resolved PR and report the result back to the loop.
+pub type RefreshHook = Box<dyn Fn(&RepoKey, u64, mpsc::Sender<Message>) + Send + Sync>;
+
+/// A side effect that opens an already-resolved opaque URL.
+pub type UrlHook = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
 /// The session's config: loaded and validated once by the caller, shared with
 /// every hook that needs it.
 ///
@@ -297,7 +418,7 @@ pub struct Hooks {
     pub next_event: Box<dyn Fn() -> Result<Option<Event>> + Send + Sync>,
     /// Begin refreshing a PR. Must not block: whatever it starts is expected to
     /// report back as [`Message::Refreshed`] eventually, or never.
-    pub refresh: Box<dyn Fn(u64, mpsc::Sender<Message>) + Send + Sync>,
+    pub refresh: RefreshHook,
     /// Begin a full sync of every configured repo. Must not block, for the same
     /// reason [`refresh`](Self::refresh) must not: this is minutes of work on a
     /// large repo, and the queue stays usable throughout — what a sync writes,
@@ -317,7 +438,7 @@ pub struct Hooks {
     /// Read a PR for display without tracking it — from the ledger where it is
     /// stored, from the forge where it isn't. Blocks for the same reason
     /// [`fetch`](Self::fetch) does, and may not have to touch the network at all.
-    pub peek: Box<dyn Fn(u64) -> Result<Peeked> + Send + Sync>,
+    pub peek: PeekHook,
     /// Put a drawn screen somewhere, returning where it went so the header can
     /// say. Given the finished SVG rather than the buffer: composing it is this
     /// crate's business and writing a file is not, which also lets a test read
@@ -329,6 +450,8 @@ pub struct Hooks {
     /// config work — which host, whose layout — and that belongs on this side of
     /// the seam with every other config touch, not in `App`.
     pub open_url: PrHook,
+    /// Open an opaque event permalink without interpreting it.
+    pub open_permalink: UrlHook,
     /// Put a PR's URL on the clipboard, resolved the same way.
     pub copy_url: PrHook,
     /// Hand a PR to the configured review command, giving the terminal back for
@@ -339,7 +462,14 @@ pub struct Hooks {
     /// can stand in for it, and partly because suspending is the one thing the
     /// loop cannot do generically: it belongs to the real backend, not to
     /// `TestBackend`.
-    pub review: Box<dyn Fn(u64) -> Result<()> + Send + Sync>,
+    pub review: ReviewHook,
+}
+
+/// A successful handoff, with a non-fatal history warning when applicable.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReviewOutcome {
+    /// A review-started event that could not be persisted.
+    pub history_warning: Option<String>,
 }
 
 /// Why a PR you asked for isn't on the queue.
@@ -522,7 +652,9 @@ pub(crate) const SNOOZE_PRESETS: &[(char, &str, &str)] = &[
 pub enum Message {
     /// A refresh task finished, for better or worse.
     Refreshed {
-        /// The PR it was refreshing.
+        /// The repository it was refreshing.
+        repo: RepoKey,
+        /// The PR number it was refreshing.
         number: u64,
         /// What came back.
         outcome: Result<Refreshed>,
@@ -712,6 +844,11 @@ impl App {
             label_colours: std::collections::HashMap::new(),
             selected: 0,
             detail: None,
+            activity_preview: ActivityPreview::default(),
+            view: View::default(),
+            history: HistoryState::default(),
+            history_page_size: HISTORY_PAGE_SIZE,
+            return_stack: Vec::new(),
             peek: None,
             repo_count: 0,
             focus: Focus::default(),
@@ -727,11 +864,12 @@ impl App {
             dirty: true,
             help_max_scroll: 0,
             status: None,
-            refreshing: BTreeSet::new(),
+            refreshing: HashSet::new(),
             labels: true,
             syncing: false,
             page: 1,
             detail_lines: 0,
+            history_link_area: Rect::ZERO,
             queue_area: Rect::ZERO,
             detail_area: Rect::ZERO,
             config,
@@ -783,7 +921,11 @@ impl App {
         if self.queue.is_empty() {
             self.focus = Focus::Queue;
         }
-        self.load_detail()
+        self.load_detail()?;
+        if self.view == View::History {
+            self.refresh_history()?;
+        }
+        Ok(())
     }
 
     /// Show one of the other lists, for a caller arranging a screen rather than
@@ -829,11 +971,56 @@ impl App {
     ///
     /// The row carries its own `repo_id`, so moving the selection stays a read.
     fn load_detail(&mut self) -> Result<()> {
-        self.detail = match self.current() {
-            None => None,
-            Some(item) => self.ledger.show(item.repo_id, item.item.pr.number)?,
+        let selected = self
+            .current()
+            .map(|item| (item.repo_id, item.item.pr.number));
+        let Some((repo_id, number)) = selected else {
+            self.detail = None;
+            self.activity_preview = ActivityPreview::default();
+            return Ok(());
         };
+
+        let detail = self.ledger.show(repo_id, number)?;
+        let (activity_preview, status) = match detail.as_ref() {
+            Some(_) => match self.ledger.activity_preview(repo_id, number, 5) {
+                Ok(events) => match self.ledger.activity_backfill(repo_id, number) {
+                    Ok(backfill) => (
+                        ActivityPreview {
+                            events,
+                            backfill_incomplete: backfill
+                                .is_none_or(|progress| progress.completed_at.is_none()),
+                            unavailable: false,
+                        },
+                        None,
+                    ),
+                    Err(error) => Self::unavailable_activity_preview(repo_id, number, error),
+                },
+                Err(error) => Self::unavailable_activity_preview(repo_id, number, error),
+            },
+            None => (ActivityPreview::default(), None),
+        };
+        self.detail = detail;
+        self.activity_preview = activity_preview;
+        if let Some(status) = status {
+            self.status = Some(status);
+        }
         Ok(())
+    }
+
+    fn unavailable_activity_preview(
+        repo_id: RepoId,
+        number: u64,
+        error: LedgerError,
+    ) -> (ActivityPreview, Option<String>) {
+        tracing::warn!(%repo_id, number, error = %error, "activity preview unavailable");
+        (
+            ActivityPreview {
+                events: Vec::new(),
+                backfill_incomplete: false,
+                unavailable: true,
+            },
+            Some(format!("#{number} activity preview unavailable: {error:#}")),
+        )
     }
 
     /// The highlighted queue row, or `None` when the queue is empty.
@@ -1023,16 +1210,16 @@ impl App {
             // above is what puts "launching" on screen before the terminal is
             // given away — 1Password may prompt, and an unexplained pause with
             // reviewq's last frame still showing is alarming.
-            if let Some(number) = self.pending_review.take() {
-                self.hand_off(number, channel, hooks);
+            if let Some((repo, number)) = self.pending_review.take() {
+                self.hand_off(&repo, number, channel, hooks);
                 continue;
             }
             if let Some(number) = self.pending_fetch.take() {
                 self.fetch_unknown(number, hooks);
                 continue;
             }
-            if let Some(number) = self.pending_peek.take() {
-                self.show_anyway(number, hooks);
+            if let Some((repo, number)) = self.pending_peek.take() {
+                self.show_anyway(repo.as_ref(), number, hooks);
                 continue;
             }
             // Nothing waits on this one, so it needs no draw of its own.
@@ -1059,7 +1246,7 @@ impl App {
                     self.dirty = true;
                 }
                 Some(Event::Mouse(mouse)) => {
-                    self.on_mouse(mouse)?;
+                    self.dispatch_mouse(mouse, hooks)?;
                     self.dirty = true;
                 }
                 // A resize invalidates the whole layout; ratatui's own record of
@@ -1080,20 +1267,28 @@ impl App {
     /// [`Action`]: the ones with side effects are performed here, where the hooks
     /// and the ledger are, and the rest go to [`update`](Self::update).
     fn dispatch(&mut self, key: KeyEvent, channel: &Channel, hooks: &Hooks) -> Result<()> {
+        let action = keys::action_for(key);
         // Before anything else claims the keyboard: the screen worth saving is
         // often one an overlay is covering, and a modal that swallowed the key
         // would be the one thing that could never be photographed.
-        if keys::action_for(key) == Some(Action::SaveSvg) {
+        if action == Some(Action::SaveSvg) {
             self.pending_svg = true;
             return Ok(());
         }
         if self.overlay != Overlay::None {
             return self.on_overlay_key(key);
         }
+        if action == Some(Action::Help) {
+            self.overlay = Overlay::Help { scroll: 0 };
+            return Ok(());
+        }
         if self.peek.is_some() {
             return self.on_peek_key(key, channel, hooks);
         }
-        let Some(action) = keys::action_for(key) else {
+        if self.view == View::History {
+            return self.on_history_key(key, channel, hooks);
+        }
+        let Some(action) = action else {
             return Ok(());
         };
         // Whatever `update` doesn't own comes back here to be performed. Matched
@@ -1101,10 +1296,10 @@ impl App {
         // forgotten in both places fails to compile, where before it would have
         // been advertised in the key reference and quietly done nothing.
         match self.update(action)? {
-            Update::Handled => Ok(()),
+            Update::Handled | Update::Passed(Action::ToggleHistoryActivity) => Ok(()),
             Update::Passed(Action::RefreshSelected) => {
-                if let Some(number) = self.refresh_target() {
-                    (hooks.refresh)(number, channel.tx.clone());
+                if let Some((repo, number)) = self.refresh_target() {
+                    (hooks.refresh)(&repo, number, channel.tx.clone());
                 }
                 Ok(())
             }
@@ -1113,11 +1308,14 @@ impl App {
                 Ok(())
             }
             Update::Passed(Action::Review) => {
-                if let Some(number) = self.selected_number() {
+                if let Some((repo, number)) = self
+                    .current()
+                    .map(|item| (item.repo.clone(), item.item.pr.number))
+                {
                     // Held for the loop to perform after one more draw, so the
                     // notice is up before the terminal is handed over.
                     self.overlay = Overlay::Launching { number };
-                    self.pending_review = Some(number);
+                    self.pending_review = Some((repo, number));
                 }
                 Ok(())
             }
@@ -1164,7 +1362,506 @@ impl App {
                 | Action::First
                 | Action::Last,
             ) => unreachable!("update handles these and returns Handled"),
+            Update::Passed(Action::History) => self.open_history_from_list(),
         }
+    }
+
+    pub(crate) fn open_history_from_list(&mut self) -> Result<()> {
+        let scope = self
+            .current()
+            .map_or(HistoryScope::All, |item| HistoryScope::Pr {
+                repo_id: item.repo_id,
+                repo: item.repo.clone(),
+                number: item.item.pr.number,
+            });
+        self.return_stack.push(ReturnLocation::PullRequests {
+            listing: self.listing,
+            selected_pr: self
+                .current()
+                .map(|item| (item.repo.clone(), item.item.pr.number)),
+            selected: self.selected,
+            scroll: self.queue_scroll,
+            focus: self.focus,
+            detail_scroll: self.detail_scroll,
+        });
+        self.load_history(scope)
+    }
+
+    pub(crate) fn help_description(&self, binding: &keys::Binding) -> Option<&'static str> {
+        let action = binding.action;
+        if let Some(peek) = &self.peek {
+            return match action {
+                Action::Back | Action::SwitchPane => Some("return to the previous view"),
+                Action::Down => Some("scroll the PR description"),
+                Action::Review if self.view == View::History && !peek.scratch => Some(binding.what),
+                Action::Help
+                | Action::Quit
+                | Action::SaveSvg
+                | Action::ToggleTheme
+                | Action::Up
+                | Action::PageDown
+                | Action::PageUp
+                | Action::ScrollDetailDown
+                | Action::ScrollDetailUp
+                | Action::First
+                | Action::Last
+                | Action::OpenInBrowser
+                | Action::CopyUrl
+                | Action::ShowMuted
+                | Action::ShowWaiting
+                | Action::SyncAll => Some(binding.what),
+                Action::ToggleLabels if self.view == View::PullRequests => Some(binding.what),
+                _ => None,
+            };
+        }
+        if self.view == View::History {
+            return match action {
+                Action::ToggleHistoryActivity
+                    if matches!(self.history.scope, HistoryScope::Pr { .. }) =>
+                {
+                    Some(binding.what)
+                }
+                Action::Review => Some("show the selected PR"),
+                Action::OpenInBrowser => Some("open the event link, or its PR"),
+                Action::History => Some(match self.history.scope {
+                    HistoryScope::All => "show the selected PR's history",
+                    HistoryScope::Pr { .. } => "show global history",
+                }),
+                Action::Back => Some("return to the previous view"),
+                Action::Help
+                | Action::Quit
+                | Action::SaveSvg
+                | Action::Down
+                | Action::Up
+                | Action::PageDown
+                | Action::PageUp
+                | Action::First
+                | Action::Last => Some(binding.what),
+                _ => None,
+            };
+        }
+        Some(match action {
+            Action::ToggleHistoryActivity => return None,
+            Action::Back if self.listing == Listing::Queue => "quit",
+            Action::Back => "back to the queue",
+            _ => binding.what,
+        })
+    }
+
+    fn on_history_key(&mut self, key: KeyEvent, _channel: &Channel, hooks: &Hooks) -> Result<()> {
+        let page = self.page() as isize;
+        match keys::action_for(key) {
+            Some(Action::ToggleHistoryActivity)
+                if matches!(self.history.scope, HistoryScope::Pr { .. }) =>
+            {
+                self.load_history_mode(self.history.scope.clone(), !self.history.all_activity)
+            }
+            Some(Action::History) => {
+                let scope = match &self.history.scope {
+                    HistoryScope::Pr { .. } => HistoryScope::All,
+                    HistoryScope::All => self.history.events.get(self.history.selected).map_or(
+                        HistoryScope::All,
+                        |event| HistoryScope::Pr {
+                            repo_id: event.repo_id,
+                            repo: event.repo.clone(),
+                            number: event.pr_number,
+                        },
+                    ),
+                };
+                if scope != self.history.scope {
+                    self.return_stack
+                        .push(ReturnLocation::History(Box::new(self.history.clone())));
+                    self.load_history(scope)
+                } else {
+                    Ok(())
+                }
+            }
+            Some(Action::Back) => self.restore_return_location(),
+            Some(Action::Down) => self.move_history(1),
+            Some(Action::Up) => self.move_history(-1),
+            Some(Action::PageDown) => self.move_history(page),
+            Some(Action::PageUp) => self.move_history(-page),
+            Some(Action::First) => self.move_history(isize::MIN),
+            Some(Action::Last) => {
+                while self.history.next.is_some() {
+                    self.load_more_history()?;
+                }
+                self.move_history(isize::MAX)
+            }
+            Some(Action::Review) => self.show_history_selected(hooks),
+            Some(Action::OpenInBrowser) => self.open_history_selected(hooks),
+            Some(Action::Quit) => {
+                self.quit = true;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn restore_return_location(&mut self) -> Result<()> {
+        self.status = None;
+        match self.return_stack.pop() {
+            Some(ReturnLocation::History(history)) => {
+                self.history = *history;
+                self.view = View::History;
+                self.refresh_history()?;
+            }
+            Some(ReturnLocation::PullRequests {
+                listing,
+                selected_pr,
+                selected,
+                scroll,
+                focus,
+                detail_scroll,
+            }) => {
+                self.view = View::PullRequests;
+                self.listing = listing;
+                self.selected = selected_pr
+                    .and_then(|(repo, number)| {
+                        self.queue
+                            .iter()
+                            .position(|item| item.repo == repo && item.item.pr.number == number)
+                    })
+                    .unwrap_or(selected)
+                    .min(self.queue.len().saturating_sub(1));
+                self.queue_scroll = scroll;
+                self.focus = focus;
+                self.detail_scroll = detail_scroll;
+                self.load_detail()?;
+            }
+            None => self.quit = true,
+        }
+        Ok(())
+    }
+
+    fn move_history(&mut self, delta: isize) -> Result<()> {
+        self.select_history(self.history.selected.saturating_add_signed(delta))
+    }
+
+    fn select_history(&mut self, index: usize) -> Result<()> {
+        if self.history.events.is_empty() {
+            return Ok(());
+        }
+        let last = self.history.events.len() - 1;
+        self.history.selected = index.min(last);
+        self.detail_scroll = 0;
+        if self.history.next.is_some() && self.history.selected + 2 >= self.history.events.len() {
+            self.load_more_history()?;
+        }
+        if self.history.selected < self.history.scroll {
+            self.history.scroll = self.history.selected;
+        } else if self.history.selected >= self.history.scroll + self.page() {
+            self.history.scroll = self.history.selected + 1 - self.page();
+        }
+        self.history.scroll = self
+            .history
+            .scroll
+            .min(self.history.events.len().saturating_sub(self.page()));
+        self.load_history_detail()
+    }
+
+    fn load_more_history(&mut self) -> Result<()> {
+        let Some(cursor) = self.history.next.clone() else {
+            return Ok(());
+        };
+        self.history.loading = true;
+        let scope = self.history_ledger_scope();
+        let page = self
+            .ledger
+            .activity_page(scope, Some(&cursor), self.history_page_size);
+        self.history.loading = false;
+        let page = match page {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(error = %error, "next history page unavailable");
+                self.history.unavailable = true;
+                self.history.next = None;
+                self.status = Some(format!("more history unavailable: {error:#}"));
+                return Ok(());
+            }
+        };
+        self.history.events.extend(page.events);
+        self.history.next = page.next;
+        Ok(())
+    }
+
+    fn history_ledger_scope(&self) -> ActivityScope {
+        match self.history.scope {
+            HistoryScope::All => ActivityScope::All,
+            HistoryScope::Pr {
+                repo_id, number, ..
+            } if self.history.all_activity => ActivityScope::PrAll { repo_id, number },
+            HistoryScope::Pr {
+                repo_id, number, ..
+            } => ActivityScope::Pr { repo_id, number },
+        }
+    }
+
+    fn load_history_detail(&mut self) -> Result<()> {
+        if self.status.as_ref() == self.history.detail_error.as_ref() {
+            self.status = None;
+        }
+        self.history.detail_error = None;
+        let target = self
+            .history
+            .events
+            .get(self.history.selected)
+            .map(|event| (event.repo_id, event.pr_number));
+        self.history.detail = match target {
+            Some((repo_id, number)) => match self.ledger.show(repo_id, number) {
+                Ok(detail) => detail,
+                Err(error) => {
+                    tracing::warn!(%repo_id, number, error = %error, "history PR detail unavailable");
+                    let message = format!("#{number} stored detail unavailable: {error:#}");
+                    self.history.detail_error = Some(message.clone());
+                    self.status = Some(message);
+                    None
+                }
+            },
+            None => None,
+        };
+        Ok(())
+    }
+
+    fn show_history_selected(&mut self, hooks: &Hooks) -> Result<()> {
+        let target = self
+            .history
+            .events
+            .get(self.history.selected)
+            .map(|event| (event.repo.clone(), event.repo_id, event.pr_number))
+            .or_else(|| match &self.history.scope {
+                HistoryScope::Pr {
+                    repo_id,
+                    repo,
+                    number,
+                } if self.history.detail.is_some() => Some((repo.clone(), *repo_id, *number)),
+                _ => None,
+            });
+        let Some((repo, repo_id, number)) = target else {
+            return Ok(());
+        };
+        match self.ledger.show(repo_id, number) {
+            Ok(Some(show)) => {
+                self.peek = Some(Peeked {
+                    repo,
+                    show,
+                    scratch: false,
+                });
+                self.focus = Focus::Detail;
+                self.detail_scroll = 0;
+                self.status = Some(format!("showing #{number} — Esc returns to history"));
+            }
+            Ok(None) => self.show_anyway(Some(&repo), number, hooks),
+            Err(error) => {
+                tracing::warn!(%repo_id, number, error = %error, "history PR detail unavailable");
+                self.history.detail_error =
+                    Some(format!("#{number} stored detail unavailable: {error:#}"));
+                self.show_anyway(Some(&repo), number, hooks);
+            }
+        }
+        if self.peek.is_some() {
+            self.status = Some(format!("showing #{number} — Esc returns to history"));
+        }
+        Ok(())
+    }
+
+    fn open_history_selected(&mut self, hooks: &Hooks) -> Result<()> {
+        let Some(event) = self.history.events.get(self.history.selected) else {
+            return Ok(());
+        };
+        self.status = Some(if let Some(permalink) = event.permalink.as_deref() {
+            match (hooks.open_permalink)(permalink) {
+                Ok(()) => "event link opened".to_string(),
+                Err(error) => format!("event link could not be opened: {error:#}"),
+            }
+        } else {
+            match (hooks.open_url)(&event.repo, event.pr_number) {
+                Ok(()) => format!("#{} opened", event.pr_number),
+                Err(error) => format!("#{} could not be opened: {error:#}", event.pr_number),
+            }
+        });
+        Ok(())
+    }
+
+    fn refresh_history(&mut self) -> Result<()> {
+        let held = self
+            .history
+            .events
+            .get(self.history.selected)
+            .map(|event| (event.occurred_at, event.id));
+        let offset = self.history.selected.saturating_sub(self.history.scroll);
+        let focus = self.focus;
+        let status = self.status.take();
+        self.load_history_mode(self.history.scope.clone(), self.history.all_activity)?;
+        if let Some(held) = held {
+            while self.history.next.is_some()
+                && self
+                    .history
+                    .events
+                    .last()
+                    .is_some_and(|event| (event.occurred_at, event.id) > held)
+            {
+                self.load_more_history()?;
+            }
+            self.history.selected = self
+                .history
+                .events
+                .iter()
+                .position(|event| event.id == held.1)
+                .or_else(|| {
+                    self.history
+                        .events
+                        .iter()
+                        .position(|event| (event.occurred_at, event.id) <= held)
+                })
+                .unwrap_or_else(|| self.history.events.len().saturating_sub(1));
+            self.history.scroll = self.history.selected.saturating_sub(offset);
+            self.load_history_detail()?;
+        }
+        self.focus = focus;
+        self.status = self.status.take().or(status);
+        Ok(())
+    }
+
+    pub(crate) fn load_history(&mut self, scope: HistoryScope) -> Result<()> {
+        self.load_history_mode(scope, false)
+    }
+
+    fn load_history_mode(&mut self, scope: HistoryScope, all_activity: bool) -> Result<()> {
+        let all_activity = all_activity && matches!(scope, HistoryScope::Pr { .. });
+        let ledger_scope = match &scope {
+            HistoryScope::All => ActivityScope::All,
+            HistoryScope::Pr {
+                repo_id, number, ..
+            } if all_activity => ActivityScope::PrAll {
+                repo_id: *repo_id,
+                number: *number,
+            },
+            HistoryScope::Pr {
+                repo_id, number, ..
+            } => ActivityScope::Pr {
+                repo_id: *repo_id,
+                number: *number,
+            },
+        };
+        let (scoped_detail, mut selected_detail_error) = match &scope {
+            HistoryScope::All => (None, None),
+            HistoryScope::Pr {
+                repo_id, number, ..
+            } => match self.ledger.show(*repo_id, *number) {
+                Ok(detail) => (detail, None),
+                Err(error) => {
+                    tracing::warn!(%repo_id, number, error = %error, "history PR detail unavailable");
+                    (
+                        None,
+                        Some(format!("#{number} stored detail unavailable: {error:#}")),
+                    )
+                }
+            },
+        };
+        let (backfill_incomplete, availability_error) =
+            match self.history_backfill_incomplete(&scope) {
+                Ok(incomplete) => (incomplete, None),
+                Err(error) => {
+                    tracing::warn!(error = %error, "activity history state unavailable");
+                    (
+                        false,
+                        Some(format!("activity history unavailable: {error:#}")),
+                    )
+                }
+            };
+        let page = match self
+            .ledger
+            .activity_page(ledger_scope, None, self.history_page_size)
+        {
+            Ok(page) => page,
+            Err(error) => {
+                self.set_unavailable_history(scope, scoped_detail, error.into());
+                self.history.all_activity = all_activity;
+                return Ok(());
+            }
+        };
+        let detail = match scoped_detail {
+            Some(detail) => Some(detail),
+            None => match page.events.first() {
+                Some(event) => match self.ledger.show(event.repo_id, event.pr_number) {
+                    Ok(detail) => detail,
+                    Err(error) => {
+                        tracing::warn!(
+                            repo_id = %event.repo_id,
+                            number = event.pr_number,
+                            error = %error,
+                            "history PR detail unavailable"
+                        );
+                        selected_detail_error.get_or_insert_with(|| {
+                            format!("#{} stored detail unavailable: {error:#}", event.pr_number)
+                        });
+                        None
+                    }
+                },
+                None => None,
+            },
+        };
+        self.history = HistoryState {
+            scope,
+            all_activity,
+            events: page.events,
+            next: page.next,
+            selected: 0,
+            scroll: 0,
+            loading: false,
+            unavailable: availability_error.is_some(),
+            detail_error: selected_detail_error.clone(),
+            backfill_incomplete,
+            detail,
+        };
+        self.view = View::History;
+        self.detail_scroll = 0;
+        self.focus = Focus::Queue;
+        self.status = availability_error.or(selected_detail_error);
+        Ok(())
+    }
+
+    fn history_backfill_incomplete(&self, scope: &HistoryScope) -> Result<bool> {
+        match scope {
+            HistoryScope::Pr {
+                repo_id, number, ..
+            } => Ok(self
+                .ledger
+                .activity_backfill(*repo_id, *number)?
+                .is_none_or(|progress| progress.completed_at.is_none())),
+            HistoryScope::All => {
+                for tracked in self.ledger.tracked_all()? {
+                    if self
+                        .ledger
+                        .activity_backfill(tracked.repo_id, tracked.item.pr.number)?
+                        .is_none_or(|progress| progress.completed_at.is_none())
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn set_unavailable_history(
+        &mut self,
+        scope: HistoryScope,
+        detail: Option<PrShow>,
+        error: anyhow::Error,
+    ) {
+        tracing::warn!(error = %error, "history unavailable");
+        self.history = HistoryState {
+            scope,
+            unavailable: true,
+            detail,
+            ..HistoryState::default()
+        };
+        self.view = View::History;
+        self.detail_scroll = 0;
+        self.focus = Focus::Queue;
+        self.status = Some(format!("history unavailable: {error:#}"));
     }
 
     /// Handle a keystroke while a PR is being looked at.
@@ -1260,7 +1957,18 @@ impl App {
                 self.stop_peeking();
                 Ok(())
             }
+            Action::Review if self.view == View::History => {
+                let Some(peek) = self.peek.as_ref() else {
+                    return Ok(());
+                };
+                let (repo, number) = (peek.repo.clone(), peek.show.pr.number);
+                self.overlay = Overlay::Launching { number };
+                self.pending_review = Some((repo, number));
+                Ok(())
+            }
+            Action::ToggleHistoryActivity => Ok(()),
             Action::Jump
+            | Action::History
             | Action::RefreshSelected
             | Action::Review
             | Action::Done
@@ -1347,6 +2055,20 @@ impl App {
     /// The pane under the pointer is what acts, and takes focus with it. A wheel
     /// over the detail that scrolled the queue instead — because the queue
     /// happened to have focus — would be worse than doing nothing.
+    fn dispatch_mouse(&mut self, event: MouseEvent, hooks: &Hooks) -> Result<()> {
+        if self.view == View::History
+            && self.peek.is_none()
+            && self.overlay == Overlay::None
+            && event.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .history_link_area
+                .contains(ratatui::layout::Position::new(event.column, event.row))
+        {
+            return self.open_history_selected(hooks);
+        }
+        self.on_mouse(event)
+    }
+
     pub(crate) fn on_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         // An overlay owns the keyboard, and the mouse with it: the rows are still
         // drawn underneath, so a click on one you cannot see would act on
@@ -1364,10 +2086,14 @@ impl App {
         if !matches!(self.overlay, Overlay::None) {
             return Ok(());
         }
+        let (offset, len) = match self.view {
+            View::PullRequests => (self.queue_scroll, self.queue.len()),
+            View::History => (self.history.scroll, self.history.events.len()),
+        };
         let list = ListRegion {
             area: self.queue_area,
-            offset: self.queue_scroll,
-            len: self.queue.len(),
+            offset,
+            len,
         };
         match mouse::action(mouse, list, self.detail_area) {
             Some(MouseAction::Select(index)) => {
@@ -1375,7 +2101,10 @@ impl App {
                     self.stop_peeking();
                 }
                 self.focus = Focus::Queue;
-                self.move_to(index)
+                match self.view {
+                    View::PullRequests => self.move_to(index),
+                    View::History => self.select_history(index),
+                }
             }
             Some(MouseAction::FocusList) => {
                 if self.peek.is_some() {
@@ -1395,7 +2124,10 @@ impl App {
                     return self.scroll_peek(rows * WHEEL_ROWS);
                 }
                 self.focus = Focus::Queue;
-                self.move_by(rows)
+                match self.view {
+                    View::PullRequests => self.move_by(rows),
+                    View::History => self.move_history(rows),
+                }
             }
             Some(MouseAction::ScrollDetail(rows)) => {
                 if self.peek.is_some() {
@@ -1446,7 +2178,7 @@ impl App {
                             // sight.
                             from_forge: why == Unqueued::Unknown,
                         };
-                        self.pending_peek = Some(number);
+                        self.pending_peek = Some((None, number));
                     }
                     KeyCode::Char('t') if why.trackable() => {
                         self.overlay = Overlay::Fetching { number };
@@ -1755,10 +2487,11 @@ impl App {
         else {
             return Ok(());
         };
-        let deferred = self
-            .detail
-            .as_ref()
-            .is_some_and(|show| show.my_state.deferred_at.is_some());
+        let deferred = self.current().is_some_and(|row| {
+            row.item
+                .my_state
+                .is_deferred(row.item.top.as_ref().map(|top| top.since))
+        });
         reviewq_app::actions::set_deferred(&self.ledger, repo_id, number, !deferred)?;
         self.status = Some(if deferred {
             format!("#{number} undeferred")
@@ -1819,6 +2552,8 @@ impl App {
             }
             Action::ShowMuted => handled(self.toggle_listing(Listing::Muted)),
             Action::ShowWaiting => handled(self.toggle_listing(Listing::Waiting)),
+            Action::History => Ok(Update::Passed(action)),
+            Action::ToggleHistoryActivity => Ok(Update::Handled),
             Action::Down => handled(self.scroll(1)),
             Action::Up => handled(self.scroll(-1)),
             Action::PageDown => handled(self.scroll(page)),
@@ -1881,8 +2616,8 @@ impl App {
     }
 
     /// Read `number` for display, and show it if it could be read.
-    fn show_anyway(&mut self, number: u64, hooks: &Hooks) {
-        let outcome = (hooks.peek)(number);
+    fn show_anyway(&mut self, repo: Option<&RepoKey>, number: u64, hooks: &Hooks) {
+        let outcome = (hooks.peek)(repo, number);
         self.overlay = Overlay::None;
         self.dirty = true;
         match outcome {
@@ -1907,19 +2642,22 @@ impl App {
     }
 
     /// Hand `number` to the review command, then take the terminal back.
-    fn hand_off(&mut self, number: u64, channel: &Channel, hooks: &Hooks) {
-        let outcome = (hooks.review)(number);
+    fn hand_off(&mut self, repo: &RepoKey, number: u64, channel: &Channel, hooks: &Hooks) {
+        let outcome = (hooks.review)(repo, number);
         self.overlay = Overlay::None;
         self.dirty = true;
         // Whatever ran had the terminal, so nothing on screen can be trusted.
         self.repaint = true;
         match outcome {
-            Ok(()) => {
-                self.status = Some(format!("#{number} handed off"));
+            Ok(outcome) => {
+                self.status = Some(match outcome.history_warning {
+                    Some(warning) => format!("#{number} handed off — warning: {warning}"),
+                    None => format!("#{number} handed off"),
+                });
                 // A review is the likeliest thing to have changed the PR, so
                 // fetch it rather than making you press `r`.
-                if self.refreshing.insert(number) {
-                    (hooks.refresh)(number, channel.tx.clone());
+                if self.refreshing.insert((repo.clone(), number)) {
+                    (hooks.refresh)(repo, number, channel.tx.clone());
                 }
             }
             Err(err) => self.status = Some(format!("#{number} review failed: {err:#}")),
@@ -1932,7 +2670,11 @@ impl App {
     fn drain(&mut self, channel: &Channel) {
         while let Ok(message) = channel.rx.try_recv() {
             match message {
-                Message::Refreshed { number, outcome } => self.on_refreshed(number, outcome),
+                Message::Refreshed {
+                    repo,
+                    number,
+                    outcome,
+                } => self.on_refreshed(&repo, number, outcome),
                 // Only while a sync is running: a note that outlived the run it
                 // came from would leave the header describing work that has
                 // already been summarised.
@@ -1980,9 +2722,11 @@ impl App {
 
     /// The PR a refresh should fetch, marking it in flight — `None` when nothing
     /// is selected, or when this PR is already being fetched.
-    fn refresh_target(&mut self) -> Option<u64> {
-        let number = self.current().map(|item| item.item.pr.number)?;
-        self.refreshing.insert(number).then_some(number)
+    fn refresh_target(&mut self) -> Option<(RepoKey, u64)> {
+        let target = self
+            .current()
+            .map(|item| (item.repo.clone(), item.item.pr.number))?;
+        self.refreshing.insert(target.clone()).then_some(target)
     }
 
     /// Take in a finished refresh: report it, and re-read what it changed.
@@ -1990,8 +2734,8 @@ impl App {
     /// A failure becomes the status line rather than ending the session — a bad
     /// token or a dropped connection should not discard the queue you were
     /// reading.
-    fn on_refreshed(&mut self, number: u64, outcome: Result<Refreshed>) {
-        self.refreshing.remove(&number);
+    fn on_refreshed(&mut self, repo: &RepoKey, number: u64, outcome: Result<Refreshed>) {
+        self.refreshing.remove(&(repo.clone(), number));
         self.status = Some(match outcome {
             // What the PR *is* outranks what it wants: a PR that turns out to
             // have been closed or merged since the last sweep wants nothing by
@@ -2086,7 +2830,11 @@ impl App {
     /// Take in a refresh result without a runtime, for tests.
     #[cfg(test)]
     fn deliver(&mut self, number: u64, outcome: Result<Refreshed>) {
-        self.on_refreshed(number, outcome);
+        let repo = self
+            .current()
+            .map(|item| item.repo.clone())
+            .expect("test refresh has a selected PR");
+        self.on_refreshed(&repo, number, outcome);
     }
 
     fn move_to(&mut self, index: usize) -> Result<()> {
@@ -2122,9 +2870,13 @@ impl App {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use diesel::{Connection as _, connection::SimpleConnection as _};
     use jiff::Timestamp;
-    use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot, PrState};
-    use reviewq_ledger::TrackedReason;
+    use reviewq_core::model::{
+        ActivityKind, ActivityPayload, ActivitySource, Attention, AttentionReason, MyState,
+        PrSnapshot, PrState,
+    };
+    use reviewq_ledger::{NewActivityEvent, TrackedReason};
 
     pub(super) fn ts(s: &str) -> Timestamp {
         s.parse().expect("timestamp")
@@ -2281,10 +3033,193 @@ pub(super) mod tests {
         App::with_ledger(Theme::default(), fixture(), test_config()).expect("app")
     }
 
+    fn local_activity(kind: ActivityKind, occurred_at: &str) -> NewActivityEvent {
+        NewActivityEvent {
+            relation: reviewq_core::model::ActivityRelation::Own,
+            source: ActivitySource::Local,
+            kind,
+            occurred_at: ts(occurred_at),
+            recorded_at: ts("2026-08-11T12:00:00Z"),
+            actor: None,
+            head_sha: None,
+            external_id: None,
+            permalink: None,
+            payload: ActivityPayload::None,
+        }
+    }
+
+    #[test]
+    fn a_malformed_activity_preview_keeps_the_starting_detail_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &local_activity(ActivityKind::Done, "2026-08-11T10:00:00Z"),
+            )
+            .expect("activity");
+        diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+            .expect("connection")
+            .batch_execute("UPDATE activity_events SET payload = '{not json}'")
+            .expect("corrupt activity");
+
+        let app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        assert_eq!(
+            app.detail.as_ref().map(|detail| detail.pr.number),
+            Some(70135)
+        );
+        assert!(app.activity_preview.events.is_empty());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|status| status.contains("activity preview unavailable")),
+            "{:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn unavailable_history_keeps_retained_pull_request_detail_navigable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &local_activity(ActivityKind::Done, "2026-08-11T10:00:00Z"),
+            )
+            .expect("activity");
+        diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+            .expect("connection")
+            .batch_execute("UPDATE activity_events SET payload = '{not json}'")
+            .expect("corrupt activity");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        app.open_history_from_list()
+            .expect("history failure stays in the interface");
+
+        assert_eq!(app.view, View::History);
+        assert!(app.history.unavailable);
+        assert_eq!(
+            app.history.detail.as_ref().map(|detail| detail.pr.number),
+            Some(70135)
+        );
+    }
+
+    #[test]
+    fn a_malformed_backfill_preview_does_not_leave_the_previous_prs_activity_visible() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        add_queued(&ledger, repo_id, 70201);
+        ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &local_activity(ActivityKind::Done, "2026-08-11T10:00:00Z"),
+            )
+            .expect("activity");
+        ledger
+            .commit_activity_page(
+                repo_id,
+                70201,
+                None,
+                &[],
+                None,
+                None,
+                ts("2026-08-11T12:00:00Z"),
+            )
+            .expect("backfill");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+            .expect("connection")
+            .batch_execute(
+                "UPDATE activity_sync_state SET next_rate_limit = 'unknown' WHERE pr_number = 70201",
+            )
+            .expect("corrupt backfill");
+
+        let moved = app.update(Action::Down);
+
+        assert!(moved.is_ok(), "{moved:?}");
+        assert_eq!(
+            app.detail.as_ref().map(|detail| detail.pr.number),
+            Some(70201)
+        );
+        assert!(app.activity_preview.events.is_empty());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|status| status.contains("activity preview unavailable")),
+            "{:?}",
+            app.status
+        );
+
+        app.open_history_from_list()
+            .expect("backfill corruption stays in the History view");
+        assert!(app.history.unavailable);
+        assert_eq!(
+            app.history.detail.as_ref().map(|detail| detail.pr.number),
+            Some(70201)
+        );
+    }
+
+    #[test]
+    fn activity_preview_reloads_when_the_selected_detail_changes() {
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        for (number, kind, occurred_at) in [
+            (70135, ActivityKind::Done, "2026-08-11T10:00:00Z"),
+            (70201, ActivityKind::ReviewStarted, "2026-08-11T11:00:00Z"),
+        ] {
+            ledger
+                .record_activity(
+                    repo_id,
+                    number,
+                    &NewActivityEvent {
+                        relation: reviewq_core::model::ActivityRelation::Own,
+                        source: ActivitySource::Local,
+                        kind,
+                        occurred_at: ts(occurred_at),
+                        recorded_at: ts("2026-08-11T12:00:00Z"),
+                        actor: None,
+                        head_sha: None,
+                        external_id: None,
+                        permalink: None,
+                        payload: ActivityPayload::None,
+                    },
+                )
+                .expect("activity");
+        }
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        assert_eq!(
+            app.activity_preview.events.first().map(|event| event.kind),
+            Some(ActivityKind::Done)
+        );
+        let _ = app.update(Action::Down).expect("move");
+        assert_eq!(app.current().map(|row| row.item.pr.number), Some(70201));
+        assert_eq!(
+            app.activity_preview.events.first().map(|event| event.kind),
+            Some(ActivityKind::ReviewStarted)
+        );
+    }
+
     #[test]
     fn a_refresh_is_only_started_once_per_pr() {
         let mut app = app();
-        assert_eq!(app.refresh_target(), Some(70135), "first press starts one");
+        assert_eq!(
+            app.refresh_target()
+                .map(|(repo, number)| (repo.slug(), number)),
+            Some(("apache/airflow".to_string(), 70135)),
+            "first press starts one"
+        );
         assert_eq!(
             app.refresh_target(),
             None,
@@ -2304,7 +3239,7 @@ pub(super) mod tests {
     #[test]
     fn a_finished_refresh_clears_its_in_flight_mark_and_reports() {
         let mut app = app();
-        assert_eq!(app.refresh_target(), Some(70135));
+        assert!(app.refresh_target().is_some());
 
         app.deliver(
             70135,
@@ -2326,7 +3261,7 @@ pub(super) mod tests {
     #[test]
     fn a_failed_refresh_reports_without_ending_the_session() {
         let mut app = app();
-        assert_eq!(app.refresh_target(), Some(70135));
+        assert!(app.refresh_target().is_some());
 
         app.deliver(70135, Err(anyhow::anyhow!("bad credentials")));
 
@@ -2406,7 +3341,7 @@ pub(super) mod tests {
     #[test]
     fn a_pr_the_forge_lost_is_reported_as_such() {
         let mut app = app();
-        assert_eq!(app.refresh_target(), Some(70135));
+        assert!(app.refresh_target().is_some());
         app.deliver(70135, Ok(Refreshed::Gone));
         let status = app.status.clone().expect("a status");
         assert!(status.contains("no longer exists"), "{status}");
@@ -2600,13 +3535,16 @@ mod loop_tests {
     use anyhow::bail;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEventKind};
+    use diesel::{Connection as _, RunQueryDsl as _, connection::SimpleConnection as _};
     use ratatui::backend::TestBackend;
-    use reviewq_core::model::MyState;
+    use reviewq_core::model::{ActivityKind, ActivityPayload, ActivitySource, MyState};
+    use reviewq_ledger::{NewActivityEvent, TrackedReason};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     /// PRs a hook was asked about, shared with the test that reads them.
     type Seen = Arc<Mutex<Vec<u64>>>;
+    type SeenPr = Arc<Mutex<Vec<(RepoKey, u64)>>>;
 
     fn press(code: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE))
@@ -2635,15 +3573,16 @@ mod loop_tests {
         /// Screens handed to the save hook — the SVG itself, not a path, since
         /// nothing here writes one.
         saved: Arc<Mutex<Vec<String>>>,
-        refreshed: Seen,
+        refreshed: SeenPr,
         /// How many full syncs were asked for — a sync names nothing, so a
         /// count is all there is to record.
         synced: Arc<Mutex<usize>>,
         marked: Seen,
-        reviewed: Seen,
+        reviewed: SeenPr,
         fetched: Seen,
         peeked: Seen,
         opened: Seen,
+        opened_links: Arc<Mutex<Vec<String>>>,
         copied: Seen,
     }
 
@@ -2702,6 +3641,7 @@ mod loop_tests {
             fetched: Arc::new(Mutex::new(Vec::new())),
             peeked: Arc::new(Mutex::new(Vec::new())),
             opened: Arc::new(Mutex::new(Vec::new())),
+            opened_links: Arc::new(Mutex::new(Vec::new())),
             copied: Arc::new(Mutex::new(Vec::new())),
         };
         let saved = Arc::clone(&recorded.saved);
@@ -2712,25 +3652,31 @@ mod loop_tests {
         let fetched = Arc::clone(&recorded.fetched);
         let peeked = Arc::clone(&recorded.peeked);
         let opened = Arc::clone(&recorded.opened);
+        let opened_links = Arc::clone(&recorded.opened_links);
         let copied = Arc::clone(&recorded.copied);
         let hooks = Hooks {
             fetch: Box::new(move |number| {
                 fetched.lock().expect("lock").push(number);
                 Ok(())
             }),
-            peek: Box::new(move |number| {
+            peek: Box::new(move |repo, number| {
                 peeked.lock().expect("lock").push(number);
-                Ok(scratch_peek(number))
+                let mut peeked = scratch_peek(number);
+                if let Some(repo) = repo {
+                    peeked.repo = repo.clone();
+                }
+                Ok(peeked)
             }),
             save_screen: Box::new(move |picture| {
                 saved.lock().expect("lock").push(picture);
                 Ok("/tmp/reviewq.svg".to_string())
             }),
             next_event: scripted(script),
-            refresh: Box::new(move |number, tx| {
-                refreshed.lock().expect("lock").push(number);
+            refresh: Box::new(move |repo, number, tx| {
+                refreshed.lock().expect("lock").push((repo.clone(), number));
                 if let Some(answer) = answer.clone() {
                     let _ = tx.send(Message::Refreshed {
+                        repo: repo.clone(),
                         number,
                         outcome: Ok(answer),
                     });
@@ -2740,15 +3686,19 @@ mod loop_tests {
             // see the interface's in-flight state at all.
             sync: Box::new(move |_tx| *synced.lock().expect("lock") += 1),
             mark_read: Box::new(move |number| marked.lock().expect("lock").push(number)),
-            review: Box::new(move |number| {
-                reviewed.lock().expect("lock").push(number);
+            review: Box::new(move |repo, number| {
+                reviewed.lock().expect("lock").push((repo.clone(), number));
                 if review_fails {
                     bail!("wiff not found");
                 }
-                Ok(())
+                Ok(ReviewOutcome::default())
             }),
             open_url: Box::new(move |_repo, number| {
                 opened.lock().expect("lock").push(number);
+                Ok(())
+            }),
+            open_permalink: Box::new(move |url| {
+                opened_links.lock().expect("lock").push(url.to_string());
                 Ok(())
             }),
             copy_url: Box::new(move |_repo, number| {
@@ -2757,6 +3707,50 @@ mod loop_tests {
             }),
         };
         (hooks, recorded)
+    }
+
+    fn record_activity(app: &App, number: u64, occurred_at: &str, external_id: &str) {
+        let repo_id = app.ledger.repos().expect("repos")[0].0;
+        app.ledger
+            .record_activity(
+                repo_id,
+                number,
+                &NewActivityEvent {
+                    relation: reviewq_core::model::ActivityRelation::Own,
+                    source: ActivitySource::Local,
+                    kind: ActivityKind::Done,
+                    occurred_at: ts(occurred_at),
+                    recorded_at: ts("2026-08-12T12:00:00Z"),
+                    actor: None,
+                    head_sha: None,
+                    external_id: Some(external_id.into()),
+                    permalink: None,
+                    payload: ActivityPayload::None,
+                },
+            )
+            .expect("activity");
+    }
+
+    fn record_permalink_activity(app: &App, permalink: &str) {
+        let repo_id = app.ledger.repos().expect("repos")[0].0;
+        app.ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &NewActivityEvent {
+                    relation: reviewq_core::model::ActivityRelation::Own,
+                    source: ActivitySource::Forge,
+                    kind: ActivityKind::Commented,
+                    occurred_at: ts("2026-08-12T08:00:00Z"),
+                    recorded_at: ts("2026-08-12T12:00:00Z"),
+                    actor: Some("ashb".into()),
+                    head_sha: None,
+                    external_id: Some("comment-link".into()),
+                    permalink: Some(permalink.into()),
+                    payload: ActivityPayload::None,
+                },
+            )
+            .expect("activity");
     }
 
     /// A `TestBackend` that counts how many times it was drawn to.
@@ -2951,7 +3945,16 @@ mod loop_tests {
 
         drive(&mut app, &hooks);
 
-        assert_eq!(*recorded.refreshed.lock().expect("lock"), vec![70135]);
+        assert_eq!(
+            recorded
+                .refreshed
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(repo, number)| (repo.slug(), *number))
+                .collect::<Vec<_>>(),
+            vec![("apache/airflow".to_string(), 70135)]
+        );
         assert!(app.refreshing.is_empty(), "the result cleared the mark");
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 refreshed"), "{status}");
@@ -3171,6 +4174,27 @@ mod loop_tests {
     }
 
     #[test]
+    fn f_renews_an_expired_defer_in_one_press() {
+        let mut app = app();
+        let row = app.current().unwrap();
+        let (repo_id, number) = (row.repo_id, row.item.pr.number);
+        app.ledger
+            .set_deferred_at(repo_id, number, Some(ts("2026-01-01T00:00:00Z")))
+            .unwrap();
+        app.reload().unwrap();
+        assert!(!app.current().unwrap().item.deferred);
+        let (hooks, _) = fake_hooks(vec![press('f'), press('q')], None, false);
+
+        drive(&mut app, &hooks);
+
+        assert!(app.current().unwrap().item.deferred);
+        assert_eq!(
+            app.ledger.activity_preview(repo_id, number, 1).unwrap()[0].kind,
+            ActivityKind::Deferred
+        );
+    }
+
+    #[test]
     fn an_action_on_an_empty_queue_does_nothing() {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
@@ -3267,11 +4291,12 @@ mod loop_tests {
             ]),
             // The real refresh: a submitted review leaves the PR wanting
             // nothing, so its attention goes.
-            refresh: Box::new(move |number, tx| {
+            refresh: Box::new(move |repo, number, tx| {
                 let other = Ledger::open(&write_path).expect("second connection");
                 let repo_id = other.repos().expect("repos")[0].0;
                 other.clear_attention(repo_id, number).expect("cleared");
                 let _ = tx.send(Message::Refreshed {
+                    repo: repo.clone(),
                     number,
                     outcome: Ok(Refreshed::Updated {
                         state: PrState::Open,
@@ -3283,12 +4308,13 @@ mod loop_tests {
                 });
             }),
             fetch: Box::new(|_| Ok(())),
-            peek: Box::new(|number| Ok(scratch_peek(number))),
+            peek: Box::new(|_, number| Ok(scratch_peek(number))),
             save_screen: Box::new(|_| Ok(String::new())),
             sync: Box::new(|_| {}),
             mark_read: Box::new(|_| {}),
-            review: Box::new(|_| Ok(())),
+            review: Box::new(|_, _| Ok(ReviewOutcome::default())),
             open_url: Box::new(|_, _| Ok(())),
+            open_permalink: Box::new(|_| Ok(())),
             copy_url: Box::new(|_, _| Ok(())),
         };
 
@@ -3891,13 +4917,14 @@ mod loop_tests {
                 add_queued(&other, repo_id, number);
                 Ok(())
             }),
-            peek: Box::new(|number| Ok(scratch_peek(number))),
+            peek: Box::new(|_, number| Ok(scratch_peek(number))),
             save_screen: Box::new(|_| Ok(String::new())),
-            refresh: Box::new(|_, _| {}),
+            refresh: Box::new(|_, _, _| {}),
             sync: Box::new(|_| {}),
             mark_read: Box::new(|_| {}),
-            review: Box::new(|_| Ok(())),
+            review: Box::new(|_, _| Ok(ReviewOutcome::default())),
             open_url: Box::new(|_, _| Ok(())),
+            open_permalink: Box::new(|_| Ok(())),
             copy_url: Box::new(|_, _| Ok(())),
         };
 
@@ -4092,7 +5119,7 @@ mod loop_tests {
             false,
         );
         let hooks = Hooks {
-            peek: Box::new(|_| bail!("no such pull request")),
+            peek: Box::new(|_, _| bail!("no such pull request")),
             ..hooks
         };
 
@@ -4213,15 +5240,62 @@ mod loop_tests {
 
         drive(&mut app, &hooks);
 
-        assert_eq!(*recorded.reviewed.lock().expect("lock"), vec![70135]);
         assert_eq!(
-            *recorded.refreshed.lock().expect("lock"),
-            vec![70135],
+            recorded
+                .reviewed
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(_, number)| *number)
+                .collect::<Vec<_>>(),
+            vec![70135]
+        );
+        assert_eq!(
+            recorded
+                .refreshed
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(repo, number)| (repo.slug(), *number))
+                .collect::<Vec<_>>(),
+            vec![("apache/airflow".to_string(), 70135)],
             "a review is the likeliest thing to have changed it, so it's fetched"
         );
         assert_eq!(app.overlay, Overlay::None, "the notice is taken down again");
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 refreshed"), "{status}");
+    }
+
+    #[test]
+    fn a_history_warning_after_handoff_is_shown_without_skipping_refresh() {
+        let mut app = app();
+        let (mut hooks, recorded) =
+            fake_hooks(vec![special(KeyCode::Enter), press('q')], None, false);
+        hooks.review = Box::new(|_, _| {
+            Ok(ReviewOutcome {
+                history_warning: Some("history is read-only".into()),
+            })
+        });
+
+        drive(&mut app, &hooks);
+
+        assert_eq!(
+            recorded
+                .refreshed
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(repo, number)| (repo.slug(), *number))
+                .collect::<Vec<_>>(),
+            vec![("apache/airflow".to_string(), 70135)],
+            "recording history is independent from refreshing the reviewed PR"
+        );
+        let status = app.status.clone().expect("a status");
+        assert!(status.contains("history is read-only"), "{status}");
+        assert!(
+            app.repaint || app.quit,
+            "the reclaimed terminal is repainted"
+        );
     }
 
     #[test]
@@ -4236,7 +5310,12 @@ mod loop_tests {
         feed(&mut app, &hooks, &[KeyCode::Enter]);
 
         assert_eq!(app.overlay, Overlay::Launching { number: 70135 });
-        assert_eq!(app.pending_review, Some(70135));
+        assert_eq!(
+            app.pending_review
+                .as_ref()
+                .map(|(repo, number)| (repo.slug(), *number)),
+            Some(("apache/airflow".to_string(), 70135))
+        );
         assert!(
             recorded.reviewed.lock().expect("lock").is_empty(),
             "nothing has been handed off yet — the loop does that after drawing"
@@ -4250,7 +5329,16 @@ mod loop_tests {
 
         drive(&mut app, &hooks);
 
-        assert_eq!(*recorded.reviewed.lock().expect("lock"), vec![70135]);
+        assert_eq!(
+            recorded
+                .reviewed
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(_, number)| *number)
+                .collect::<Vec<_>>(),
+            vec![70135]
+        );
         assert!(
             recorded.refreshed.lock().expect("lock").is_empty(),
             "a failed handoff has nothing to refresh"
@@ -4315,6 +5403,989 @@ mod loop_tests {
         assert_eq!(*recorded.opened.lock().expect("lock"), vec![70135]);
         let status = app.status.clone().expect("a status");
         assert!(status.contains("#70135 opened"), "{status}");
+    }
+
+    #[test]
+    fn per_pr_all_activity_resets_pages_and_survives_global_navigation() {
+        let mut app = app();
+        let repo_id = app.ledger.repos().unwrap()[0].0;
+        for hour in 1..=5 {
+            app.ledger
+                .record_activity(
+                    repo_id,
+                    70135,
+                    &NewActivityEvent {
+                        relation: if hour == 1 {
+                            reviewq_core::model::ActivityRelation::Own
+                        } else {
+                            reviewq_core::model::ActivityRelation::Context
+                        },
+                        source: ActivitySource::Forge,
+                        kind: ActivityKind::Commented,
+                        occurred_at: ts(&format!("2026-08-12T{hour:02}:00:00Z")),
+                        recorded_at: ts("2026-08-12T09:00:00Z"),
+                        actor: Some("other".into()),
+                        head_sha: None,
+                        external_id: Some(format!("context-{hour}")),
+                        permalink: None,
+                        payload: ActivityPayload::None,
+                    },
+                )
+                .unwrap();
+        }
+        app.history_page_size = 2;
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        assert_eq!(app.history.events.len(), 1);
+        assert!(!app.history.all_activity);
+        feed(&mut app, &hooks, &[KeyCode::Char('a')]);
+        assert!(app.history.all_activity);
+        assert_eq!(app.history.events.len(), 2);
+        assert!(app.history.next.is_some());
+        feed(&mut app, &hooks, &[KeyCode::Char('j')]);
+        let selected = app.history.events[app.history.selected].id;
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Char('a')]);
+        assert!(!app.history.all_activity);
+        assert_eq!(app.history.events.len(), 1);
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert!(app.history.all_activity);
+        assert_eq!(app.history.events[app.history.selected].id, selected);
+        feed(&mut app, &hooks, &[KeyCode::Char('a')]);
+        assert!(!app.history.all_activity);
+        assert_eq!(app.history.events.len(), 1);
+        assert_eq!(app.history.selected, 0);
+        assert!(app.history.next.is_none());
+    }
+
+    #[test]
+    fn history_mouse_selects_and_scrolls_history_without_moving_the_pr_queue() {
+        let mut app = app();
+        app.history_page_size = 2;
+        for (id, hour) in [("one", 1), ("two", 2), ("three", 3)] {
+            record_activity(&app, 70135, &format!("2026-08-12T{hour:02}:00:00Z"), id);
+        }
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 22)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let area = app.queue_area;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(app.history.selected, 1);
+        assert_eq!(app.history.events.len(), 3);
+        assert_eq!(app.selected, 0);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(app.history.selected, 2);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert_eq!(app.history.selected, 1);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn help_opens_and_closes_without_losing_history_scope_or_selection() {
+        let mut app = crate::fixture::app_with_activity(crate::theme::Mode::Dark, false);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 22)).expect("terminal");
+
+        for _ in 0..2 {
+            feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Char('j')]);
+            let scope = app.history.scope.clone();
+            let selected = app.history.selected;
+            feed(&mut app, &hooks, &[KeyCode::Char('?')]);
+            assert_eq!(app.overlay, Overlay::Help { scroll: 0 });
+            terminal
+                .draw(|frame| ui::draw(frame, &mut app))
+                .expect("draw help");
+            assert!(
+                screen(&terminal).contains("Reference"),
+                "{}",
+                screen(&terminal)
+            );
+            feed(&mut app, &hooks, &[KeyCode::Esc]);
+            assert_eq!(app.overlay, Overlay::None);
+            assert_eq!(app.view, View::History);
+            assert_eq!(app.history.scope, scope);
+            assert_eq!(app.history.selected, selected);
+        }
+    }
+
+    #[test]
+    fn h_moves_between_pull_request_and_global_history() {
+        let mut app = crate::fixture::app_with_activity(crate::theme::Mode::Dark, false);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 22)).expect("terminal");
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .expect("draw pull request history");
+        assert!(
+            screen(&terminal).contains("History · apache/airflow#70135"),
+            "{}",
+            screen(&terminal)
+        );
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .expect("draw global history");
+        assert!(
+            screen(&terminal).contains("History · all"),
+            "{}",
+            screen(&terminal)
+        );
+    }
+
+    #[test]
+    fn history_navigation_moves_rows_and_global_h_returns_to_the_event_pr() {
+        let mut app = app();
+        record_activity(&app, 70135, "2026-08-12T05:00:00Z", "event-one");
+        record_activity(&app, 70135, "2026-08-12T06:00:00Z", "event-two");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        assert_eq!(app.history.selected, 0);
+        feed(&mut app, &hooks, &[KeyCode::Char('j')]);
+        assert_eq!(app.history.selected, 1);
+        feed(&mut app, &hooks, &[KeyCode::Char('k')]);
+        assert_eq!(app.history.selected, 0);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Char('H')]);
+        assert!(matches!(
+            app.history.scope,
+            HistoryScope::Pr { number: 70135, .. }
+        ));
+    }
+
+    #[test]
+    fn h_on_an_empty_pull_request_list_opens_global_history() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+
+        assert_eq!(app.view, View::History);
+        assert_eq!(app.history.scope, HistoryScope::All);
+    }
+
+    #[test]
+    fn o_in_history_falls_back_to_the_pull_request_url() {
+        let mut app = app();
+        record_activity(&app, 70135, "2026-08-12T05:00:00Z", "event-one");
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Char('o')]);
+
+        assert_eq!(*recorded.opened.lock().expect("lock"), vec![70135]);
+    }
+
+    #[test]
+    fn clicking_the_rendered_event_permalink_opens_it() {
+        let mut app = app();
+        let url = "https://github.com/apache/airflow/pull/70135#issuecomment-9";
+        record_permalink_activity(&app, url);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 22)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let output = screen(&terminal);
+        let (row, line) = output
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("event permalink"))
+            .unwrap();
+        let column = line[..line.find("event permalink").unwrap()]
+            .chars()
+            .count();
+        let (hooks, recorded) = fake_hooks(
+            vec![click(column as u16, row as u16), press('q')],
+            None,
+            false,
+        );
+
+        app.run(&mut terminal, &mut Channel::new(), &hooks).unwrap();
+
+        assert_eq!(*recorded.opened_links.lock().unwrap(), [url]);
+    }
+
+    #[test]
+    fn history_link_hit_target_follows_wrapping_and_scroll_and_respects_overlays() {
+        let mut app = app();
+        let url = "https://github.com/apache/airflow/pull/70135#issuecomment-9";
+        record_permalink_activity(&app, url);
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let before = screen(&terminal);
+        for _ in 0..6 {
+            if screen(&terminal).contains("permalink") {
+                break;
+            }
+            let area = app.detail_area;
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            .unwrap();
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        }
+        assert!(app.detail_scroll > 0);
+        let output = screen(&terminal);
+        assert_ne!(output, before);
+        let (row, line) = output
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("permalink"))
+            .unwrap();
+        let column = line[..line.find("permalink").unwrap()].chars().count();
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: column as u16,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.overlay = Overlay::Help { scroll: 0 };
+        app.dispatch_mouse(event, &hooks).unwrap();
+        assert!(recorded.opened_links.lock().unwrap().is_empty());
+        app.overlay = Overlay::None;
+        app.dispatch_mouse(event, &hooks).unwrap();
+        assert_eq!(*recorded.opened_links.lock().unwrap(), [url]);
+    }
+
+    #[test]
+    fn o_in_history_prefers_the_events_permalink() {
+        let mut app = app();
+        record_permalink_activity(
+            &app,
+            "https://github.com/apache/airflow/pull/70135#issuecomment-9",
+        );
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Char('o')]);
+
+        assert!(recorded.opened.lock().expect("lock").is_empty());
+        assert_eq!(
+            *recorded.opened_links.lock().expect("lock"),
+            vec!["https://github.com/apache/airflow/pull/70135#issuecomment-9"]
+        );
+        assert_eq!(app.status.as_deref(), Some("event link opened"));
+    }
+
+    #[test]
+    fn enter_shows_a_stored_history_pr_and_escape_restores_the_exact_event() {
+        let mut app = crate::fixture::app_with_activity(crate::theme::Mode::Dark, false);
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+        feed(
+            &mut app,
+            &hooks,
+            &[KeyCode::Char('H'), KeyCode::Char('j'), KeyCode::Enter],
+        );
+
+        assert_eq!(
+            app.peek.as_ref().map(|peek| peek.show.pr.number),
+            Some(70135)
+        );
+        assert!(
+            recorded.peeked.lock().expect("lock").is_empty(),
+            "stored detail should not require a forge-backed peek"
+        );
+
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert!(app.peek.is_none());
+        assert_eq!(app.view, View::History);
+        assert_eq!(app.history.selected, 1);
+    }
+
+    #[test]
+    fn global_history_peeks_the_exact_repo_when_pr_numbers_overlap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        seed(&ledger);
+        let other = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "arrow".into(),
+        };
+        let repo_id = ledger.ensure_repo(&other).expect("second repo");
+        ledger
+            .upsert_pr(repo_id, &pr_snapshot(70135), None)
+            .expect("retained duplicate number");
+        ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &NewActivityEvent {
+                    relation: reviewq_core::model::ActivityRelation::Own,
+                    source: ActivitySource::Local,
+                    kind: ActivityKind::ReviewStarted,
+                    occurred_at: ts("2026-08-12T09:00:00Z"),
+                    recorded_at: ts("2026-08-12T09:00:00Z"),
+                    actor: None,
+                    head_sha: None,
+                    external_id: Some("arrow-70135".into()),
+                    permalink: None,
+                    payload: ActivityPayload::None,
+                },
+            )
+            .expect("activity");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        diesel::sql_query(
+            "UPDATE prs SET labels = '{not json}' WHERE repo_id = ? AND number = 70135",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(repo_id)
+        .execute(
+            &mut diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+                .expect("connection"),
+        )
+        .expect("make the retained detail require a peek");
+        app.load_history(HistoryScope::All).expect("global history");
+        app.history.selected = app
+            .history
+            .events
+            .iter()
+            .position(|event| event.repo == other)
+            .expect("second repo event");
+        app.load_history_detail().expect("detail");
+        let selected = app.history.selected;
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Enter]);
+
+        assert_eq!(app.peek.as_ref().map(|peek| &peek.repo), Some(&other));
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert!(app.peek.is_none());
+        assert_eq!(app.view, View::History);
+        assert_eq!(app.history.selected, selected);
+        assert_eq!(app.history.events[selected].repo, other);
+
+        feed(&mut app, &hooks, &[KeyCode::Enter, KeyCode::Enter]);
+        assert_eq!(
+            app.pending_review
+                .as_ref()
+                .map(|(repo, number)| (repo.clone(), *number)),
+            Some((other, 70135))
+        );
+    }
+
+    #[test]
+    fn a_pr_shown_from_history_replaces_event_metadata_with_normal_pr_detail() {
+        let mut app = crate::fixture::app_with_activity(crate::theme::Mode::Dark, false);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Enter]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .expect("draw shown pull request");
+        let shown = screen(&terminal);
+
+        assert!(!shown.contains("Event metadata"), "{shown}");
+        assert!(shown.contains("Attention"), "{shown}");
+        assert!(shown.contains("Deferrable mode for S3KeySensor"), "{shown}");
+    }
+
+    #[test]
+    fn enter_on_a_pr_shown_from_history_keeps_the_review_handoff() {
+        let mut app = crate::fixture::app_with_activity(crate::theme::Mode::Dark, false);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(
+            &mut app,
+            &hooks,
+            &[KeyCode::Char('H'), KeyCode::Enter, KeyCode::Enter],
+        );
+
+        assert_eq!(app.overlay, Overlay::Launching { number: 70135 });
+        assert_eq!(
+            app.pending_review
+                .as_ref()
+                .map(|(repo, number)| (repo.slug(), *number)),
+            Some(("apache/airflow".to_string(), 70135))
+        );
+    }
+
+    #[test]
+    fn enter_hands_off_a_scratch_pr_shown_from_history() {
+        let mut app = app();
+        let mut shown = scratch_peek(70135);
+        shown.repo = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "arrow".into(),
+        };
+        app.view = View::History;
+        app.peek = Some(shown);
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Enter]);
+
+        assert_eq!(app.overlay, Overlay::Launching { number: 70135 });
+        assert_eq!(
+            app.pending_review
+                .as_ref()
+                .map(|(repo, number)| (repo.slug(), *number)),
+            Some(("apache/arrow".to_string(), 70135))
+        );
+    }
+
+    #[test]
+    fn history_handoff_keeps_the_exact_repo_when_pr_numbers_overlap() {
+        let mut app = app();
+        let other = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "arrow".into(),
+        };
+        let mut shown = scratch_peek(70135);
+        shown.repo = other.clone();
+        app.view = View::History;
+        app.peek = Some(shown);
+        let (hooks, recorded) = fake_hooks(vec![special(KeyCode::Enter), press('q')], None, false);
+
+        drive(&mut app, &hooks);
+
+        assert_eq!(
+            *recorded.reviewed.lock().expect("lock"),
+            vec![(other.clone(), 70135)]
+        );
+        assert_eq!(
+            *recorded.refreshed.lock().expect("lock"),
+            vec![(other, 70135)]
+        );
+    }
+
+    #[test]
+    fn post_handoff_refreshes_with_the_same_number_are_distinct_per_repo() {
+        let mut app = app();
+        let airflow = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "airflow".into(),
+        };
+        let arrow = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "arrow".into(),
+        };
+        let (hooks, recorded) = fake_hooks(vec![], None, false);
+        let channel = Channel::new();
+
+        app.hand_off(&airflow, 70135, &channel, &hooks);
+        app.hand_off(&arrow, 70135, &channel, &hooks);
+
+        assert_eq!(
+            recorded
+                .refreshed
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(repo, number)| (repo.slug(), *number))
+                .collect::<Vec<_>>(),
+            vec![
+                ("apache/airflow".to_string(), 70135),
+                ("apache/arrow".to_string(), 70135),
+            ]
+        );
+    }
+
+    #[test]
+    fn enter_opens_retained_pr_detail_when_event_rows_are_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &NewActivityEvent {
+                    relation: reviewq_core::model::ActivityRelation::Own,
+                    source: ActivitySource::Local,
+                    kind: ActivityKind::Done,
+                    occurred_at: ts("2026-08-12T08:00:00Z"),
+                    recorded_at: ts("2026-08-12T12:00:00Z"),
+                    actor: None,
+                    head_sha: None,
+                    external_id: None,
+                    permalink: None,
+                    payload: ActivityPayload::None,
+                },
+            )
+            .expect("activity");
+        diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+            .expect("connection")
+            .batch_execute("UPDATE activity_events SET payload = '{not json}'")
+            .expect("corrupt activity");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Enter]);
+
+        assert_eq!(
+            app.peek.as_ref().map(|peek| peek.show.pr.number),
+            Some(70135)
+        );
+    }
+
+    #[test]
+    fn malformed_retained_pr_detail_does_not_discard_usable_event_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        ledger
+            .record_activity(
+                repo_id,
+                70135,
+                &NewActivityEvent {
+                    relation: reviewq_core::model::ActivityRelation::Own,
+                    source: ActivitySource::Local,
+                    kind: ActivityKind::Done,
+                    occurred_at: ts("2026-08-12T09:00:00Z"),
+                    recorded_at: ts("2026-08-12T09:00:00Z"),
+                    actor: None,
+                    head_sha: None,
+                    external_id: Some("retained-with-bad-detail".into()),
+                    permalink: None,
+                    payload: ActivityPayload::None,
+                },
+            )
+            .expect("activity");
+        reviewq_app::actions::untrack(&ledger, repo_id, 70135).expect("untrack");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        diesel::sql_query(
+            "UPDATE prs SET labels = '{not json}' WHERE repo_id = ? AND number = 70135",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(repo_id)
+        .execute(
+            &mut diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+                .expect("connection"),
+        )
+        .expect("corrupt retained detail");
+
+        let loaded = app.load_history(HistoryScope::All);
+
+        assert!(loaded.is_ok(), "{loaded:?}");
+        assert_eq!(app.view, View::History);
+        assert!(
+            app.history
+                .events
+                .iter()
+                .any(|event| { event.external_id.as_deref() == Some("retained-with-bad-detail") }),
+            "the readable event remains available"
+        );
+        assert!(app.history.detail.is_none());
+        assert!(app.history.detail_error.is_some());
+    }
+
+    #[test]
+    fn moving_from_unreadable_retained_detail_clears_its_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        let repo_id = seed(&ledger);
+        add_queued(&ledger, repo_id, 70201);
+        for (number, occurred_at, external_id) in [
+            (70201, "2026-08-12T10:00:00Z", "bad-detail"),
+            (70135, "2026-08-12T09:00:00Z", "healthy-detail"),
+        ] {
+            ledger
+                .record_activity(
+                    repo_id,
+                    number,
+                    &NewActivityEvent {
+                        relation: reviewq_core::model::ActivityRelation::Own,
+                        source: ActivitySource::Local,
+                        kind: ActivityKind::Done,
+                        occurred_at: ts(occurred_at),
+                        recorded_at: ts(occurred_at),
+                        actor: None,
+                        head_sha: None,
+                        external_id: Some(external_id.into()),
+                        permalink: None,
+                        payload: ActivityPayload::None,
+                    },
+                )
+                .expect("activity");
+        }
+        reviewq_app::actions::untrack(&ledger, repo_id, 70201).expect("untrack malformed PR");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        diesel::sql_query(
+            "UPDATE prs SET labels = '{not json}' WHERE repo_id = ? AND number = 70201",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(repo_id)
+        .execute(
+            &mut diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+                .expect("connection"),
+        )
+        .expect("corrupt retained detail");
+        app.load_history(HistoryScope::All).expect("history");
+        let unreadable = app
+            .history
+            .events
+            .iter()
+            .position(|event| event.external_id.as_deref() == Some("bad-detail"))
+            .expect("unreadable event");
+        let healthy = app
+            .history
+            .events
+            .iter()
+            .position(|event| event.external_id.as_deref() == Some("healthy-detail"))
+            .expect("healthy event");
+        app.history.selected = unreadable;
+        app.load_history_detail()
+            .expect("unreadable detail is nonfatal");
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|status| status.contains("unavailable"))
+        );
+
+        app.move_history(healthy as isize - unreadable as isize)
+            .expect("move to healthy event");
+
+        assert_eq!(
+            app.history.detail.as_ref().map(|detail| detail.pr.number),
+            Some(70135)
+        );
+        assert!(!app.history.unavailable);
+        assert!(app.status.is_none(), "stale status: {:?}", app.status);
+    }
+
+    #[test]
+    fn retained_untracked_closed_and_merged_prs_stay_navigable() {
+        for state in [PrState::Closed, PrState::Merged] {
+            let ledger = two_queued();
+            let repo_id = ledger.repos().expect("repos")[0].0;
+            let mut archived = pr_snapshot(70201);
+            archived.state = state;
+            archived.updated_at = ts("2026-08-12T07:00:00Z");
+            archived.state_changed_at = Some(ts("2026-08-12T07:00:00Z"));
+            ledger
+                .upsert_pr(
+                    repo_id,
+                    &archived,
+                    Some(TrackedReason::Interest {
+                        rule: "label x".into(),
+                        after_merge: false,
+                    }),
+                )
+                .expect("archive");
+            reviewq_app::actions::untrack(&ledger, repo_id, 70201).expect("untrack");
+            let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+            app.load_history(HistoryScope::All).expect("global history");
+            app.history.selected = app
+                .history
+                .events
+                .iter()
+                .position(|event| event.pr_number == 70201)
+                .expect("retained event");
+            app.load_history_detail().expect("retained detail");
+            let (hooks, _) = fake_hooks(vec![], None, false);
+
+            feed(&mut app, &hooks, &[KeyCode::Enter]);
+
+            let shown = app.peek.as_ref().expect("shown from history");
+            assert_eq!(shown.show.pr.state, state);
+            assert_eq!(shown.show.tracked_reason, None);
+        }
+    }
+
+    #[test]
+    fn escape_unwinds_each_history_scope_to_the_exact_list_selection() {
+        let ledger = two_queued();
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        record_activity(&app, 70135, "2026-08-12T05:00:00Z", "event-one");
+        record_activity(&app, 70201, "2026-08-12T06:00:00Z", "event-two");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(
+            &mut app,
+            &hooks,
+            &[
+                KeyCode::Char('j'),
+                KeyCode::Char('H'),
+                KeyCode::Char('H'),
+                KeyCode::Char('j'),
+                KeyCode::Char('H'),
+            ],
+        );
+
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert_eq!(app.history.scope, HistoryScope::All);
+        assert_eq!(app.history.selected, 1);
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert!(matches!(
+            app.history.scope,
+            HistoryScope::Pr { number: 70201, .. }
+        ));
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+        assert_eq!(app.view, View::PullRequests);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.current().map(|row| row.item.pr.number), Some(70201));
+    }
+
+    #[test]
+    fn escape_restores_the_same_pr_after_a_hidden_reload_reorders_the_queue() {
+        let ledger = two_queued();
+        let repo_id = ledger.repos().expect("repos")[0].0;
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('j'), KeyCode::Char('H')]);
+        assert_eq!(app.current().map(|row| row.item.pr.number), Some(70201));
+
+        app.ledger
+            .commit_detail(
+                repo_id,
+                70201,
+                &MyState::default(),
+                &[],
+                &[],
+                &[reviewq_core::model::Attention {
+                    reason: reviewq_core::model::AttentionReason::Mention {
+                        by: "priority-bot".into(),
+                    },
+                    since: ts("2026-08-11T07:00:00Z"),
+                }],
+                None,
+                ts("2026-08-11T13:00:00Z"),
+            )
+            .expect("reprioritise")
+            .expect_applied();
+        app.on_synced(Ok(vec![]));
+        assert_eq!(app.current().map(|row| row.item.pr.number), Some(70201));
+        assert_eq!(app.selected, 0, "the hidden queue really reordered");
+
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+
+        assert_eq!(app.view, View::PullRequests);
+        assert_eq!(app.current().map(|row| row.item.pr.number), Some(70201));
+    }
+
+    #[test]
+    fn history_uses_a_stable_cursor_when_new_activity_arrives_between_pages() {
+        let mut app = app();
+        app.history_page_size = 2;
+        for (suffix, hour) in [
+            ("one", 1),
+            ("two", 2),
+            ("three", 3),
+            ("four", 4),
+            ("five", 5),
+        ] {
+            record_activity(
+                &app,
+                70135,
+                &format!("2026-08-12T{hour:02}:00:00Z"),
+                &format!("event-{suffix}"),
+            );
+        }
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        assert_eq!(app.history.events.len(), 2, "the first page is bounded");
+        record_activity(&app, 70135, "2026-08-12T06:00:00Z", "event-new");
+
+        feed(&mut app, &hooks, &[KeyCode::Char('j')]);
+        assert_eq!(app.history.selected, 1, "appending preserves selection");
+        assert_eq!(app.history.events.len(), 4, "one next page was loaded");
+        while app.history.next.is_some() {
+            feed(&mut app, &hooks, &[KeyCode::Char('j')]);
+        }
+        let ids: Vec<&str> = app
+            .history
+            .events
+            .iter()
+            .map(|event| event.external_id.as_deref().expect("external id"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "event-five",
+                "event-four",
+                "event-three",
+                "event-two",
+                "event-one"
+            ]
+        );
+        let final_len = app.history.events.len();
+        feed(&mut app, &hooks, &[KeyCode::Char('j'), KeyCode::Char('j')]);
+        assert_eq!(
+            app.history.events.len(),
+            final_len,
+            "the final cursor stops reads"
+        );
+    }
+
+    #[test]
+    fn sync_completion_refreshes_history_and_preserves_selection_across_pages() {
+        for failed in [false, true] {
+            let mut app = app();
+            app.history_page_size = 1;
+            record_activity(&app, 70135, "2026-08-12T05:00:00Z", "old");
+            let (hooks, _) = fake_hooks(vec![], None, false);
+            feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+            let held = app.history.events[0].id;
+            record_activity(&app, 70135, "2026-08-12T06:00:00Z", "new");
+            let repo_id = app.history.events[0].repo_id;
+            app.ledger
+                .commit_activity_page(
+                    repo_id,
+                    70135,
+                    None,
+                    &[],
+                    None,
+                    None,
+                    ts("2026-08-12T07:00:00Z"),
+                )
+                .unwrap();
+
+            app.on_synced(if failed {
+                Err(anyhow::anyhow!("sync interrupted"))
+            } else {
+                Ok(vec![])
+            });
+
+            assert_eq!(app.history.events[0].external_id.as_deref(), Some("new"));
+            assert_eq!(app.history.events[app.history.selected].id, held);
+            assert!(!app.history.backfill_incomplete);
+            assert!(app.status.is_some());
+            if failed {
+                assert!(app.status.as_ref().unwrap().contains("sync interrupted"));
+            }
+        }
+    }
+
+    #[test]
+    fn returning_to_a_history_scope_refreshes_its_cached_events() {
+        let mut app = app();
+        record_activity(&app, 70135, "2026-08-12T05:00:00Z", "old");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H'), KeyCode::Char('H')]);
+        record_activity(&app, 70135, "2026-08-12T06:00:00Z", "new");
+
+        feed(&mut app, &hooks, &[KeyCode::Esc]);
+
+        assert_eq!(app.history.events[0].external_id.as_deref(), Some("new"));
+        assert_eq!(
+            app.history.events[app.history.selected]
+                .external_id
+                .as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
+    fn targeted_refresh_updates_history_when_the_selected_event_was_cleaned_up() {
+        let mut app = app();
+        app.history_page_size = 1;
+        record_activity(&app, 70135, "2026-08-12T05:00:00Z", "old");
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        let repo = app.history.events[0].repo.clone();
+        record_activity(&app, 70135, "2026-08-12T06:00:00Z", "new");
+        app.ledger
+            .clean_activity(ts("2026-08-12T06:00:00Z"))
+            .unwrap();
+
+        app.on_refreshed(&repo, 70135, Err(anyhow::anyhow!("refresh interrupted")));
+
+        assert_eq!(app.history.events.len(), 1);
+        assert_eq!(app.history.selected, 0);
+        assert_eq!(app.history.events[0].external_id.as_deref(), Some("new"));
+        assert!(app.status.as_ref().unwrap().contains("refresh interrupted"));
+
+        app.ledger
+            .clean_activity(ts("2026-08-12T07:00:00Z"))
+            .unwrap();
+        app.on_synced(Ok(vec![]));
+        assert!(app.history.events.is_empty());
+        assert_eq!(app.history.selected, 0);
+        assert_eq!(app.history.scroll, 0);
+    }
+
+    #[test]
+    fn a_failed_next_history_page_keeps_the_loaded_rows_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewq.db");
+        let ledger = Ledger::open(&path).expect("ledger");
+        seed(&ledger);
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        app.history_page_size = 2;
+        for (suffix, hour) in [("one", 1), ("two", 2), ("three", 3)] {
+            record_activity(
+                &app,
+                70135,
+                &format!("2026-08-12T{hour:02}:00:00Z"),
+                &format!("failed-page-{suffix}"),
+            );
+        }
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(&mut app, &hooks, &[KeyCode::Char('H')]);
+        diesel::SqliteConnection::establish(path.to_str().expect("database path"))
+            .expect("connection")
+            .batch_execute(
+                "UPDATE activity_events SET payload = '{not json}' WHERE external_id = 'failed-page-one'",
+            )
+            .expect("corrupt older page");
+        let channel = Channel::new();
+
+        let moved = app.dispatch(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &channel,
+            &hooks,
+        );
+
+        assert!(moved.is_ok(), "{moved:?}");
+        assert!(app.history.unavailable);
+        assert_eq!(app.history.events.len(), 2);
+        assert_eq!(app.history.selected, 1);
+        assert!(
+            app.history.next.is_none(),
+            "a failed cursor is not retried on every key"
+        );
+    }
+
+    #[test]
+    fn history_scroll_follows_selection_without_moving_it_when_rows_append() {
+        let mut app = app();
+        app.set_page(2);
+        for (suffix, hour) in [("one", 1), ("two", 2), ("three", 3), ("four", 4)] {
+            record_activity(
+                &app,
+                70135,
+                &format!("2026-08-12T{hour:02}:00:00Z"),
+                &format!("scroll-{suffix}"),
+            );
+        }
+        let (hooks, _) = fake_hooks(vec![], None, false);
+        feed(
+            &mut app,
+            &hooks,
+            &[KeyCode::Char('H'), KeyCode::Char('j'), KeyCode::Char('j')],
+        );
+
+        assert_eq!(app.history.selected, 2);
+        assert_eq!(app.history.scroll, 1, "the third row remains visible");
     }
 
     #[test]

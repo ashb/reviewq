@@ -116,4 +116,26 @@ mod tests {
             "and something that merged and stayed"
         );
     }
+
+    #[test]
+    fn the_documented_reference_shows_the_history_binding() {
+        let reference = SHOTS
+            .iter()
+            .find(|shot| shot.name == "reference")
+            .expect("reference screenshot");
+        let (buffer, _) = draw(reference, WIDTH, Mode::Dark);
+        let screen = (0..reference.height)
+            .map(|y| {
+                (0..WIDTH)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("H           show activity history"),
+            "{screen}"
+        );
+    }
 }

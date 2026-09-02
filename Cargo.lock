@@ -2629,6 +2629,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "diesel",
  "insta",
  "jiff",
  "ratatui",

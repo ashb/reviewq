@@ -153,6 +153,7 @@ pub(crate) mod testing {
         pub(crate) stdout: RefCell<String>,
         pub(crate) stderr: RefCell<String>,
         pub(crate) flushes: Cell<usize>,
+        stdout_terminal: bool,
         stderr_terminal: bool,
     }
 
@@ -165,12 +166,18 @@ pub(crate) mod testing {
                 stdout: RefCell::new(String::new()),
                 stderr: RefCell::new(String::new()),
                 flushes: Cell::new(0),
+                stdout_terminal: false,
                 stderr_terminal: false,
             }
         }
 
         pub(crate) fn with_stderr_terminal(mut self) -> Self {
             self.stderr_terminal = true;
+            self
+        }
+
+        pub(crate) fn with_stdout_terminal(mut self) -> Self {
+            self.stdout_terminal = true;
             self
         }
     }
@@ -208,7 +215,7 @@ pub(crate) mod testing {
         }
 
         fn stdout_is_terminal(&self) -> bool {
-            false
+            self.stdout_terminal
         }
 
         fn stderr_is_terminal(&self) -> bool {

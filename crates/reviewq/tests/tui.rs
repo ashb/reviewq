@@ -169,6 +169,19 @@ fn it_takes_the_terminal_over_and_gives_it_back() {
     );
 }
 
+#[test]
+fn h_opens_global_history_from_an_empty_queue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut session = Session::start(&dir.path().join("ledger.db"), &config_in(dir.path()));
+    session.wait_for("Queue");
+
+    session.press("H");
+    session.wait_for("History");
+    session.press("q");
+
+    assert_eq!(session.wait_for_exit(), 0);
+}
+
 /// A minimal config, written where the interface will look for it.
 fn config_in(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("config.toml");

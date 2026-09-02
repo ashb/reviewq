@@ -138,7 +138,7 @@ pub async fn track(loaded: &Loaded, args: &TrackArgs, output: &impl Output) -> R
     let reviewq_app::sync::TrackedOne {
         tracked,
         refreshed,
-        activity: _,
+        activity,
     } = reviewq_app::sync::track_one(&loaded.config, named.as_ref(), number).await?;
 
     let what = match tracked {
@@ -153,5 +153,93 @@ pub async fn track(loaded: &Loaded, args: &TrackArgs, output: &impl Output) -> R
         reviewq_app::sync::Refreshed::Untracked => "",
     };
     output.println(format!("#{number} {what}{queued}"));
+    if let Some(warning) = activity
+        .as_ref()
+        .and_then(|activity| track_activity_warning(number, activity))
+    {
+        output.eprintln(warning);
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+fn track_activity_warning(
+    number: u64,
+    activity: &reviewq_app::sync::TrackActivity,
+) -> Option<String> {
+    let events = activity.stats.events;
+    let pages = activity.stats.pages;
+    let progress = format!(
+        "{events} event{} across {pages} page{}",
+        if events == 1 { "" } else { "s" },
+        if pages == 1 { "" } else { "s" },
+    );
+    match activity.error.as_deref() {
+        Some(error) => Some(format!(
+            "warning: #{number} is tracked and refreshed, but activity sync stopped after {progress}: {error}"
+        )),
+        None if activity.stats.stopped_for_budget => Some(format!(
+            "activity sync for #{number} paused at the provider budget floor after {progress}; the next sync resumes it"
+        )),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reviewq_app::sync::{BackfillStats, TrackActivity};
+
+    use super::track_activity_warning;
+
+    #[test]
+    fn automatic_activity_failure_reports_its_retained_partial_statistics() {
+        let activity = TrackActivity {
+            stats: BackfillStats {
+                events: 3,
+                pages: 2,
+                ..BackfillStats::default()
+            },
+            error: Some("provider activity failed".into()),
+        };
+
+        assert_eq!(
+            track_activity_warning(17, &activity).as_deref(),
+            Some(
+                "warning: #17 is tracked and refreshed, but activity sync stopped after 3 events across 2 pages: provider activity failed"
+            )
+        );
+    }
+
+    #[test]
+    fn automatic_activity_budget_pause_reports_resume_progress() {
+        let activity = TrackActivity {
+            stats: BackfillStats {
+                events: 1,
+                pages: 4,
+                stopped_for_budget: true,
+                ..BackfillStats::default()
+            },
+            error: None,
+        };
+
+        assert_eq!(
+            track_activity_warning(17, &activity).as_deref(),
+            Some(
+                "activity sync for #17 paused at the provider budget floor after 1 event across 4 pages; the next sync resumes it"
+            )
+        );
+    }
+
+    #[test]
+    fn completed_automatic_activity_needs_no_warning() {
+        let activity = TrackActivity {
+            stats: BackfillStats {
+                prs: 1,
+                pages: 1,
+                ..BackfillStats::default()
+            },
+            error: None,
+        };
+
+        assert_eq!(track_activity_warning(17, &activity), None);
+    }
 }
