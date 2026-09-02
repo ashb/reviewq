@@ -1,5 +1,5 @@
 ---
 source: crates/reviewq-core/tests/scenarios.rs
-expression: "Someone resolved my thread without replying: resolved-unanswered, which only an explicit ack clears."
+expression: "Someone resolved my thread without replying: resolved-unanswered, awaiting a review or explicit acknowledgment."
 ---
 [p4] @potiuk resolved your thread without replying (since 2026-08-05T07:05:00Z)

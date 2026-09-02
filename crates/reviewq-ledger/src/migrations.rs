@@ -6,7 +6,7 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use crate::{DbConnection, LedgerError, Result};
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: usize = 11;
+pub const SCHEMA_VERSION: usize = 12;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -74,7 +74,7 @@ fn corrupt_schema(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{my_state, repos};
+    use crate::schema::{activity_events, my_state, prs, repos};
 
     const LEGACY_MIGRATIONS: [&str; SCHEMA_VERSION] = [
         include_str!("../migrations/00000000000001_initial/up.sql"),
@@ -88,6 +88,7 @@ mod tests {
         include_str!("../migrations/00000000000009_label_colours/up.sql"),
         include_str!("../migrations/00000000000010_untracked_at/up.sql"),
         include_str!("../migrations/00000000000011_created_at/up.sql"),
+        include_str!("../migrations/00000000000012_activity_history/up.sql"),
     ];
 
     fn connection() -> DbConnection {
@@ -129,7 +130,9 @@ mod tests {
             writer.batch_execute(migration).unwrap();
         }
         writer
-            .batch_execute("PRAGMA user_version = 11; BEGIN IMMEDIATE")
+            .batch_execute(&format!(
+                "PRAGMA user_version = {SCHEMA_VERSION}; BEGIN IMMEDIATE"
+            ))
             .unwrap();
         let mut reader = crate::connection::establish(path.to_str().unwrap()).unwrap();
 
@@ -197,5 +200,131 @@ mod tests {
             .first::<bool>(&mut conn)
             .unwrap();
         assert!(muted);
+    }
+
+    fn legacy_connection(version: usize) -> DbConnection {
+        let mut conn = connection();
+        for migration in &LEGACY_MIGRATIONS[..version] {
+            conn.batch_execute(migration).unwrap();
+        }
+        conn.batch_execute(&format!("PRAGMA user_version = {version}"))
+            .unwrap();
+        conn
+    }
+
+    const LEGACY_PR: &str = "
+        INSERT INTO repos (id, host, owner, name)
+        VALUES (1, 'github.com', 'apache', 'airflow');
+        INSERT INTO prs (
+            repo_id, number, title, author, author_association, head_sha,
+            is_draft, state, updated_at, labels, first_seen_at, tracked_reason
+        ) VALUES (
+            1, 1, 'retained', 'octocat', 'CONTRIBUTOR', 'abc123',
+            0, 'CLOSED', '2026-08-20T00:00:00Z', '[]',
+            '2026-08-20T00:00:00Z', 'interest: all'
+        );";
+
+    #[test]
+    fn upgrade_seeds_resolution_evidence_from_the_last_stored_observation() {
+        let mut conn = legacy_connection(11);
+        conn.batch_execute(LEGACY_PR).unwrap();
+        conn.batch_execute(
+            "UPDATE prs SET detail_synced_at = '2026-08-21T12:00:00Z';
+            INSERT INTO threads (thread_id, repo_id, pr_number, i_own, is_resolved, resolved_by)
+            VALUES ('old-thread', 1, 1, 1, 1, 'author'),
+            ('unrelated-thread', 1, 1, 0, 1, 'other');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let row = activity_events::table
+            .select((activity_events::occurred_at, activity_events::payload))
+            .first::<(String, String)>(&mut conn)
+            .unwrap();
+        assert_eq!(row.0, "2026-08-21T12:00:00.000000000Z");
+        assert_eq!(
+            serde_json::from_str::<reviewq_core::model::ActivityPayload>(&row.1).unwrap(),
+            reviewq_core::model::ActivityPayload::ThreadStateChanged {
+                thread_id: "old-thread".into(),
+                resolved: true,
+                observed: true
+            }
+        );
+        assert_eq!(
+            crate::schema::threads::table
+                .filter(crate::schema::threads::resolution_event_id.is_not_null())
+                .count()
+                .get_result::<i64>(&mut conn)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_prs_keep_their_state_without_inventing_transition_timestamps() {
+        let mut conn = legacy_connection(11);
+        conn.batch_execute(LEGACY_PR).unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let row = prs::table
+            .select((
+                prs::title,
+                prs::state,
+                prs::tracked_reason,
+                prs::state_changed_at,
+            ))
+            .first::<(String, String, Option<String>, Option<String>)>(&mut conn)
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "retained".into(),
+                "CLOSED".into(),
+                Some("interest: all".into()),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn activity_storage_has_time_indexes_and_partial_external_uniqueness() {
+        #[derive(QueryableByName)]
+        struct IndexSql {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            name: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            sql: String,
+        }
+
+        let mut conn = connection();
+        migrate(&mut conn).unwrap();
+
+        let indexes = diesel::sql_query(
+            "SELECT name, sql FROM sqlite_master
+             WHERE type = 'index' AND name LIKE 'activity_events_%'",
+        )
+        .load::<IndexSql>(&mut conn)
+        .unwrap();
+
+        assert!(
+            indexes
+                .iter()
+                .any(|index| index.name == "activity_events_by_time")
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|index| index.name == "activity_events_by_pr_time")
+        );
+        let external = indexes
+            .iter()
+            .find(|index| index.name == "activity_events_external")
+            .unwrap();
+        assert!(
+            external
+                .sql
+                .contains("UNIQUE INDEX activity_events_external")
+        );
+        assert!(external.sql.contains("WHERE external_id IS NOT NULL"));
     }
 }

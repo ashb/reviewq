@@ -8,6 +8,11 @@ mod classify;
 mod reason;
 mod snapshot;
 
-pub use classify::{ClassifyCtx, Mention, ReviewRequest, Said, classify};
+pub use classify::{
+    ClassifyCtx, Mention, Resolution, ReviewRequest, Said, classify, resolved_unanswered_attention,
+};
 pub use reason::{Attention, AttentionReason, OnMyPr};
-pub use snapshot::{MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict};
+pub use snapshot::{
+    ActivityKind, ActivityPayload, ActivityRelation, ActivitySource, MyState, PrSnapshot, PrState,
+    ReviewResult, ReviewerVerdict, ThreadState, Verdict,
+};

@@ -1367,6 +1367,7 @@ mod tests {
             state: PrState::Open,
             updated_at: ts("2026-08-10T09:00:00Z"),
             created_at: Some(ts("2026-07-30T14:20:00Z")),
+            state_changed_at: None,
             labels: vec!["area:async".into()],
             milestone: None,
             files: None,

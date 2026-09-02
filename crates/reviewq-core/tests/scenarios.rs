@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use reviewq_core::model::{
-    ClassifyCtx, Mention, MyState, PrSnapshot, ReviewRequest, Said, ThreadState, classify,
+    ClassifyCtx, Mention, MyState, PrSnapshot, Resolution, ReviewRequest, Said, ThreadState,
+    classify,
 };
 use serde::Deserialize;
 
@@ -37,6 +38,10 @@ struct Scenario {
 /// The [`ClassifyCtx`] inputs, in an owned form the fixture can deserialize.
 #[derive(Debug, Default, Deserialize)]
 struct ScenarioCtx {
+    #[serde(default)]
+    resolutions: Vec<Resolution>,
+    #[serde(default)]
+    reviewed_at: Option<jiff::Timestamp>,
     #[serde(default)]
     bots: Vec<String>,
     #[serde(default)]
@@ -72,6 +77,9 @@ impl Scenario {
 
     fn ctx(&self) -> ClassifyCtx<'_> {
         ClassifyCtx {
+            viewer: None,
+            resolutions: &self.ctx.resolutions,
+            reviewed_at: self.ctx.reviewed_at,
             bots: &self.ctx.bots,
             interest: self.ctx.interest.as_deref(),
             mentions: &self.ctx.mentions,

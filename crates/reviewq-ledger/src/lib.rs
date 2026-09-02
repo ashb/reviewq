@@ -4,8 +4,11 @@
 //! trades in `reviewq-core` snapshot types; nothing above it writes SQL. The
 //! sync API is synchronous, which is fine for a CLI.
 
+mod activity;
+mod attention_activity;
 mod connection;
 mod db_types;
+mod detail_activity;
 mod migrations;
 mod models;
 mod schema;
@@ -20,7 +23,7 @@ use diesel::{
     dsl::{case_when, count, count_star},
     expression::AsExpression,
     prelude::*,
-    sql_types::{BigInt, Bool, Nullable, Text},
+    sql_types::{BigInt, Text},
     sqlite::Sqlite,
     upsert::excluded,
 };
@@ -34,6 +37,12 @@ use reviewq_core::model::{
 };
 use schema::{attention, labels, my_state, prs, repos, reviewers, sync_meta, threads};
 
+pub use activity::{
+    ActivityBackfill, ActivityCursor, ActivityEvent, ActivityEventId, ActivityIncremental,
+    ActivityPage, ActivityPageCommit, ActivityRateLimitUnit, ActivityScope, CleanupPreview,
+    NewActivityEvent,
+};
+use activity::{record_state_transition_row, request_activity_refresh, whole_second};
 pub use migrations::SCHEMA_VERSION;
 
 /// A repository row in this ledger.
@@ -624,7 +633,9 @@ impl Ledger {
         pr: &PrSnapshot,
         reason: Option<TrackedReason>,
     ) -> Result<bool> {
-        upsert_pr_snapshot(&mut self.conn.borrow_mut(), repo_id, pr, reason.as_ref())
+        self.conn.borrow_mut().immediate_transaction(|conn| {
+            upsert_row(conn, repo_id, pr, reason.as_ref(), Timestamp::now())
+        })
     }
 
     /// Persist a whole sweep page and advance the cursor in one transaction, so
@@ -637,11 +648,11 @@ impl Ledger {
         cursor_key: &str,
         cursor_value: &str,
     ) -> Result<u64> {
-        self.conn.borrow_mut().transaction(|conn| {
+        let now = Timestamp::now();
+        self.conn.borrow_mut().immediate_transaction(|conn| {
             let mut inserted_count = 0;
             for (pr, reason) in prs {
-                inserted_count +=
-                    u64::from(upsert_pr_snapshot(conn, repo_id, pr, reason.as_ref())?);
+                inserted_count += u64::from(upsert_row(conn, repo_id, pr, reason.as_ref(), now)?);
             }
             set_meta_row(conn, repo_id, cursor_key, cursor_value)?;
             Ok(inserted_count)
@@ -971,6 +982,7 @@ impl Ledger {
         now: Timestamp,
     ) -> Result<()> {
         self.conn.borrow_mut().transaction(|conn| {
+            let prior_attention = attention_activity::load(conn, repo_id, number)?;
             diesel::delete(
                 attention::table
                     .filter(attention::repo_id.eq(repo_id))
@@ -984,6 +996,7 @@ impl Ledger {
                 .doing(format!(
                     "stamping detail_synced_at for unreachable #{number}"
                 ))?;
+            attention_activity::record(conn, repo_id, number, prior_attention, now)?;
             Ok(())
         })
     }
@@ -1116,6 +1129,84 @@ impl Ledger {
         body: Option<&str>,
         now: Timestamp,
     ) -> Result<Committed> {
+        self.commit_detail_inner(
+            repo_id, number, my_state, threads, reviewers, attention, body, None, None, now,
+        )
+    }
+
+    /// Persist tier-2 detail and the lifecycle state fetched with it behind one
+    /// watermark compare-and-set and in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_detail_with_lifecycle(
+        &self,
+        repo_id: RepoId,
+        number: u64,
+        my_state: &MyState,
+        threads: &[ThreadState],
+        reviewers: &[ReviewerVerdict],
+        attention: &[Attention],
+        body: Option<&str>,
+        state: PrState,
+        state_changed_at: Option<Timestamp>,
+        now: Timestamp,
+    ) -> Result<Committed> {
+        self.commit_detail_inner(
+            repo_id,
+            number,
+            my_state,
+            threads,
+            reviewers,
+            attention,
+            body,
+            Some((state, state_changed_at)),
+            None,
+            now,
+        )
+    }
+
+    /// Record attention evidence and classify the fetched detail in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_detail_with_activity(
+        &self,
+        repo_id: RepoId,
+        pr: &PrSnapshot,
+        mine: &MyState,
+        threads: &[ThreadState],
+        reviewers: &[ReviewerVerdict],
+        body: &str,
+        state_changed_at: Option<Timestamp>,
+        events: &[NewActivityEvent],
+        ctx: &reviewq_core::model::ClassifyCtx<'_>,
+        now: Timestamp,
+    ) -> Result<Committed> {
+        self.commit_detail_inner(
+            repo_id,
+            pr.number,
+            mine,
+            threads,
+            reviewers,
+            &[],
+            Some(body),
+            Some((pr.state, state_changed_at)),
+            Some((pr, events, ctx)),
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_detail_inner(
+        &self,
+        repo_id: RepoId,
+        number: u64,
+        my_state: &MyState,
+        threads: &[ThreadState],
+        reviewers: &[ReviewerVerdict],
+        attention: &[Attention],
+        body: Option<&str>,
+        lifecycle: Option<(PrState, Option<Timestamp>)>,
+        activity: Option<detail_activity::DetailActivity<'_>>,
+        now: Timestamp,
+    ) -> Result<Committed> {
         // The watermark first, and as one compare-and-set rather than a read
         // followed by a write: a separate read could be answered from before a
         // racing commit landed, and then this write would clobber it. As the
@@ -1162,10 +1253,44 @@ impl Ledger {
                 });
             }
 
+            let prior_attention = attention_activity::load(conn, repo_id, number)?;
+            if let Some((state, state_changed_at)) = lifecycle {
+                record_state_transition_row(conn, repo_id, number, state, state_changed_at, now)?;
+            }
+            let had_attention = diesel::select(diesel::dsl::exists(
+                schema::attention::table
+                    .filter(schema::attention::repo_id.eq(repo_id))
+                    .filter(schema::attention::pr_number.eq(number as i64)),
+            ))
+            .get_result::<bool>(conn)
+            .doing(format!("checking attention before refreshing #{number}"))?;
+            let classified;
+            let attention = if let Some((pr, events, ctx)) = activity {
+                let (resolutions, reviewed_at) = detail_activity::observe_detail(
+                    conn, repo_id, number, threads, events, ctx.viewer, now,
+                )?;
+                let ctx = reviewq_core::model::ClassifyCtx {
+                    resolutions: &resolutions,
+                    reviewed_at,
+                    ..ctx.clone()
+                };
+                classified = reviewq_core::model::classify(pr, my_state, threads, now, &ctx);
+                &classified
+            } else {
+                attention
+            };
             write_forge_state(conn, repo_id, number, my_state)?;
-            replace_threads(conn, repo_id, number, threads)?;
+            if activity.is_none() {
+                replace_threads(conn, repo_id, number, threads, None)?;
+            }
             replace_reviewers(conn, repo_id, number, reviewers)?;
             replace_attention(conn, repo_id, number, attention)?;
+            if activity.is_some() {
+                attention_activity::record(conn, repo_id, number, prior_attention, now)?;
+            }
+            if had_attention || !attention.is_empty() {
+                request_activity_refresh(conn, repo_id, number)?;
+            }
             Ok(Committed::Applied)
         })
     }
@@ -1177,10 +1302,20 @@ impl Ledger {
     /// [`prs_needing_detail`](Self::prs_needing_detail)), so without this their
     /// stale rows would linger and show up in `show`. Run once at the end of a
     /// sync.
-    pub fn clear_archived_attention(&self, repo_id: RepoId, include_merged: bool) -> Result<()> {
+    pub fn clear_archived_attention(
+        &self,
+        repo_id: RepoId,
+        include_merged: bool,
+        now: Timestamp,
+    ) -> Result<()> {
         let mut archived = prs::table
             .filter(prs::repo_id.eq(repo_id))
             .filter(prs::state.ne(DbPrState::from(PrState::Open)))
+            .filter(diesel::dsl::exists(
+                attention::table
+                    .filter(attention::repo_id.eq(prs::repo_id))
+                    .filter(attention::pr_number.eq(prs::number)),
+            ))
             .select(prs::number)
             .into_boxed();
         if include_merged {
@@ -1192,14 +1327,16 @@ impl Ledger {
                     .or(prs::after_merge.eq(false)),
             );
         }
-        diesel::delete(
-            attention::table
-                .filter(attention::repo_id.eq(repo_id))
-                .filter(attention::pr_number.eq_any(archived)),
-        )
-        .execute(&mut *self.conn.borrow_mut())
-        .doing("clearing archived attention")?;
-        Ok(())
+        self.conn.borrow_mut().transaction(|conn| {
+            let numbers = archived.load::<i64>(conn).doing("reading archived PRs")?;
+            for number in numbers {
+                let number = number as u64;
+                let before = attention_activity::load(conn, repo_id, number)?;
+                replace_attention(conn, repo_id, number, &[])?;
+                attention_activity::record(conn, repo_id, number, before, now)?;
+            }
+            Ok(())
+        })
     }
 
     /// The queue: tracked, open PRs that currently want attention, each with its
@@ -1291,10 +1428,7 @@ impl Ledger {
         // A defer only survives if nothing has happened since: the top reason's
         // `since` must not be newer than the moment it was deferred.
         for item in &mut items {
-            item.deferred = item
-                .my_state
-                .deferred_at
-                .is_some_and(|deferred_at| item.top.since <= deferred_at);
+            item.deferred = item.my_state.is_deferred(Some(item.top.since));
         }
         items.sort_by(|a, b| {
             (a.deferred, a.top.priority(), a.top.since, a.pr.number).cmp(&(
@@ -1523,30 +1657,65 @@ fn tracked_prs(repo_id: RepoId) -> _ {
 }
 
 /// Insert or update one PR, preserving its original first-seen timestamp.
-fn upsert_pr_snapshot(
+fn upsert_row(
     conn: &mut DbConnection,
     repo_id: RepoId,
     pr: &PrSnapshot,
     reason: Option<&TrackedReason>,
+    now: Timestamp,
 ) -> Result<bool> {
-    // Conflict updates retain the original timestamp, so returning this attempt's
-    // freshly generated first_seen_at identifies an insertion.
-    let first_seen_at = Timestamp::now();
-
+    let stored = prs::table
+        .find((repo_id, pr.number as i64))
+        .select((
+            prs::updated_at,
+            prs::tracked_reason,
+            prs::after_merge,
+            prs::untracked_at,
+        ))
+        .first::<(DbTimestamp, Option<String>, bool, Option<DbTimestamp>)>(conn)
+        .optional()
+        .doing(format!(
+            "reading #{}'s sweep watermark and tracking",
+            pr.number
+        ))?;
+    let is_new = stored.is_none();
+    let (stored_at, tracking) = match stored {
+        Some((updated_at, reason, after_merge, untracked_at)) => (
+            Some(updated_at.into_timestamp()),
+            Tracking {
+                reason,
+                after_merge,
+                untracked: untracked_at.is_some(),
+            },
+        ),
+        None => (None, Tracking::default()),
+    };
+    let merged = merge_tracking(tracking, reason);
+    if stored_at.is_some_and(|stored_at| pr.updated_at <= stored_at) {
+        diesel::update(prs::table.find((repo_id, pr.number as i64)))
+            .set((
+                prs::tracked_reason.eq(merged.reason),
+                prs::after_merge.eq(merged.after_merge),
+                prs::base_ref.eq(case_when::<_, _, Text>(prs::base_ref.eq(""), &pr.base_ref)
+                    .otherwise(prs::base_ref)),
+                prs::created_at.eq(case_when(
+                    prs::created_at.is_null(),
+                    pr.created_at.map(DbTimestamp::from),
+                )
+                .otherwise(prs::created_at)),
+            ))
+            .execute(conn)
+            .doing(format!("merging tracking for stale PR #{}", pr.number))?;
+        return Ok(false);
+    }
     let record = NewPr {
         repo_id,
         pr: Pr::try_from(pr)?,
-        tracked_reason: reason.map(TrackedReason::render),
-        first_seen_at: DbTimestamp::from(first_seen_at),
+        tracked_reason: merged.reason,
+        first_seen_at: DbTimestamp::from(now),
         detail_synced_at: None,
         body: None,
-        after_merge: matches!(
-            reason,
-            Some(TrackedReason::Interest {
-                after_merge: true,
-                ..
-            })
-        ),
+        after_merge: merged.after_merge,
         untracked_at: None,
     };
     let summary = PrSummary {
@@ -1555,7 +1724,6 @@ fn upsert_pr_snapshot(
         author_association: &record.pr.author_association,
         head_sha: &record.pr.head_sha,
         is_draft: record.pr.is_draft,
-        state: &record.pr.state,
         updated_at: &record.pr.updated_at,
         labels: &record.pr.labels,
         milestone: record.pr.milestone.as_deref(),
@@ -1564,45 +1732,87 @@ fn upsert_pr_snapshot(
         base_ref: &record.pr.base_ref,
         created_at: record.pr.created_at.as_ref(),
     };
-    let insert = diesel::insert_into(prs::table)
+    diesel::insert_into(prs::table)
         .values(&record)
         .on_conflict((prs::repo_id, prs::number))
-        .do_update();
-    let result = match reason {
-        None => insert
-            .set(&summary)
-            .returning(prs::first_seen_at)
-            .get_result::<DbTimestamp>(conn),
-        Some(TrackedReason::Involved(_)) => insert
-            .set((
-                &summary,
-                prs::tracked_reason.eq(case_when::<_, _, Nullable<Text>>(
-                    prs::untracked_at.is_null(),
-                    record.tracked_reason.as_deref(),
-                )),
-            ))
-            .returning(prs::first_seen_at)
-            .get_result::<DbTimestamp>(conn),
-        Some(TrackedReason::Interest { after_merge, .. }) => insert
-            .set((
-                &summary,
-                prs::tracked_reason.eq(case_when::<_, _, Nullable<Text>>(
-                    prs::untracked_at.is_not_null(),
-                    None::<&str>,
-                )
-                .when(prs::tracked_reason.like("involved:%"), prs::tracked_reason)
-                .otherwise(record.tracked_reason.as_deref())),
-                prs::after_merge.eq(case_when::<_, _, Bool>(
-                    prs::untracked_at.is_null(),
-                    *after_merge,
-                )
-                .otherwise(prs::after_merge)),
-            ))
-            .returning(prs::first_seen_at)
-            .get_result::<DbTimestamp>(conn),
+        .do_update()
+        .set((
+            &summary,
+            prs::tracked_reason.eq(&record.tracked_reason),
+            prs::after_merge.eq(record.after_merge),
+        ))
+        .execute(conn)
+        .doing(format!("upserting PR #{}", pr.number))?;
+    if !is_new {
+        record_state_transition_row(conn, repo_id, pr.number, pr.state, pr.state_changed_at, now)?;
+    }
+    Ok(is_new)
+}
+
+/// Why a PR is tracked as the row holds it: the rendered reason, and whether it
+/// survives the PR merging.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Tracking {
+    reason: Option<String>,
+    after_merge: bool,
+    /// `reviewq untrack` said to stop watching this one, so no rule may track
+    /// it again until `reviewq track` says otherwise.
+    untracked: bool,
+}
+
+/// Merge stored tracking with an incoming reason by precedence: keep the
+/// stronger, refresh on a tie, never downgrade. `None` incoming leaves the
+/// stored value.
+///
+/// The post-merge flag does not follow the winning reason: it is the rules'
+/// answer, so it changes when a rule match arrives and at no other time, whether
+/// or not that match also wins the reason. Only the sweep evaluates rules — an
+/// involvement search knows nothing of them, and letting it overwrite the flag
+/// on the way past would drop a PR a post-merge rule matched at merge, purely
+/// because somebody had also asked you to review it.
+fn merge_tracking(stored: Tracking, incoming: Option<&TrackedReason>) -> Tracking {
+    // An untracked PR keeps being swept — its title, labels and state stay
+    // current, so `show` and a later `track` have something to work with — but
+    // nothing a sweep or an involvement search finds may track it again. That
+    // is the difference between this and `done`: one says "not now", this says
+    // "not until I say so".
+    if stored.untracked {
+        return Tracking {
+            reason: None,
+            ..stored
+        };
+    }
+    let after_merge = match incoming {
+        Some(TrackedReason::Interest { after_merge, .. }) => *after_merge,
+        Some(TrackedReason::Involved(_)) | None => stored.after_merge,
     };
-    let stored = result.doing(format!("upserting PR #{}", pr.number))?;
-    Ok(stored.into_timestamp() == first_seen_at)
+    let reason = match (stored.reason, incoming) {
+        (stored, None) => stored,
+        (None, Some(new)) => Some(new.render()),
+        (Some(old), Some(new)) => {
+            let new = new.render();
+            Some(if stored_rank(&new) >= stored_rank(&old) {
+                new
+            } else {
+                old
+            })
+        }
+    };
+    Tracking {
+        reason,
+        after_merge,
+        untracked: false,
+    }
+}
+
+fn stored_rank(reason: &str) -> u8 {
+    if reason.starts_with("involved:") {
+        2
+    } else if reason.starts_with("interest:") {
+        1
+    } else {
+        0
+    }
 }
 
 fn set_meta_row(conn: &mut DbConnection, repo_id: RepoId, key: &str, value: &str) -> Result<()> {
@@ -1618,6 +1828,16 @@ fn set_meta_row(conn: &mut DbConnection, repo_id: RepoId, key: &str, value: &str
         .execute(conn)
         .doing(format!("writing sync_meta {key}"))?;
     Ok(())
+}
+
+fn existing_row(conn: &mut DbConnection, repo_id: RepoId, number: u64) -> Result<Option<u64>> {
+    prs::table
+        .find((repo_id, number as i64))
+        .select(prs::number)
+        .first::<i64>(conn)
+        .optional()
+        .doing(format!("checking for PR #{number}"))
+        .map(|number| number.map(|number| number as u64))
 }
 
 fn tracked_reason(conn: &mut DbConnection, repo_id: RepoId, number: u64) -> Result<Option<String>> {
@@ -1644,12 +1864,6 @@ fn corrupt_message(what: impl Into<String>, message: impl Into<String>) -> Ledge
     corrupt(what, std::io::Error::other(message.into()))
 }
 
-/// Truncate a timestamp to whole seconds, dropping sub-second precision so
-/// stored stamps compare lexicographically against GitHub's whole-second form.
-fn whole_second(ts: Timestamp) -> Timestamp {
-    Timestamp::from_second(ts.as_second()).unwrap_or(ts)
-}
-
 fn snapshot_from_stored(row: Pr) -> Result<PrSnapshot> {
     let labels: Vec<String> =
         serde_json::from_str(&row.labels).map_err(|source| corrupt("label list", source))?;
@@ -1674,6 +1888,7 @@ fn snapshot_from_stored(row: Pr) -> Result<PrSnapshot> {
         files_truncated: row.files_truncated,
         base_ref: row.base_ref,
         created_at: row.created_at.map(DbTimestamp::into_timestamp),
+        state_changed_at: row.state_changed_at.map(DbTimestamp::into_timestamp),
     })
 }
 
@@ -1815,7 +2030,26 @@ fn replace_threads(
     repo_id: RepoId,
     number: u64,
     threads: &[ThreadState],
+    resolution_events: Option<&BTreeMap<String, ActivityEventId>>,
 ) -> Result<()> {
+    let retained;
+    let resolution_events = if let Some(events) = resolution_events {
+        events
+    } else {
+        retained = schema::threads::table
+            .filter(schema::threads::repo_id.eq(repo_id))
+            .filter(schema::threads::pr_number.eq(number as i64))
+            .filter(schema::threads::resolution_event_id.is_not_null())
+            .select((
+                schema::threads::thread_id,
+                schema::threads::resolution_event_id.assume_not_null(),
+            ))
+            .load::<(String, ActivityEventId)>(conn)
+            .doing("reading retained thread resolutions")?
+            .into_iter()
+            .collect();
+        &retained
+    };
     diesel::delete(
         schema::threads::table
             .filter(schema::threads::repo_id.eq(repo_id))
@@ -1835,6 +2069,10 @@ fn replace_threads(
                 last_comment_author: thread.last_comment_author.clone(),
                 last_comment_at: thread.last_comment_at.map(DbTimestamp::from),
                 my_last_comment_at: thread.my_last_comment_at.map(DbTimestamp::from),
+                resolution_event_id: thread
+                    .is_resolved
+                    .then(|| resolution_events.get(&thread.thread_id).copied())
+                    .flatten(),
             })
             .collect::<Vec<_>>();
         diesel::insert_into(schema::threads::table)
@@ -1913,6 +2151,7 @@ fn replace_attention(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reviewq_core::model::ActivityKind;
 
     #[derive(QueryableByName)]
     struct UserVersion {
@@ -1958,6 +2197,7 @@ mod tests {
             state: PrState::Open,
             updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),
             created_at: None,
+            state_changed_at: None,
             labels: vec!["area:task-sdk".into()],
             milestone: Some("3.2.0".into()),
             files: None,
@@ -2251,6 +2491,7 @@ mod tests {
                         .unwrap()
                 );
                 snapshot.title = "Updated title".into();
+                snapshot.updated_at = ts("2026-08-05T12:01:00Z");
                 assert!(
                     !ledger
                         .upsert_pr(repo_id, &snapshot, reason.clone())
@@ -2298,13 +2539,18 @@ mod tests {
     #[test]
     fn pr_states_round_trip_through_the_database_binding() {
         let (ledger, repo_id) = ledger_with_repo();
-        for (state, stored) in [
+        for (index, (state, stored)) in [
             (PrState::Open, "OPEN"),
             (PrState::Closed, "CLOSED"),
             (PrState::Merged, "MERGED"),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut snapshot = pr(1);
             snapshot.state = state;
+            snapshot.updated_at =
+                Timestamp::from_second(snapshot.updated_at.as_second() + index as i64).unwrap();
             ledger.upsert_pr(repo_id, &snapshot, None).unwrap();
             let raw = prs::table
                 .find((repo_id, 1_i64))
@@ -2925,6 +3171,61 @@ mod tests {
             shown.attention.len(),
             1,
             "and so does the attention it computed"
+        );
+    }
+
+    #[test]
+    fn superseded_detail_cannot_change_lifecycle_projection_or_history() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        let winner = ts("2026-08-05T12:00:05Z");
+        let loser = ts("2026-08-05T12:00:00Z");
+
+        ledger
+            .commit_detail_with_lifecycle(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[],
+                None,
+                PrState::Open,
+                None,
+                winner,
+            )
+            .unwrap()
+            .expect_applied();
+        assert_eq!(
+            ledger
+                .commit_detail_with_lifecycle(
+                    repo_id,
+                    1,
+                    &MyState::default(),
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    PrState::Closed,
+                    Some(ts("2026-08-05T11:55:00Z")),
+                    loser,
+                )
+                .unwrap(),
+            Committed::Superseded {
+                stored: ts("2026-08-05T12:00:05Z"),
+            }
+        );
+
+        let shown = ledger.show(repo_id, 1).unwrap().unwrap();
+        assert_eq!(shown.pr.state, PrState::Open);
+        assert_eq!(shown.pr.state_changed_at, None);
+        assert!(
+            ledger
+                .activity_page(ActivityScope::All, None, 100)
+                .unwrap()
+                .events
+                .iter()
+                .all(|event| event.kind != ActivityKind::PrClosed)
         );
     }
 
@@ -3760,11 +4061,15 @@ mod tests {
             .expect_applied();
 
         // With the opt-in, merged attention is kept.
-        ledger.clear_archived_attention(repo_id, true).unwrap();
+        ledger
+            .clear_archived_attention(repo_id, true, now())
+            .unwrap();
         assert_eq!(ledger.queue(repo_id).unwrap().len(), 1);
 
         // Without it, merged attention is swept away.
-        ledger.clear_archived_attention(repo_id, false).unwrap();
+        ledger
+            .clear_archived_attention(repo_id, false, now())
+            .unwrap();
         assert!(ledger.queue(repo_id).unwrap().is_empty());
         assert!(
             ledger
@@ -3809,7 +4114,9 @@ mod tests {
                 .expect_applied();
         }
 
-        ledger.clear_archived_attention(repo_id, false).unwrap();
+        ledger
+            .clear_archived_attention(repo_id, false, now())
+            .unwrap();
 
         let queue = ledger.queue(repo_id).unwrap();
         assert_eq!(queue.len(), 1);
