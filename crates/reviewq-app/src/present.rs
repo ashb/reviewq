@@ -16,7 +16,10 @@
 //! it to one string would share the wording by throwing the colour away.
 
 use jiff::Timestamp;
-use reviewq_core::model::{MyState, PrSnapshot, ThreadState};
+use reviewq_core::model::{
+    ActivityKind, ActivityPayload, MyState, PrSnapshot, PrState, ReviewResult, ThreadState,
+};
+use reviewq_ledger::ActivityEvent;
 
 /// A timestamp as reviewq writes them: whole seconds, RFC 3339.
 ///
@@ -40,6 +43,139 @@ pub fn day(ts: Timestamp) -> String {
 /// `git show`.
 pub fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
+}
+
+/// A retained activity event with its actor.
+pub fn activity_text(event: &ActivityEvent) -> String {
+    let actor = activity_actor(event);
+    match event.kind {
+        ActivityKind::AttentionChanged => match &event.payload {
+            ActivityPayload::AttentionChanged { before, after } => {
+                attention_change_text(before, after)
+            }
+            _ => "attention changed (observed)".to_string(),
+        },
+        ActivityKind::Done => activity_with_sha("you marked done", event.head_sha.as_deref()),
+        ActivityKind::Snoozed => match &event.payload {
+            ActivityPayload::Snoozed { until } => {
+                format!("you snoozed until {}", stamp(*until))
+            }
+            _ => "you snoozed".to_string(),
+        },
+        ActivityKind::Muted => "you muted".to_string(),
+        ActivityKind::Unmuted => "you unmuted".to_string(),
+        ActivityKind::Deferred => "you deferred".to_string(),
+        ActivityKind::Undeferred => "you undeferred".to_string(),
+        ActivityKind::Tracked => "you tracked".to_string(),
+        ActivityKind::Untracked => "you untracked".to_string(),
+        ActivityKind::ReviewStarted => {
+            activity_with_sha("you started a review", event.head_sha.as_deref())
+        }
+        ActivityKind::ReviewSubmitted => activity_review_text(event),
+        ActivityKind::Commented => format!("{actor} commented"),
+        ActivityKind::ReviewThreadCommented => match &event.payload {
+            ActivityPayload::ReviewThreadCommented {
+                thread_id: Some(thread),
+            } => format!("{actor} commented in review thread {thread}"),
+            _ => format!("{actor} commented in a review thread"),
+        },
+        ActivityKind::PrClosed => activity_lifecycle_text("closed", event),
+        ActivityKind::PrReopened => activity_lifecycle_text("reopened", event),
+        ActivityKind::PrMerged => activity_lifecycle_text("merged", event),
+        ActivityKind::ThreadResolved | ActivityKind::ThreadReopened => {
+            let action = if event.kind == ActivityKind::ThreadResolved {
+                "resolved"
+            } else {
+                "reopened"
+            };
+            let actor = event.actor.as_deref().unwrap_or("someone");
+            match &event.payload {
+                ActivityPayload::ThreadStateChanged {
+                    thread_id,
+                    observed,
+                    ..
+                } => format!(
+                    "{actor} {action} thread {thread_id}{}",
+                    if *observed { " (observed)" } else { "" }
+                ),
+                _ => format!("{actor} {action} a review thread"),
+            }
+        }
+    }
+}
+
+fn attention_change_text(
+    before: &[reviewq_core::model::Attention],
+    after: &[reviewq_core::model::Attention],
+) -> String {
+    let mut changes = Vec::new();
+    for reason in after
+        .iter()
+        .filter(|new| !before.iter().any(|old| old.same_evidence(new)))
+    {
+        changes.push(format!("needs attention: {}", reason.reason));
+    }
+    for reason in before
+        .iter()
+        .filter(|old| !after.iter().any(|new| old.same_evidence(new)))
+    {
+        changes.push(format!("cleared: {}", reason.reason));
+    }
+    format!("{} (observed)", changes.join("; "))
+}
+
+fn activity_with_sha(action: &str, sha: Option<&str>) -> String {
+    sha.map_or_else(
+        || action.to_string(),
+        |sha| format!("{action} at {}", short_sha(sha)),
+    )
+}
+
+fn activity_actor(event: &ActivityEvent) -> &str {
+    if event.relation == reviewq_core::model::ActivityRelation::Own {
+        "you"
+    } else {
+        event.actor.as_deref().unwrap_or("unknown")
+    }
+}
+
+fn activity_review_text(event: &ActivityEvent) -> String {
+    let actor = activity_actor(event);
+    let ActivityPayload::ReviewSubmitted {
+        result,
+        reviewed_sha,
+    } = &event.payload
+    else {
+        return format!("{actor} submitted a review");
+    };
+    let result = match result {
+        ReviewResult::Approved => format!("{actor} approved"),
+        ReviewResult::ChangesRequested => format!("{actor} requested changes"),
+        ReviewResult::Commented => format!("{actor} reviewed with a comment"),
+        ReviewResult::Other(value) => format!("{actor} submitted a {value} review"),
+    };
+    activity_with_sha(
+        &result,
+        reviewed_sha.as_deref().or(event.head_sha.as_deref()),
+    )
+}
+
+fn activity_lifecycle_text(action: &str, event: &ActivityEvent) -> String {
+    match event.payload {
+        ActivityPayload::StateChanged { from, to } => {
+            format!("{action} ({} → {})", state_text(from), state_text(to))
+        }
+        _ => action.to_string(),
+    }
+}
+
+/// A pull request lifecycle state in display text.
+pub fn state_text(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open",
+        PrState::Closed => "closed",
+        PrState::Merged => "merged",
+    }
 }
 
 /// What is currently keeping a PR quiet, in the order it was asked for.
@@ -216,6 +352,35 @@ pub fn thread_counts(threads: &[ThreadState]) -> ThreadCounts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attention_history_does_not_clear_and_readd_an_unchanged_request() {
+        use reviewq_core::model::{Attention, AttentionReason};
+        let earlier = "2026-08-11T12:00:00Z".parse().unwrap();
+        let later = "2026-08-12T12:00:00Z".parse().unwrap();
+        let before = [Attention {
+            reason: AttentionReason::ReviewRequested { team: None },
+            since: earlier,
+        }];
+        let after = [
+            Attention {
+                reason: AttentionReason::ReviewRequested { team: None },
+                since: later,
+            },
+            Attention {
+                reason: AttentionReason::Mention { by: "alice".into() },
+                since: later,
+            },
+        ];
+        assert_eq!(
+            attention_change_text(&before, &after),
+            "needs attention: @alice mentioned you (observed)"
+        );
+        assert_eq!(
+            attention_change_text(&after, &before),
+            "cleared: @alice mentioned you (observed)"
+        );
+    }
+
     use super::*;
     use reviewq_core::model::PrState;
 
@@ -240,6 +405,71 @@ mod tests {
             milestone: None,
             files: None,
             files_truncated: false,
+        }
+    }
+
+    #[test]
+    fn forge_activity_only_uses_you_for_own_actions() {
+        use reviewq_core::model::{ActivityRelation, ActivitySource};
+        use reviewq_ledger::{ActivityScope, Ledger, NewActivityEvent, RepoKey};
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger
+            .ensure_repo(&RepoKey {
+                host: "github.com".into(),
+                owner: "o".into(),
+                name: "r".into(),
+            })
+            .unwrap();
+        ledger.upsert_pr(repo_id, &pr(), None).unwrap();
+        for (kind, payload, suffix) in [
+            (ActivityKind::Commented, ActivityPayload::None, "commented"),
+            (
+                ActivityKind::ReviewThreadCommented,
+                ActivityPayload::ReviewThreadCommented {
+                    thread_id: Some("t".into()),
+                },
+                "commented in review thread t",
+            ),
+            (
+                ActivityKind::ReviewSubmitted,
+                ActivityPayload::ReviewSubmitted {
+                    result: ReviewResult::Approved,
+                    reviewed_sha: None,
+                },
+                "approved",
+            ),
+        ] {
+            for (relation, actor, expected) in [
+                (ActivityRelation::Own, Some("ash"), "you"),
+                (ActivityRelation::Relevant, Some("alice"), "alice"),
+                (ActivityRelation::Context, Some("bob"), "bob"),
+                (ActivityRelation::Context, None, "unknown"),
+            ] {
+                ledger
+                    .record_activity(
+                        repo_id,
+                        1,
+                        &NewActivityEvent {
+                            source: ActivitySource::Forge,
+                            relation,
+                            kind,
+                            occurred_at: ts("2026-08-11T09:00:00Z"),
+                            recorded_at: ts("2026-08-11T09:00:00Z"),
+                            actor: actor.map(str::to_owned),
+                            head_sha: None,
+                            external_id: None,
+                            permalink: None,
+                            payload: payload.clone(),
+                        },
+                    )
+                    .unwrap();
+                let event = ledger
+                    .activity_page(ActivityScope::PrAll { repo_id, number: 1 }, None, 1)
+                    .unwrap()
+                    .events
+                    .remove(0);
+                assert_eq!(activity_text(&event), format!("{expected} {suffix}"));
+            }
         }
     }
 

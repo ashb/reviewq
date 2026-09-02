@@ -1001,25 +1001,6 @@ impl Ledger {
         })
     }
 
-    /// Record the state a detail fetch found the PR in — open, merged, or
-    /// closed.
-    ///
-    /// The sweep writes this as part of the whole snapshot, so this exists for
-    /// the one path that never sweeps: refreshing a single PR. Without it, a PR
-    /// closed on the forge stayed `OPEN` in the ledger however many times you
-    /// refreshed it, and went on being listed as waiting on somebody.
-    ///
-    /// Only the state: everything else a detail fetch knows is committed by
-    /// [`commit_detail`](Self::commit_detail), and the rest of the snapshot
-    /// (title, labels, milestone) is the sweep's to own.
-    pub fn set_state(&self, repo_id: RepoId, number: u64, state: PrState) -> Result<()> {
-        diesel::update(prs::table.find((repo_id, number as i64)))
-            .set(prs::state.eq(DbPrState::from(state)))
-            .execute(&mut *self.conn.borrow_mut())
-            .doing(format!("recording #{number}'s state"))?;
-        Ok(())
-    }
-
     /// The instant-hide half of `reviewq done`: every reason `done` is allowed
     /// to clear per the reason table, but not `review_requested` — only my
     /// review or the request being withdrawn clears that one.

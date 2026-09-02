@@ -38,28 +38,51 @@ pub struct Peeked {
 /// has nothing to say about it; with more than one configured that is ambiguous
 /// and refused rather than guessed, exactly as `track` refuses it.
 pub async fn peek_one(cfg: &Config, number: u64) -> Result<Peeked> {
+    peek_one_for(cfg, None, number).await
+}
+
+/// Read `number` for display from an already-resolved repo when one is known.
+pub async fn peek_one_for(cfg: &Config, target: Option<&RepoKey>, number: u64) -> Result<Peeked> {
     let ledger = crate::resolve::open()?;
-    if let Some(key) = crate::resolve::repo_with_pr(&ledger, number)? {
-        let repo_id = ledger
-            .repo_id(&key)?
-            .context("the number resolved to this repo a moment ago")?;
-        if let Some(show) = ledger.show(repo_id, number)? {
-            return Ok(Peeked {
-                repo: key,
-                show,
-                scratch: false,
-            });
-        }
+    let stored = match target {
+        Some(key) => ledger.repo_id(key)?.map(|repo_id| (key.clone(), repo_id)),
+        None => crate::resolve::repo_with_pr(&ledger, number)?
+            .map(|key| {
+                let repo_id = ledger
+                    .repo_id(&key)?
+                    .context("the number resolved to this repo a moment ago")?;
+                Ok::<_, anyhow::Error>((key, repo_id))
+            })
+            .transpose()?,
+    };
+    if let Some((key, repo_id)) = stored
+        && let Some(show) = ledger.show(repo_id, number)?
+    {
+        return Ok(Peeked {
+            repo: key,
+            show,
+            scratch: false,
+        });
     }
 
-    let mut repos = cfg.repos();
-    let repo = repos.next().context("no repos configured")?.clone();
-    if repos.next().is_some() {
-        bail!(
-            "#{number} is not in the ledger, and more than one repo is configured \
-             — paste its full pull-request URL"
-        );
-    }
+    let repo = match target {
+        Some(key) => cfg
+            .repos()
+            .find(|repo| repo.key() == *key)
+            .with_context(|| format!("{} is not configured", key.slug()))?
+            .clone(),
+        None => {
+            let mut repos = cfg.repos();
+            let repo = repos.next().context("no repos configured")?.clone();
+            if repos.next().is_some() {
+                bail!(
+                    "#{number} is not in the ledger, and more than one repo is configured \
+                     — paste its full pull-request URL"
+                );
+            }
+            repo
+        }
+    };
 
     let forge = cfg.forge_for(&repo.host)?;
     // Reading a PR nobody has tracked still needs to know whose reviews are

@@ -12,6 +12,7 @@ reviewq-ledger.workspace = true
 
 anyhow.workspace = true
 etcetera.workspace = true
+futures.workspace = true
 jiff.workspace = true
 serde.workspace = true
 toml.workspace = true
@@ -20,6 +21,7 @@ serde_ignored = "0.1.14"
 
 [dev-dependencies]
 async-trait.workspace = true
+diesel.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 toml.workspace = true
