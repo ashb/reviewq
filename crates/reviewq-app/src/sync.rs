@@ -6,15 +6,22 @@
 //! PRs that name me. Everything is an idempotent upsert, so a re-sync over an
 //! overlapping window is a near-no-op.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::fmt;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use futures::{StreamExt as _, stream};
 use jiff::{Timestamp, ToSpan};
-use reviewq_core::model::{ClassifyCtx, PrSnapshot, PrState, classify};
+use reviewq_core::model::{ActivitySource, ClassifyCtx, PrSnapshot, PrState};
 use reviewq_core::rules::{Evaluation, Interest};
-use reviewq_forge::{Forge, PrDetail};
-use reviewq_ledger::{Committed, Detail, Ledger, RepoId, TrackedReason};
+use reviewq_forge::{
+    ActivityRateLimit, Forge, ForgeActivity, ForgeActivityPage, PrDetail, RateLimitUnit,
+};
+use reviewq_ledger::{
+    ActivityPageCommit, ActivityRateLimitUnit as StoredRateLimitUnit, Committed, Detail, Ledger,
+    NewActivityEvent, RepoId, RepoKey, TrackedReason,
+};
 
 use crate::config::{Config, Project, RepoRef};
 use crate::identity::Logins;
@@ -24,6 +31,7 @@ use crate::{actions, paths};
 pub const CURSOR_KEY: &str = "last_sync_at";
 /// Whether the most recent sweep hit the search cap; surfaced by `doctor`.
 pub const TRUNCATED_KEY: &str = "last_sweep_truncated";
+const ACTIVITY_CONCURRENCY: usize = 8;
 
 /// Sync every repo in every configured project, reporting through `progress`.
 ///
@@ -213,6 +221,20 @@ async fn sync_repo(
     )
     .await?;
 
+    sync_activity(
+        forge,
+        ledger,
+        repo_id,
+        repo,
+        me,
+        None,
+        stats.remaining,
+        now,
+        &mut stats,
+        progress,
+    )
+    .await;
+
     // Merged/closed PRs are not re-fetched, so drop any attention they still
     // carry — bar the merged ones post-merge review keeps, whether that is this
     // project's `include_merged` or their own rule's `after_merge`.
@@ -348,6 +370,858 @@ async fn involvement_search(
 /// far better than running the budget to zero and erroring out.
 const DETAIL_BUDGET_FLOOR: u32 = 100;
 
+/// Counts accumulated while initially filling pull-request activity history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackfillStats {
+    /// Pull requests the provider reported complete.
+    pub prs: u64,
+    /// New events stored after deduplication.
+    pub events: u64,
+    /// Provider pages committed.
+    pub pages: usize,
+    /// GraphQL-style points spent.
+    pub point_cost: u32,
+    /// Request-count budget spent.
+    pub request_cost: u32,
+    /// Last reported GraphQL-style point balance.
+    pub points_remaining: Option<u32>,
+    /// Last reported request-count balance.
+    pub requests_remaining: Option<u32>,
+    /// The pass stopped before a request would cross the safety floor.
+    pub stopped_for_budget: bool,
+}
+
+/// One pull request whose provider activity could not be completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillFailure {
+    /// Pull request number.
+    pub number: u64,
+    /// Contextual provider or validation error.
+    pub message: String,
+}
+
+/// A partial backfill result that retains all successfully committed counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillFailed {
+    /// Work committed before and after individual pull-request failures.
+    pub stats: BackfillStats,
+    /// Pull requests that remain incomplete.
+    pub failures: Vec<BackfillFailure>,
+}
+
+impl fmt::Display for BackfillFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "activity sync failed:")?;
+        for failure in &self.failures {
+            writeln!(f, "#{}: {}", failure.number, failure.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BackfillFailed {}
+
+/// Automatic activity work attempted after a pull request became tracked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackActivity {
+    /// Work committed before the provider completed or failed.
+    pub stats: BackfillStats,
+    /// A provider, identity, validation, or ledger failure isolated from the
+    /// successful tracking and detail refresh.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivityBudgets {
+    points: Option<u32>,
+    requests: Option<u32>,
+}
+
+#[derive(Debug, Default)]
+struct ActivityBudgetErrors {
+    points: Option<String>,
+    requests: Option<String>,
+}
+
+impl ActivityBudgets {
+    fn update(&mut self, rate_limit: ActivityRateLimit) {
+        match rate_limit.unit {
+            RateLimitUnit::Points => keep_lowest(&mut self.points, rate_limit.remaining),
+            RateLimitUnit::Requests => keep_lowest(&mut self.requests, rate_limit.remaining),
+        }
+    }
+
+    fn is_low(self, unit: Option<RateLimitUnit>) -> bool {
+        match unit {
+            Some(RateLimitUnit::Points) => budget_is_low(self.points),
+            Some(RateLimitUnit::Requests) => budget_is_low(self.requests),
+            None => false,
+        }
+    }
+}
+
+fn keep_lowest(current: &mut Option<u32>, observed: u32) {
+    *current = Some(current.map_or(observed, |current| current.min(observed)));
+}
+
+impl ActivityBudgetErrors {
+    fn for_unit(&self, unit: Option<RateLimitUnit>) -> Option<&str> {
+        match unit {
+            Some(RateLimitUnit::Points) => self.points.as_deref(),
+            Some(RateLimitUnit::Requests) => self.requests.as_deref(),
+            None => None,
+        }
+    }
+}
+
+async fn activity_budgets(
+    forge: &dyn Forge,
+    known_points: Option<u32>,
+) -> (ActivityBudgets, ActivityBudgetErrors) {
+    let (points, point_error) = match known_points {
+        Some(remaining) => (Some(remaining), None),
+        None => match forge.viewer().await {
+            Ok(viewer) => (Some(viewer.rate_limit.remaining), None),
+            Err(error) => (None, Some(error.to_string())),
+        },
+    };
+    let (requests, request_error) = match forge.rest_core_remaining().await {
+        Ok((remaining, _)) => (Some(remaining), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    (
+        ActivityBudgets { points, requests },
+        ActivityBudgetErrors {
+            points: point_error,
+            requests: request_error,
+        },
+    )
+}
+
+impl BackfillStats {
+    fn record_rate_limit(&mut self, rate_limit: ActivityRateLimit) {
+        match rate_limit.unit {
+            RateLimitUnit::Points => {
+                self.point_cost += rate_limit.cost;
+                keep_lowest(&mut self.points_remaining, rate_limit.remaining);
+            }
+            RateLimitUnit::Requests => {
+                self.request_cost += rate_limit.cost;
+                keep_lowest(&mut self.requests_remaining, rate_limit.remaining);
+            }
+        }
+    }
+}
+
+/// Backfill every currently tracked pull request, resuming each provider cursor.
+///
+/// Pages commit independently. Provider failures are collected so safe work on
+/// other pull requests can finish before the function returns an error.
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+async fn backfill_activity(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    now: Timestamp,
+    progress: &mut dyn SyncProgress,
+) -> Result<BackfillStats> {
+    let (stats, errors, _) = backfill_activity_inner(
+        forge, ledger, repo_id, repo, actor, None, None, now, progress,
+    )
+    .await?;
+    if errors.is_empty() {
+        Ok(stats)
+    } else {
+        Err(BackfillFailed {
+            stats,
+            failures: errors,
+        }
+        .into())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn backfill_activity_for_pr(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    number: u64,
+    known_points: Option<u32>,
+    now: Timestamp,
+    progress: &mut dyn SyncProgress,
+) -> Result<BackfillStats> {
+    let stored = ledger.activity_backfill(repo_id, number)?;
+    if stored
+        .as_ref()
+        .is_some_and(|progress| progress.completed_at.is_some())
+    {
+        return Ok(BackfillStats::default());
+    }
+    let cursor = stored.as_ref().and_then(|progress| progress.cursor.clone());
+    let next_rate_limit = stored.and_then(|progress| progress.next_rate_limit);
+    let (stats, errors, _) = backfill_pending(
+        forge,
+        ledger,
+        repo_id,
+        repo,
+        actor,
+        known_points,
+        now,
+        vec![(number, cursor, next_rate_limit)],
+        1,
+        progress,
+    )
+    .await?;
+    if errors.is_empty() {
+        Ok(stats)
+    } else {
+        Err(BackfillFailed {
+            stats,
+            failures: errors,
+        }
+        .into())
+    }
+}
+
+struct QuietProgress;
+
+impl SyncProgress for QuietProgress {
+    fn page(&mut self, _what: &str, _fetched: usize, _total: u32) {}
+
+    fn repo_finished(&mut self, _summary: &RepoSummary) {}
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn backfill_newly_tracked_activity(
+    tracked: &actions::Tracked,
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    number: u64,
+    now: Timestamp,
+) -> Option<TrackActivity> {
+    if *tracked == actions::Tracked::Already {
+        return None;
+    }
+    let result = backfill_activity_for_pr(
+        forge,
+        ledger,
+        repo_id,
+        repo,
+        actor,
+        number,
+        None,
+        now,
+        &mut QuietProgress,
+    )
+    .await;
+    Some(match result {
+        Ok(stats) => TrackActivity { stats, error: None },
+        Err(error) => TrackActivity {
+            stats: error
+                .downcast_ref::<BackfillFailed>()
+                .map_or_else(BackfillStats::default, |failed| failed.stats.clone()),
+            error: Some(format!("{error:#}")),
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn backfill_activity_inner(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    only: Option<u64>,
+    known_points: Option<u32>,
+    now: Timestamp,
+    progress: &mut dyn SyncProgress,
+) -> Result<(BackfillStats, Vec<BackfillFailure>, usize)> {
+    let numbers = match only {
+        Some(number) if ledger.show(repo_id, number)?.is_some() => vec![number],
+        Some(_) => Vec::new(),
+        None => ledger.activity_candidates(repo_id)?,
+    };
+    let mut pending = Vec::new();
+    for number in numbers {
+        let stored = ledger.activity_backfill(repo_id, number)?;
+        if !stored
+            .as_ref()
+            .is_some_and(|progress| progress.completed_at.is_some())
+        {
+            let cursor = stored.as_ref().and_then(|progress| progress.cursor.clone());
+            let next_rate_limit = stored.and_then(|progress| progress.next_rate_limit);
+            pending.push((number, cursor, next_rate_limit));
+        }
+    }
+    if pending.is_empty() {
+        return Ok((BackfillStats::default(), Vec::new(), 0));
+    }
+    let total = pending.len() as u32;
+
+    backfill_pending(
+        forge,
+        ledger,
+        repo_id,
+        repo,
+        actor,
+        known_points,
+        now,
+        pending,
+        total,
+        progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn backfill_pending(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    known_points: Option<u32>,
+    now: Timestamp,
+    pending: Vec<(u64, Option<String>, Option<StoredRateLimitUnit>)>,
+    total: u32,
+    progress: &mut dyn SyncProgress,
+) -> Result<(BackfillStats, Vec<BackfillFailure>, usize)> {
+    let (mut budgets, budget_errors) = activity_budgets(forge, known_points).await;
+    let mut stats = BackfillStats {
+        points_remaining: budgets.points,
+        requests_remaining: budgets.requests,
+        ..Default::default()
+    };
+    let mut errors = Vec::new();
+    let mut completed = 0;
+    let mut pending = pending
+        .into_iter()
+        .map(|(number, cursor, saved_rate_limit)| {
+            let next_rate_limit = saved_rate_limit.map(provider_rate_limit).or_else(|| {
+                cursor
+                    .is_none()
+                    .then(|| forge.initial_activity_rate_limit())
+            });
+            (number, cursor, next_rate_limit)
+        })
+        .collect::<VecDeque<_>>();
+
+    let mut in_flight = stream::FuturesUnordered::new();
+    while !pending.is_empty() || !in_flight.is_empty() {
+        while in_flight.len() < ACTIVITY_CONCURRENCY && !pending.is_empty() {
+            let (number, cursor, next_rate_limit) = pending.pop_front().expect("counted pending");
+            if let Some(error) = budget_errors.for_unit(next_rate_limit) {
+                tracing::warn!(repo = repo.slug(), number, error = %error, "activity sync failed");
+                errors.push(BackfillFailure {
+                    number,
+                    message: error.to_string(),
+                });
+                completed += 1;
+                progress.page("activity", completed, total);
+            } else if budgets.is_low(next_rate_limit) {
+                stats.stopped_for_budget = true;
+            } else {
+                in_flight.push(async move {
+                    let page =
+                        fetch_activity_page(forge, repo, number, actor, cursor.as_deref()).await;
+                    (number, cursor, next_rate_limit, page)
+                });
+            }
+        }
+        if let Some((number, cursor, _next_rate_limit, page)) = in_flight.next().await {
+            let page = match page {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(repo = repo.slug(), number, error = %error, "activity sync failed");
+                    errors.push(BackfillFailure {
+                        number,
+                        message: error.to_string(),
+                    });
+                    completed += 1;
+                    progress.page("activity", completed, total);
+                    continue;
+                }
+            };
+            let mut events = Vec::new();
+            let participated_at = first_own_activity(&page.activities, actor);
+            let mine = authored_by_viewer(ledger, repo_id, number, actor)?;
+            for activity in &page.activities {
+                let mut event = new_activity(activity, now);
+                event.relation = activity_relation(
+                    ledger,
+                    repo_id,
+                    number,
+                    actor,
+                    activity,
+                    participated_at,
+                    mine,
+                )?;
+                events.push(event);
+            }
+            if let Some(rate_limit) = page.rate_limit {
+                budgets.update(rate_limit);
+                stats.record_rate_limit(rate_limit);
+            }
+            let committed = ledger.commit_activity_page(
+                repo_id,
+                number,
+                cursor.as_deref(),
+                &events,
+                page.next.as_deref(),
+                page.next_rate_limit.map(stored_rate_limit),
+                now,
+            )?;
+            let ActivityPageCommit::Applied { inserted } = committed else {
+                completed += 1;
+                progress.page("activity", completed, total);
+                continue;
+            };
+            stats.events += inserted;
+            stats.pages += 1;
+            if page.next.is_none() {
+                stats.prs += 1;
+            }
+            match page.next {
+                Some(next) => pending.push_back((number, Some(next), page.next_rate_limit)),
+                None => {
+                    completed += 1;
+                    progress.page("activity", completed, total);
+                }
+            }
+        }
+    }
+
+    Ok((stats, errors, completed))
+}
+
+async fn fetch_activity_page(
+    forge: &dyn Forge,
+    repo: &RepoRef,
+    number: u64,
+    actor: &str,
+    cursor: Option<&str>,
+) -> reviewq_forge::Result<ForgeActivityPage> {
+    let page = forge
+        .fetch_pr_activity(&repo.owner, &repo.name, number, actor, cursor)
+        .await?;
+    page.validate()?;
+    Ok(page)
+}
+
+fn new_activity(activity: &ForgeActivity, recorded_at: Timestamp) -> NewActivityEvent {
+    NewActivityEvent {
+        relation: activity.relation,
+        source: ActivitySource::Forge,
+        kind: activity.kind,
+        occurred_at: activity.occurred_at,
+        recorded_at,
+        actor: activity.actor.clone(),
+        head_sha: activity.head_sha.clone(),
+        external_id: activity.external_id.clone(),
+        permalink: activity.permalink.clone(),
+        payload: activity.payload.clone(),
+    }
+}
+
+fn stored_rate_limit(unit: RateLimitUnit) -> StoredRateLimitUnit {
+    match unit {
+        RateLimitUnit::Requests => StoredRateLimitUnit::Requests,
+        RateLimitUnit::Points => StoredRateLimitUnit::Points,
+    }
+}
+
+fn provider_rate_limit(unit: StoredRateLimitUnit) -> RateLimitUnit {
+    match unit {
+        StoredRateLimitUnit::Requests => RateLimitUnit::Requests,
+        StoredRateLimitUnit::Points => RateLimitUnit::Points,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_activity(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    only: Option<u64>,
+    known_points: Option<u32>,
+    now: Timestamp,
+    stats: &mut Stats,
+    progress: &mut dyn SyncProgress,
+) {
+    let (backfill_count, incremental) = match (|| {
+        let candidates = match only {
+            Some(number) if ledger.show(repo_id, number)?.is_some() => vec![number],
+            Some(_) => Vec::new(),
+            None => ledger.activity_candidates(repo_id)?,
+        };
+        let mut backfill_count = 0;
+        for number in candidates {
+            if ledger
+                .activity_backfill(repo_id, number)?
+                .is_none_or(|state| state.completed_at.is_none())
+            {
+                backfill_count += 1;
+            }
+        }
+        let refresh = match only {
+            Some(number) => vec![number],
+            None => ledger.activity_refresh_candidates(repo_id)?,
+        };
+        let mut incremental = Vec::new();
+        for number in refresh {
+            if ledger
+                .activity_backfill(repo_id, number)?
+                .is_some_and(|state| state.completed_at.is_some())
+            {
+                incremental.push((
+                    number,
+                    ledger.begin_incremental_activity(repo_id, number, now)?,
+                ));
+            }
+        }
+        Ok::<_, reviewq_ledger::LedgerError>((backfill_count, incremental))
+    })() {
+        Ok(progress) => progress,
+        Err(error) => {
+            stats.activity_errors += 1;
+            tracing::warn!(%error, "could not prepare activity progress");
+            return;
+        }
+    };
+    let total = backfill_count + incremental.len();
+
+    let mut activity_done = match backfill_activity_inner(
+        forge,
+        ledger,
+        repo_id,
+        repo,
+        actor,
+        only,
+        known_points,
+        now,
+        progress,
+    )
+    .await
+    {
+        Ok((backfill, errors, attempted)) => {
+            stats.activity_events += backfill.events;
+            stats.activity_request_cost += backfill.request_cost;
+            stats.cost += backfill.point_cost;
+            if let Some(remaining) = backfill.points_remaining {
+                stats.remaining = Some(remaining);
+            }
+            stats.activity_errors += errors.len() as u64;
+            attempted
+        }
+        Err(error) => {
+            stats.activity_errors += 1;
+            tracing::warn!(repo = repo.slug(), %error, "activity sync could not run");
+            return;
+        }
+    };
+
+    if incremental.is_empty() {
+        return;
+    }
+
+    let (mut budgets, budget_errors) = activity_budgets(forge, stats.remaining).await;
+    let total = total as u32;
+    let mut pending = incremental
+        .into_iter()
+        .map(|(number, checkpoint)| {
+            let next_rate_limit =
+                checkpoint
+                    .next_rate_limit
+                    .map(provider_rate_limit)
+                    .or_else(|| {
+                        checkpoint
+                            .cursor
+                            .is_none()
+                            .then(|| forge.initial_activity_rate_limit())
+                    });
+            (number, checkpoint, next_rate_limit)
+        })
+        .collect::<VecDeque<_>>();
+
+    let mut in_flight = stream::FuturesUnordered::new();
+    while !pending.is_empty() || !in_flight.is_empty() {
+        while in_flight.len() < ACTIVITY_CONCURRENCY && !pending.is_empty() {
+            let (number, checkpoint, next_rate_limit) =
+                pending.pop_front().expect("counted pending");
+            if let Some(error) = budget_errors.for_unit(next_rate_limit) {
+                stats.activity_errors += 1;
+                tracing::warn!(
+                    repo = repo.slug(),
+                    number,
+                    error,
+                    "activity budget unavailable"
+                );
+                activity_done += 1;
+                progress.page("activity", activity_done, total);
+            } else if budgets.is_low(next_rate_limit) {
+                continue;
+            } else {
+                in_flight.push(async move {
+                    let page = fetch_activity_page(
+                        forge,
+                        repo,
+                        number,
+                        actor,
+                        checkpoint.cursor.as_deref(),
+                    )
+                    .await;
+                    (number, checkpoint, next_rate_limit, page)
+                });
+            }
+        }
+        if let Some((number, checkpoint, _next_rate_limit, page)) = in_flight.next().await {
+            let page = match page {
+                Ok(page) => page,
+                Err(error) => {
+                    stats.activity_errors += 1;
+                    tracing::warn!(repo = repo.slug(), number, %error, "incremental activity failed");
+                    activity_done += 1;
+                    progress.page("activity", activity_done, total);
+                    continue;
+                }
+            };
+            let processed = match incremental_page_events(
+                ledger,
+                repo_id,
+                number,
+                actor,
+                &page.activities,
+                checkpoint.stop_at,
+                now,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    stats.activity_errors += 1;
+                    tracing::warn!(repo = repo.slug(), number, %error, "could not check activity identity");
+                    activity_done += 1;
+                    progress.page("activity", activity_done, total);
+                    continue;
+                }
+            };
+            if let Some(rate_limit) = page.rate_limit {
+                budgets.update(rate_limit);
+                match rate_limit.unit {
+                    RateLimitUnit::Points => {
+                        stats.cost += rate_limit.cost;
+                        keep_lowest(&mut stats.remaining, rate_limit.remaining);
+                    }
+                    RateLimitUnit::Requests => stats.activity_request_cost += rate_limit.cost,
+                }
+            }
+            let checkpoint_next = if processed.reached_boundary {
+                None
+            } else {
+                page.next.as_deref()
+            };
+            let checkpoint_rate_limit = checkpoint_next
+                .and(page.next_rate_limit)
+                .map(stored_rate_limit);
+            match ledger.commit_incremental_activity_page(
+                repo_id,
+                number,
+                &checkpoint,
+                &processed.events,
+                checkpoint_next,
+                checkpoint_rate_limit,
+            ) {
+                Ok(ActivityPageCommit::Applied { inserted }) => {
+                    stats.activity_events += inserted;
+                }
+                Ok(ActivityPageCommit::Superseded) => {
+                    activity_done += 1;
+                    progress.page("activity", activity_done, total);
+                    continue;
+                }
+                Err(error) => {
+                    stats.activity_errors += 1;
+                    tracing::warn!(repo = repo.slug(), number, %error, "could not store incremental activity");
+                    activity_done += 1;
+                    progress.page("activity", activity_done, total);
+                    continue;
+                }
+            }
+            match (processed.reached_boundary, page.next) {
+                (false, Some(next)) => {
+                    pending.push_back((
+                        number,
+                        reviewq_ledger::ActivityIncremental {
+                            revision: checkpoint.revision + 1,
+                            generation: checkpoint.generation,
+                            started_at: checkpoint.started_at,
+                            cursor: Some(next),
+                            next_rate_limit: checkpoint_rate_limit,
+                            stop_at: processed.stop_at,
+                        },
+                        page.next_rate_limit,
+                    ));
+                }
+                _ => {
+                    activity_done += 1;
+                    progress.page("activity", activity_done, total);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_activity_for_pr(
+    forge: &dyn Forge,
+    ledger: &Ledger,
+    repo_id: RepoId,
+    repo: &RepoRef,
+    actor: &str,
+    number: u64,
+    known_points: Option<u32>,
+    now: Timestamp,
+    progress: &mut dyn SyncProgress,
+) {
+    let mut stats = Stats {
+        remaining: known_points,
+        ..Default::default()
+    };
+    sync_activity(
+        forge,
+        ledger,
+        repo_id,
+        repo,
+        actor,
+        Some(number),
+        known_points,
+        now,
+        &mut stats,
+        progress,
+    )
+    .await;
+}
+
+struct IncrementalPage {
+    events: Vec<NewActivityEvent>,
+    stop_at: Option<Timestamp>,
+    reached_boundary: bool,
+}
+
+fn incremental_page_events(
+    ledger: &Ledger,
+    repo_id: RepoId,
+    number: u64,
+    actor: &str,
+    activities: &[ForgeActivity],
+    stop_at: Option<Timestamp>,
+    recorded_at: Timestamp,
+) -> reviewq_ledger::Result<IncrementalPage> {
+    let mut page = IncrementalPage {
+        events: Vec::new(),
+        stop_at,
+        reached_boundary: false,
+    };
+    let participated_at = first_own_activity(activities, actor);
+    let mine = authored_by_viewer(ledger, repo_id, number, actor)?;
+    for activity in activities {
+        if page
+            .stop_at
+            .is_some_and(|boundary| activity.occurred_at < boundary)
+        {
+            page.reached_boundary = true;
+            break;
+        }
+        if let Some(external_id) = activity.external_id.as_deref()
+            && ledger.has_forge_activity(repo_id, activity.kind, external_id)?
+        {
+            continue;
+        }
+        let mut event = new_activity(activity, recorded_at);
+        event.relation = activity_relation(
+            ledger,
+            repo_id,
+            number,
+            actor,
+            activity,
+            participated_at,
+            mine,
+        )?;
+        page.events.push(event);
+    }
+    Ok(page)
+}
+
+fn first_own_activity(activities: &[ForgeActivity], viewer: &str) -> Option<Timestamp> {
+    activities
+        .iter()
+        .filter(|event| {
+            event
+                .actor
+                .as_deref()
+                .is_some_and(|actor| actor.eq_ignore_ascii_case(viewer))
+        })
+        .map(|event| event.occurred_at)
+        .min()
+}
+
+fn authored_by_viewer(
+    ledger: &Ledger,
+    repo_id: RepoId,
+    number: u64,
+    viewer: &str,
+) -> reviewq_ledger::Result<bool> {
+    Ok(ledger
+        .show(repo_id, number)?
+        .is_some_and(|show| show.pr.author.eq_ignore_ascii_case(viewer)))
+}
+
+fn activity_relation(
+    ledger: &Ledger,
+    repo_id: RepoId,
+    number: u64,
+    viewer: &str,
+    activity: &ForgeActivity,
+    participated_at: Option<Timestamp>,
+    mine: bool,
+) -> reviewq_ledger::Result<reviewq_core::model::ActivityRelation> {
+    use reviewq_core::model::{ActivityKind, ActivityRelation};
+    if activity
+        .actor
+        .as_deref()
+        .is_some_and(|actor| actor.eq_ignore_ascii_case(viewer))
+    {
+        return Ok(ActivityRelation::Own);
+    }
+    if activity.relation == ActivityRelation::Relevant || mine {
+        return Ok(ActivityRelation::Relevant);
+    }
+    if matches!(
+        activity.kind,
+        ActivityKind::PrClosed | ActivityKind::PrMerged | ActivityKind::PrReopened
+    ) && (participated_at.is_some_and(|at| at <= activity.occurred_at)
+        || ledger.lifecycle_affects_me(
+            repo_id,
+            number,
+            activity.occurred_at,
+            activity.kind,
+            viewer,
+        )?)
+    {
+        return Ok(ActivityRelation::Relevant);
+    }
+    Ok(ActivityRelation::Context)
+}
+
 /// Whether to stop the detail pass rather than spend the tail of the budget.
 ///
 /// Pulled out of the loop so it can be tested without a forge: it is one
@@ -449,12 +1323,22 @@ pub enum Refreshed {
     Gone,
 }
 
+/// The durable outcomes of explicitly tracking and refreshing one PR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedOne {
+    /// Whether tracking was new, restored, or already in effect.
+    pub tracked: actions::Tracked,
+    /// The independent current-detail refresh result.
+    pub refreshed: Refreshed,
+    /// Initial activity sync for a PR that became tracked during this call.
+    pub activity: Option<TrackActivity>,
+}
+
 /// Refresh one PR by number, resolving from the ledger and config whatever
 /// [`refresh_one`] needs.
 ///
-/// The entry point for wanting one PR up to date without a whole sync: the
-/// `sync <number>` command, the TUI's sync key, and `review`'s refresh after a
-/// handoff all come through here rather than repeating the resolution dance.
+/// The entry point for wanting one PR up to date without a whole sync when the
+/// caller only has its number, such as the `sync <number>` command.
 ///
 /// Which repo the number belongs to comes from the ledger, not config, and
 /// through the same resolver `show`/`done`/`mute` use — so a number that is
@@ -467,10 +1351,25 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
     let Some(key) = crate::resolve::repo_with_pr(&ledger, number)? else {
         return Ok(Refreshed::Untracked);
     };
+    sync_one_for_in(cfg, &key, number, &ledger).await
+}
 
+/// Refresh one PR whose repository has already been resolved, such as a TUI
+/// selection or a review handoff.
+pub async fn sync_one_for(cfg: &Config, key: &RepoKey, number: u64) -> Result<Refreshed> {
+    let ledger = crate::resolve::open()?;
+    sync_one_for_in(cfg, key, number, &ledger).await
+}
+
+async fn sync_one_for_in(
+    cfg: &Config,
+    key: &RepoKey,
+    number: u64,
+    ledger: &Ledger,
+) -> Result<Refreshed> {
     let repo = cfg
         .repos()
-        .find(|r| r.key() == key)
+        .find(|r| r.key() == *key)
         .cloned()
         .with_context(|| {
             format!(
@@ -485,8 +1384,8 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         .with_context(|| format!("{} is no longer configured", repo.slug()))?;
 
     let repo_id = ledger
-        .repo_id(&key)?
-        .context("the number resolved to this repo a moment ago")?;
+        .repo_id(key)?
+        .with_context(|| format!("{} is not in the ledger", key.slug()))?;
     let Some(show) = ledger.show(repo_id, number)? else {
         return Ok(Refreshed::Untracked);
     };
@@ -495,7 +1394,7 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
     let me = Logins::new().on(cfg, &repo.host, forge.as_ref()).await?;
     let outcome = refresh_one(
         forge.as_ref(),
-        &ledger,
+        ledger,
         repo_id,
         &repo,
         &me,
@@ -511,6 +1410,21 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
         Timestamp::now(),
     )
     .await?;
+
+    if let Some((detail, _)) = outcome.as_ref() {
+        sync_activity_for_pr(
+            forge.as_ref(),
+            ledger,
+            repo_id,
+            &repo,
+            &me,
+            number,
+            Some(detail.remaining),
+            Timestamp::now(),
+            &mut QuietProgress,
+        )
+        .await;
+    }
 
     Ok(match outcome {
         None => Refreshed::Gone,
@@ -534,11 +1448,7 @@ pub async fn sync_one(cfg: &Config, number: u64) -> Result<Refreshed> {
 /// Which repo it belongs to comes from config, not the ledger — the whole point
 /// is that the ledger may know nothing about it. With more than one repo
 /// configured a bare number is ambiguous, so `repo` names one.
-pub async fn track_one(
-    cfg: &Config,
-    repo: Option<&RepoRef>,
-    number: u64,
-) -> Result<(actions::Tracked, Refreshed)> {
+pub async fn track_one(cfg: &Config, repo: Option<&RepoRef>, number: u64) -> Result<TrackedOne> {
     // Always reaches the forge, whether or not the ledger already has the PR:
     // `track` means "track it and go and get it", unlike the purely local actions.
     let repo = match repo {
@@ -563,8 +1473,35 @@ pub async fn track_one(
 
     // A freshly-stored PR holds no attention until something classifies it, so
     // the detail pass is what actually puts it on the queue.
-    let refreshed = sync_one(cfg, number).await?;
-    Ok((tracked, refreshed))
+    let refreshed = sync_one_for(cfg, &repo.key(), number).await?;
+    let activity = if tracked == actions::Tracked::Already {
+        None
+    } else {
+        match Logins::new().on(cfg, &repo.host, forge.as_ref()).await {
+            Ok(actor) => {
+                backfill_newly_tracked_activity(
+                    &tracked,
+                    forge.as_ref(),
+                    &ledger,
+                    repo_id,
+                    &repo,
+                    &actor,
+                    number,
+                    Timestamp::now(),
+                )
+                .await
+            }
+            Err(error) => Some(TrackActivity {
+                stats: BackfillStats::default(),
+                error: Some(format!("{error:#}")),
+            }),
+        }
+    };
+    Ok(TrackedOne {
+        tracked,
+        refreshed,
+        activity,
+    })
 }
 
 /// Fetch one PR's tier-2 detail, classify it against what the fetch saw, and
@@ -608,13 +1545,7 @@ pub async fn refresh_one(
     // as closed rather than as the open one the ledger still holds.
     let mut pr = pr.clone();
     pr.head_sha = detail.head_sha.clone();
-    if pr.state != detail.state {
-        pr.state = detail.state;
-        // Stored as well as classified against — this is the only path that
-        // ever learns a single PR's state, so leaving it in memory would mean
-        // refreshing a closed PR reported it correctly and then forgot.
-        ledger.set_state(repo_id, number, detail.state)?;
-    }
+    pr.state = detail.state;
 
     // GitHub owns my review history; the ledger owns done/snooze/mute. Read
     // the local state and overlay only the forge-derived fields.
@@ -632,6 +1563,7 @@ pub async fn refresh_one(
 
     let interest = interest_detail(tracked_reason);
     let ctx = ClassifyCtx {
+        viewer: Some(login),
         bots,
         interest: interest.as_deref(),
         mentions: &detail.mentions,
@@ -644,16 +1576,33 @@ pub async fn refresh_one(
         include_merged,
         ..Default::default()
     };
-    let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
-    let queued = !attention.is_empty();
-    let committed = ledger.commit_detail(
+    let events: Vec<_> = detail
+        .activities
+        .iter()
+        .map(|event| {
+            let mut retained = new_activity(event, now);
+            if event
+                .actor
+                .as_deref()
+                .is_some_and(|actor| actor.eq_ignore_ascii_case(login))
+            {
+                retained.relation = reviewq_core::model::ActivityRelation::Own;
+            } else if ctx.mine {
+                retained.relation = reviewq_core::model::ActivityRelation::Relevant;
+            }
+            retained
+        })
+        .collect();
+    let committed = ledger.commit_detail_with_activity(
         repo_id,
-        number,
+        &pr,
         &mine,
         &detail.threads,
         &detail.reviewers,
-        &attention,
-        Some(&detail.body),
+        &detail.body,
+        detail.state_changed_at,
+        &events,
+        &ctx,
         now,
     )?;
     if let Committed::Superseded { stored } = committed {
@@ -666,12 +1615,10 @@ pub async fn refresh_one(
             stored = %stored,
             "a newer detail was already stored, so this fetch was dropped"
         );
-        // Report what the winning detail concluded, not what this one did.
-        let queued = ledger
-            .show(repo_id, number)?
-            .is_some_and(|show| !show.attention.is_empty());
-        return Ok(Some((detail, queued)));
     }
+    let queued = ledger
+        .show(repo_id, number)?
+        .is_some_and(|show| !show.attention.is_empty());
     Ok(Some((detail, queued)))
 }
 
@@ -717,6 +1664,12 @@ pub struct Stats {
     /// PRs the sweep couldn't classify because their file list was truncated,
     /// so a path rule could neither match nor be ruled out.
     pub truncated_unknown: u64,
+    /// New forge activity events stored during this sync.
+    pub activity_events: u64,
+    /// Pull requests whose activity could not be read or stored.
+    pub activity_errors: u64,
+    /// Request-count budget spent on activity retrieval.
+    pub activity_request_cost: u32,
     /// GraphQL points this repo's sync spent.
     pub cost: u32,
     /// Points left in the hourly budget, as of the last response. `None` until
@@ -787,6 +1740,12 @@ pub fn summary_line(summary: &RepoSummary) -> String {
     if s.truncated_unknown > 0 {
         line.push_str(&format!(", {} unknown (truncated)", s.truncated_unknown));
     }
+    if s.activity_events > 0 || s.activity_errors > 0 || s.activity_request_cost > 0 {
+        line.push_str(&format!(
+            "; activity {} new, {} failed, {} requests",
+            s.activity_events, s.activity_errors, s.activity_request_cost
+        ));
+    }
     match s.remaining {
         Some(left) => line.push_str(&format!("; {} pts, {left} left", s.cost)),
         None => line.push_str(&format!("; {} pts", s.cost)),
@@ -821,6 +1780,9 @@ mod tests {
                 involved: 2,
                 queued: 4,
                 truncated_unknown: 0,
+                activity_events: 0,
+                activity_errors: 0,
+                activity_request_cost: 0,
                 cost: 61,
                 remaining: Some(4823),
             },
@@ -876,6 +1838,21 @@ mod tests {
         assert!(!summary_line(&summary()).contains("unknown"));
     }
 
+    #[test]
+    fn summary_line_reports_activity_successes_and_failures_separately() {
+        let mut with_activity = summary();
+        with_activity.stats.activity_events = 3;
+        with_activity.stats.activity_errors = 2;
+        with_activity.stats.activity_request_cost = 4;
+
+        assert_eq!(
+            summary_line(&with_activity),
+            "sync apache/airflow: swept 12 of 12 in window, tracked 7/90 (+3 new), \
+             5 interest, 2 involved, 4 on the queue; activity 3 new, 2 failed, \
+             4 requests; 61 pts, 4823 left"
+        );
+    }
+
     /// A sink that records what it was told, standing in for the CLI's stderr one
     /// wherever a test drives a sync without printing. What it recorded is
     /// asserted by the engine tests that actually run a sync through it.
@@ -883,6 +1860,7 @@ mod tests {
     pub(super) struct RecordingProgress {
         pub(super) pages: Vec<(String, usize, u32)>,
         pub(super) finished: Vec<String>,
+        pub(super) summaries: Vec<RepoSummary>,
     }
 
     impl SyncProgress for RecordingProgress {
@@ -892,6 +1870,7 @@ mod tests {
 
         fn repo_finished(&mut self, summary: &RepoSummary) {
             self.finished.push(summary.repo.clone());
+            self.summaries.push(summary.clone());
         }
     }
 }
@@ -908,8 +1887,11 @@ mod engine_tests {
     use super::tests::RecordingProgress;
     use super::*;
     use crate::fake_forge::{FakeForge, Page, pr, ts};
-    use reviewq_core::model::{PrState, Verdict};
-    use reviewq_ledger::RepoKey;
+    use reviewq_core::model::{
+        ActivityKind, ActivityPayload, Attention, AttentionReason, MyState, PrState, Verdict,
+    };
+    use reviewq_forge::{ActivityRateLimit, ForgeActivity, ForgeActivityPage, RateLimitUnit};
+    use reviewq_ledger::{ActivityPageCommit, ActivityRateLimitUnit, ActivityScope, RepoKey};
 
     fn now() -> Timestamp {
         ts("2026-08-11T12:00:00Z")
@@ -938,6 +1920,82 @@ mod engine_tests {
             owner: "apache".into(),
             name: "airflow".into(),
         }
+    }
+
+    fn activity(id: &str, occurred_at: &str) -> ForgeActivity {
+        ForgeActivity {
+            relation: reviewq_core::model::ActivityRelation::Own,
+            kind: ActivityKind::Commented,
+            occurred_at: ts(occurred_at),
+            actor: Some("ashb".into()),
+            head_sha: None,
+            external_id: Some(id.into()),
+            permalink: Some(format!("https://forge.example/comments/{id}")),
+            payload: ActivityPayload::None,
+        }
+    }
+
+    fn activity_page(
+        activities: Vec<ForgeActivity>,
+        next: Option<&str>,
+        remaining: u32,
+        next_rate_limit: Option<RateLimitUnit>,
+    ) -> ForgeActivityPage {
+        ForgeActivityPage {
+            activities,
+            next: next.map(str::to_string),
+            rate_limit: Some(ActivityRateLimit {
+                unit: RateLimitUnit::Points,
+                cost: 1,
+                remaining,
+            }),
+            next_rate_limit,
+        }
+    }
+
+    fn track_for_backfill(ledger: &Ledger, repo_id: RepoId, number: u64) {
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(number, "2026-08-09T09:00:00Z"),
+                Some(TrackedReason::Involved("manual".into())),
+            )
+            .expect("tracked PR");
+    }
+
+    fn complete_initial_activity(ledger: &Ledger, repo_id: RepoId, number: u64) {
+        assert_eq!(
+            ledger
+                .commit_activity_page(
+                    repo_id,
+                    number,
+                    None,
+                    &[],
+                    None,
+                    None,
+                    "2026-08-11T10:05:00Z".parse().unwrap()
+                )
+                .unwrap(),
+            ActivityPageCommit::Applied { inserted: 0 }
+        );
+    }
+
+    fn give_attention(ledger: &Ledger, repo_id: RepoId, number: u64) {
+        let _ = ledger
+            .commit_detail(
+                repo_id,
+                number,
+                &MyState::default(),
+                &[],
+                &[],
+                &[Attention {
+                    reason: AttentionReason::ReviewRequested { team: None },
+                    since: now(),
+                }],
+                None,
+                now(),
+            )
+            .expect("attention");
     }
 
     /// Run one repo's whole sync against `forge`, returning the ledger it wrote.
@@ -1048,6 +2106,1624 @@ mod engine_tests {
             ledger.get_meta(repo_id, CURSOR_KEY).expect("cursor"),
             Some("2026-08-10T11:00:00Z".to_string()),
             "the watermark is the newest updatedAt swept, not the last page's first row"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_activity_resumes_each_pr_from_its_committed_provider_cursor() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 1);
+        track_for_backfill(&ledger, repo_id, 2);
+        let repo = &config("").projects[0].repos[0];
+        let interrupted = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("one-a", "2026-08-11T11:00:00Z")],
+                    Some("cursor one / next"),
+                    DETAIL_BUDGET_FLOOR - 1,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .with_activity_page(
+                2,
+                None,
+                activity_page(
+                    vec![activity("two-a", "2026-08-11T09:00:00Z")],
+                    Some("cursor two / next"),
+                    DETAIL_BUDGET_FLOOR - 1,
+                    Some(RateLimitUnit::Points),
+                ),
+            );
+
+        let first = backfill_activity(
+            &interrupted,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("budget stop is resumable");
+        assert!(first.stopped_for_budget);
+        let mut asked = interrupted.activities_asked();
+        asked.sort();
+        assert_eq!(asked, vec![(1, None), (2, None)]);
+        assert_eq!(
+            ledger
+                .activity_backfill(repo_id, 1)
+                .expect("progress")
+                .expect("started")
+                .cursor
+                .as_deref(),
+            Some("cursor one / next")
+        );
+
+        let resumed = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                Some("cursor one / next"),
+                activity_page(
+                    vec![activity("one-b", "2026-08-11T10:00:00Z")],
+                    None,
+                    4900,
+                    None,
+                ),
+            )
+            .with_activity_page(
+                2,
+                Some("cursor two / next"),
+                activity_page(
+                    vec![activity("two-b", "2026-08-11T08:00:00Z")],
+                    None,
+                    4899,
+                    None,
+                ),
+            );
+        let second = backfill_activity(
+            &resumed,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("resumed backfill");
+
+        assert!(!second.stopped_for_budget);
+        assert_eq!(second.points_remaining, Some(4899));
+        assert_eq!(second.requests_remaining, Some(5000));
+        let mut asked = resumed.activities_asked();
+        asked.sort();
+        assert_eq!(
+            asked,
+            vec![
+                (1, Some("cursor one / next".into())),
+                (2, Some("cursor two / next".into())),
+            ]
+        );
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .expect("activity")
+                .events
+                .len(),
+            4
+        );
+        assert!(
+            ledger
+                .activity_backfill(repo_id, 1)
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+        assert!(
+            ledger
+                .activity_backfill(repo_id, 2)
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_backfill_fetches_different_prs_concurrently() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        for number in 1..=9 {
+            track_for_backfill(&ledger, repo_id, number);
+        }
+        let forge = FakeForge::new(vec![]);
+
+        backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("backfill");
+
+        assert_eq!(forge.max_activity_in_flight(), ACTIVITY_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn activity_backfill_commits_fast_results_without_waiting_for_a_slow_peer() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        for number in 1..=9 {
+            track_for_backfill(&ledger, repo_id, number);
+        }
+        let forge = FakeForge::new(vec![]).delaying_activity_page(
+            1,
+            None,
+            std::time::Duration::from_millis(100),
+        );
+        let mut progress = RecordingProgress::default();
+        let future = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            now(),
+            &mut progress,
+        );
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), future)
+                .await
+                .is_err()
+        );
+        assert!(
+            (2..=9).any(|number| {
+                ledger
+                    .activity_backfill(repo_id, number)
+                    .expect("progress")
+                    .is_some_and(|state| state.completed_at.is_some())
+            }),
+            "fast results should be committed while a slow request remains in flight"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_activity_keeps_other_pr_progress_and_reports_malformed_pages() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 1);
+        track_for_backfill(&ledger, repo_id, 2);
+        let repo = &config("").projects[0].repos[0];
+        let mut malformed = activity("missing-id", "2026-08-11T11:00:00Z");
+        malformed.external_id = None;
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(1, None, activity_page(vec![malformed], None, 4900, None))
+            .with_activity_page(
+                2,
+                None,
+                activity_page(
+                    vec![activity("safe", "2026-08-11T10:00:00Z")],
+                    None,
+                    4899,
+                    None,
+                ),
+            );
+
+        let error = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect_err("malformed page is reported after safe work");
+
+        assert!(error.to_string().contains("#1"), "{error:#}");
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .filter_map(|event| event.external_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["safe"]
+        );
+        assert!(ledger.activity_backfill(repo_id, 1).unwrap().is_none());
+        assert!(
+            ledger
+                .activity_backfill(repo_id, 2)
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_activity_drains_free_cursor_pages_below_the_rate_floor() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 1);
+        let repo = &config("").projects[0].repos[0];
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("buffered-a", "2026-08-11T11:00:00Z")],
+                    Some("buffered cursor"),
+                    0,
+                    None,
+                ),
+            )
+            .with_activity_page(
+                1,
+                Some("buffered cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("buffered-b", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: None,
+                    next_rate_limit: None,
+                },
+            );
+
+        let stats = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("buffered cursor does not spend budget");
+
+        assert!(!stats.stopped_for_budget);
+        assert_eq!(forge.activities_asked().len(), 2);
+        assert_eq!(stats.events, 2);
+    }
+
+    #[tokio::test]
+    async fn backfill_activity_checks_the_budget_pool_named_for_the_next_request() {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 1);
+        let repo = &config("").projects[0].repos[0];
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("graphql", "2026-08-11T11:00:00Z")],
+                    Some("rest cursor"),
+                    0,
+                    Some(RateLimitUnit::Requests),
+                ),
+            )
+            .with_activity_page(
+                1,
+                Some("rest cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("rest", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: Some(ActivityRateLimit {
+                        unit: RateLimitUnit::Requests,
+                        cost: 1,
+                        remaining: 4999,
+                    }),
+                    next_rate_limit: None,
+                },
+            );
+
+        let stats = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("the request pool remains healthy");
+
+        assert!(!stats.stopped_for_budget);
+        assert_eq!(forge.activities_asked().len(), 2);
+        assert_eq!(stats.points_remaining, Some(0));
+        assert_eq!(stats.requests_remaining, Some(4999));
+    }
+
+    #[tokio::test]
+    async fn fresh_backfill_uses_the_provider_declared_initial_request_pool() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        let forge = FakeForge::new(vec![])
+            .with_initial_activity_rate_limit(RateLimitUnit::Requests)
+            .failing_point_budget()
+            .with_activity_page(
+                1,
+                None,
+                ForgeActivityPage {
+                    activities: vec![activity("request-first", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: Some(ActivityRateLimit {
+                        unit: RateLimitUnit::Requests,
+                        cost: 1,
+                        remaining: 4999,
+                    }),
+                    next_rate_limit: None,
+                },
+            );
+
+        let stats = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .expect("the healthy request pool is enough for a fresh traversal");
+
+        assert_eq!(stats.events, 1);
+        assert_eq!(stats.request_cost, 1);
+        assert_eq!(forge.activities_asked(), vec![(1, None)]);
+    }
+
+    #[tokio::test]
+    async fn exact_pr_backfill_does_not_fetch_other_tracked_pull_requests() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        track_for_backfill(&ledger, repo_id, 2);
+        let forge = FakeForge::new(vec![]).with_activity_page(
+            2,
+            None,
+            activity_page(
+                vec![activity("two", "2026-08-11T10:00:00Z")],
+                None,
+                4900,
+                None,
+            ),
+        );
+
+        let stats = backfill_activity_for_pr(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            2,
+            None,
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.prs, 1);
+        assert_eq!(stats.events, 1);
+        assert_eq!(forge.activities_asked(), vec![(2, None)]);
+        assert!(ledger.activity_backfill(repo_id, 1).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_pr_backfill_resumes_its_saved_provider_cursor() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 7);
+        ledger
+            .commit_activity_page(
+                repo_id,
+                7,
+                None,
+                &[],
+                Some("saved cursor"),
+                Some(ActivityRateLimitUnit::Requests),
+                now(),
+            )
+            .unwrap();
+        let forge = FakeForge::new(vec![]).with_activity_page(
+            7,
+            Some("saved cursor"),
+            ForgeActivityPage {
+                activities: vec![activity("resumed", "2026-08-11T10:00:00Z")],
+                next: None,
+                rate_limit: Some(ActivityRateLimit {
+                    unit: RateLimitUnit::Requests,
+                    cost: 1,
+                    remaining: 4999,
+                }),
+                next_rate_limit: None,
+            },
+        );
+
+        let stats = backfill_activity_for_pr(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            7,
+            None,
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.events, 1);
+        assert_eq!(stats.request_cost, 1);
+        assert_eq!(
+            forge.activities_asked(),
+            vec![(7, Some("saved cursor".into()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_pr_backfill_uses_the_provider_declared_rate_pool() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 9);
+        let forge = FakeForge::new(vec![])
+            .with_initial_activity_rate_limit(RateLimitUnit::Requests)
+            .failing_point_budget()
+            .with_activity_page(
+                9,
+                None,
+                ForgeActivityPage {
+                    activities: vec![],
+                    next: None,
+                    rate_limit: Some(ActivityRateLimit {
+                        unit: RateLimitUnit::Requests,
+                        cost: 1,
+                        remaining: 4999,
+                    }),
+                    next_rate_limit: None,
+                },
+            );
+
+        let stats = backfill_activity_for_pr(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            9,
+            None,
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.prs, 1);
+        assert_eq!(stats.request_cost, 1);
+    }
+
+    #[tokio::test]
+    async fn exact_pr_backfill_failure_keeps_the_committed_page_and_resume_cursor() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 11);
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                11,
+                None,
+                activity_page(
+                    vec![activity("kept", "2026-08-11T10:00:00Z")],
+                    Some("resume here"),
+                    4900,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .failing_activity_page(11, Some("resume here"));
+
+        let error = backfill_activity_for_pr(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            11,
+            None,
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap_err();
+        let failure = error.downcast_ref::<BackfillFailed>().unwrap();
+
+        assert_eq!(failure.stats.events, 1);
+        assert_eq!(failure.stats.pages, 1);
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(
+            ledger
+                .activity_backfill(repo_id, 11)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .as_deref(),
+            Some("resume here")
+        );
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn newly_tracked_activity_failure_is_returned_without_undoing_tracking_or_progress() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 13);
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                13,
+                None,
+                activity_page(
+                    vec![activity("kept", "2026-08-11T10:00:00Z")],
+                    Some("resume after tracking"),
+                    4900,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .failing_activity_page(13, Some("resume after tracking"));
+
+        let activity = backfill_newly_tracked_activity(
+            &actions::Tracked::Fetched,
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            13,
+            now(),
+        )
+        .await
+        .expect("a newly tracked PR schedules activity");
+
+        assert_eq!(activity.stats.events, 1);
+        assert_eq!(activity.stats.pages, 1);
+        assert!(
+            activity
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("fetching activity for #13"))
+        );
+        assert_eq!(ledger.list_tracked(repo_id).unwrap().len(), 1);
+        assert_eq!(
+            ledger
+                .activity_backfill(repo_id, 13)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .as_deref(),
+            Some("resume after tracking")
+        );
+    }
+
+    #[tokio::test]
+    async fn already_tracked_pr_does_not_schedule_an_automatic_backfill() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 14);
+        let forge = FakeForge::new(vec![]);
+
+        let activity = backfill_newly_tracked_activity(
+            &actions::Tracked::Already,
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            14,
+            now(),
+        )
+        .await;
+
+        assert!(activity.is_none());
+        assert!(forge.activities_asked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn backfill_low_point_pool_still_runs_later_request_and_free_cursors() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        for number in [1, 2, 3] {
+            track_for_backfill(&ledger, repo_id, number);
+        }
+        ledger
+            .commit_activity_page(
+                repo_id,
+                2,
+                None,
+                &[],
+                Some("request cursor"),
+                Some(ActivityRateLimitUnit::Requests),
+                now(),
+            )
+            .unwrap();
+        ledger
+            .commit_activity_page(repo_id, 3, None, &[], Some("free cursor"), None, now())
+            .unwrap();
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("point", "2026-08-11T11:00:00Z")],
+                    Some("low point cursor"),
+                    DETAIL_BUDGET_FLOOR - 1,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .with_activity_page(
+                2,
+                Some("request cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("request", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: Some(ActivityRateLimit {
+                        unit: RateLimitUnit::Requests,
+                        cost: 1,
+                        remaining: 4999,
+                    }),
+                    next_rate_limit: None,
+                },
+            )
+            .with_activity_page(
+                3,
+                Some("free cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("free", "2026-08-11T09:00:00Z")],
+                    next: None,
+                    rate_limit: None,
+                    next_rate_limit: None,
+                },
+            );
+
+        let stats = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(stats.stopped_for_budget);
+        assert_eq!(stats.events, 3);
+        let mut asked = forge.activities_asked();
+        asked.sort();
+        assert_eq!(
+            asked,
+            vec![
+                (1, None),
+                (2, Some("request cursor".into())),
+                (3, Some("free cursor".into())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_failed_point_budget_still_runs_saved_request_cursors() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        for number in [1, 2] {
+            track_for_backfill(&ledger, repo_id, number);
+        }
+        ledger
+            .commit_activity_page(
+                repo_id,
+                2,
+                None,
+                &[],
+                Some("request cursor"),
+                Some(ActivityRateLimitUnit::Requests),
+                now(),
+            )
+            .unwrap();
+        let forge = FakeForge::new(vec![])
+            .failing_point_budget()
+            .with_activity_page(
+                2,
+                Some("request cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("request", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: Some(ActivityRateLimit {
+                        unit: RateLimitUnit::Requests,
+                        cost: 1,
+                        remaining: 4999,
+                    }),
+                    next_rate_limit: None,
+                },
+            );
+
+        let error = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap_err();
+        let failure = error.downcast_ref::<BackfillFailed>().unwrap();
+
+        assert_eq!(failure.stats.events, 1);
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.failures[0].number, 1);
+        assert_eq!(
+            forge.activities_asked(),
+            vec![(2, Some("request cursor".into()))]
+        );
+    }
+
+    #[test]
+    fn a_detail_inserted_event_does_not_end_history_fetching() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        let known = activity("detail-event", "2026-08-11T11:00:00Z");
+        ledger
+            .record_forge_activity(repo_id, 1, &new_activity(&known, now()))
+            .unwrap();
+        let missing = activity("missed-between-syncs", "2026-08-11T10:00:00Z");
+        let page =
+            incremental_page_events(&ledger, repo_id, 1, "ashb", &[known, missing], None, now())
+                .unwrap();
+        assert!(!page.reached_boundary);
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].external_id.as_deref(),
+            Some("missed-between-syncs")
+        );
+    }
+
+    #[test]
+    fn contextual_history_is_retained_without_hiding_the_page_boundary() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        let mut unrelated = activity("someone-else", "2026-08-11T11:00:00Z");
+        unrelated.actor = Some("other".into());
+        let mut review = unrelated.clone();
+        review.kind = ActivityKind::ReviewSubmitted;
+        let mut merge = unrelated.clone();
+        merge.kind = ActivityKind::PrMerged;
+        let mut old = activity("older", "2026-08-10T11:00:00Z");
+        old.actor = Some("other".into());
+        let boundary = "2026-08-11T00:00:00Z".parse().unwrap();
+        let page = incremental_page_events(
+            &ledger,
+            repo_id,
+            1,
+            "ashb",
+            &[unrelated, review, merge, old],
+            Some(boundary),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 3);
+        assert!(
+            page.events
+                .iter()
+                .all(|event| event.relation == reviewq_core::model::ActivityRelation::Context)
+        );
+        assert!(page.reached_boundary);
+        let mut own = activity("own-merge", "2026-08-11T11:00:00Z");
+        own.kind = ActivityKind::PrMerged;
+        assert_eq!(
+            activity_relation(&ledger, repo_id, 1, "ashb", &own, None, false).unwrap(),
+            reviewq_core::model::ActivityRelation::Own
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_sync_stops_incremental_activity_at_the_saved_coverage_boundary() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 1);
+        let repo = &cfg.projects[0].repos[0];
+        let initial = FakeForge::new(vec![]).with_activity_page(
+            1,
+            None,
+            activity_page(
+                vec![activity("known", "2026-08-11T10:00:00Z")],
+                None,
+                4900,
+                None,
+            ),
+        );
+        backfill_activity(
+            &initial,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            "2026-08-11T10:05:00Z".parse().unwrap(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+        give_attention(&ledger, repo_id, 1);
+
+        let forge = FakeForge::new(vec![]).with_activity_page(
+            1,
+            None,
+            activity_page(
+                vec![
+                    activity("new", "2026-08-11T11:00:00Z"),
+                    activity("known", "2026-08-11T10:00:00Z"),
+                    activity("older-unseen", "2026-08-11T09:00:00Z"),
+                ],
+                Some("must not be fetched"),
+                4899,
+                Some(RateLimitUnit::Points),
+            ),
+        );
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            Some(4900),
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        assert_eq!(forge.activities_asked(), vec![(1, None)]);
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .filter_map(|event| event.external_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["new", "known"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_clearing_attention_still_refreshes_activity() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        complete_initial_activity(&ledger, repo_id, 1);
+        give_attention(&ledger, repo_id, 1);
+        let review = ForgeActivity {
+            relation: reviewq_core::model::ActivityRelation::Own,
+            kind: ActivityKind::ReviewSubmitted,
+            head_sha: Some("sha1".into()),
+            payload: ActivityPayload::ReviewSubmitted {
+                result: reviewq_core::model::ReviewResult::Commented,
+                reviewed_sha: Some("sha1".into()),
+            },
+            ..activity("review", "2026-08-11T12:01:00Z")
+        };
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-11T12:01:00Z")])])
+            .with_detail(1, 4900)
+            .with_current_head_review(1)
+            .with_activity_page(1, None, activity_page(vec![review], None, 4899, None));
+        let project = &cfg.projects[0];
+        let rules = cfg.interest_for_login(project, "ashb").unwrap();
+
+        sync_repo(
+            &cfg,
+            &forge,
+            &ledger,
+            repo_id,
+            project,
+            &project.repos[0],
+            &rules,
+            "ashb",
+            false,
+            Detail::Every,
+            ts("2026-08-11T12:02:00Z"),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            ledger
+                .show(repo_id, 1)
+                .unwrap()
+                .unwrap()
+                .attention
+                .is_empty()
+        );
+        assert!(
+            ledger
+                .has_forge_activity(repo_id, ActivityKind::ReviewSubmitted, "review")
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_refresh_survives_restart_after_detail_clears_attention() {
+        let cfg = config("");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let ledger = Ledger::open(&path).unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        complete_initial_activity(&ledger, repo_id, 1);
+        give_attention(&ledger, repo_id, 1);
+        let repo = &cfg.projects[0].repos[0];
+        let forge = FakeForge::new(vec![])
+            .with_detail(1, 4900)
+            .with_current_head_review(1);
+        let show = ledger.show(repo_id, 1).unwrap().unwrap();
+        refresh_one(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            &[],
+            false,
+            &HashSet::new(),
+            &show.pr,
+            show.tracked_reason.as_deref().unwrap(),
+            &[],
+            now(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            ledger
+                .show(repo_id, 1)
+                .unwrap()
+                .unwrap()
+                .attention
+                .is_empty()
+        );
+        drop(ledger);
+        let ledger = Ledger::open(&path).unwrap();
+        let forge = FakeForge::new(vec![]).with_activity_page(
+            1,
+            None,
+            activity_page(
+                vec![activity("after-restart", "2026-08-11T11:00:00Z")],
+                None,
+                4900,
+                None,
+            ),
+        );
+
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            Some(0),
+            now(),
+            &mut Stats {
+                remaining: Some(0),
+                ..Stats::default()
+            },
+            &mut RecordingProgress::default(),
+        )
+        .await;
+        assert!(forge.activities_asked().is_empty());
+        drop(ledger);
+        let ledger = Ledger::open(&path).unwrap();
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            Some(4900),
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        assert!(
+            ledger
+                .has_forge_activity(repo_id, ActivityKind::Commented, "after-restart")
+                .unwrap()
+        );
+        assert!(
+            ledger
+                .activity_refresh_candidates(repo_id)
+                .unwrap()
+                .is_empty()
+        );
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            Some(4900),
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+        assert_eq!(forge.activities_asked(), [(1, None)]);
+    }
+
+    #[tokio::test]
+    async fn equal_timestamp_activity_survives_a_page_failure_and_resume() {
+        let cfg = config("");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let ledger = Ledger::open(&path).unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        complete_initial_activity(&ledger, repo_id, 1);
+        give_attention(&ledger, repo_id, 1);
+        let known = activity("z-known", "2026-08-11T10:00:00Z");
+        ledger
+            .record_forge_activity(repo_id, 1, &new_activity(&known, now()))
+            .unwrap();
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![known, activity("b-same-page", "2026-08-11T10:00:00Z")],
+                    Some("same timestamp"),
+                    4900,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .failing_activity_page(1, Some("same timestamp"));
+        let repo = &cfg.projects[0].repos[0];
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            None,
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+        assert!(
+            ledger
+                .has_forge_activity(repo_id, ActivityKind::Commented, "b-same-page")
+                .unwrap()
+        );
+        ledger.untrack(repo_id, 1, now()).unwrap();
+        assert!(ledger.list_tracked(repo_id).unwrap().is_empty());
+        drop(ledger);
+        let ledger = Ledger::open(&path).unwrap();
+        let resumed = FakeForge::new(vec![]).with_activity_page(
+            1,
+            Some("same timestamp"),
+            activity_page(
+                vec![
+                    activity("a-next-page", "2026-08-11T10:00:00Z"),
+                    activity("older", "2026-08-11T09:00:00Z"),
+                ],
+                Some("must not fetch"),
+                4899,
+                Some(RateLimitUnit::Points),
+            ),
+        );
+
+        sync_activity(
+            &resumed,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            None,
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        assert!(
+            ledger
+                .has_forge_activity(repo_id, ActivityKind::Commented, "a-next-page")
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .has_forge_activity(repo_id, ActivityKind::Commented, "older")
+                .unwrap()
+        );
+        assert_eq!(
+            resumed.activities_asked(),
+            [(1, Some("same timestamp".into()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_activity_sync_fetches_only_the_selected_pr() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 1);
+        track_for_backfill(&ledger, repo_id, 2);
+        let forge = FakeForge::new(vec![])
+            .failing_point_budget()
+            .with_activity_page(
+                2,
+                None,
+                activity_page(
+                    vec![activity("selected", "2026-08-11T11:00:00Z")],
+                    None,
+                    4899,
+                    None,
+                ),
+            );
+
+        sync_activity_for_pr(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            2,
+            Some(4900),
+            now(),
+            &mut QuietProgress,
+        )
+        .await;
+
+        assert_eq!(forge.activities_asked(), vec![(2, None)]);
+        assert!(ledger.activity_backfill(repo_id, 1).unwrap().is_none());
+        assert!(
+            ledger
+                .activity_backfill(repo_id, 2)
+                .unwrap()
+                .is_some_and(|state| state.completed_at.is_some())
+        );
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::Pr { repo_id, number: 2 }, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .map(|event| event.external_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("selected")]
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_incremental_activity_reuses_the_detail_budget() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        track_for_backfill(&ledger, repo_id, 2);
+        complete_initial_activity(&ledger, repo_id, 2);
+        let forge = FakeForge::new(vec![])
+            .failing_point_budget()
+            .with_activity_page(
+                2,
+                None,
+                activity_page(
+                    vec![activity("incremental", "2026-08-11T11:00:00Z")],
+                    None,
+                    4899,
+                    None,
+                ),
+            );
+
+        sync_activity_for_pr(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            2,
+            Some(4900),
+            now(),
+            &mut QuietProgress,
+        )
+        .await;
+
+        assert_eq!(forge.activities_asked(), vec![(2, None)]);
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::Pr { repo_id, number: 2 }, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .map(|event| event.external_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("incremental")]
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_activity_fetches_different_prs_concurrently() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        for number in [1, 2] {
+            track_for_backfill(&ledger, repo_id, number);
+            complete_initial_activity(&ledger, repo_id, number);
+            give_attention(&ledger, repo_id, number);
+        }
+        let forge = FakeForge::new(vec![]);
+
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            None,
+            Some(4900),
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        assert!(forge.max_activity_in_flight() > 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_sync_only_refreshes_completed_history_for_attention_prs() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
+        for number in [1, 2] {
+            track_for_backfill(&ledger, repo_id, number);
+            complete_initial_activity(&ledger, repo_id, number);
+        }
+        give_attention(&ledger, repo_id, 2);
+        let forge = FakeForge::new(vec![]);
+
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            None,
+            Some(4900),
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        assert_eq!(forge.activities_asked(), vec![(2, None)]);
+    }
+
+    #[tokio::test]
+    async fn incremental_activity_resumes_after_a_committed_page_then_provider_failure() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        complete_initial_activity(&ledger, repo_id, 1);
+        give_attention(&ledger, repo_id, 1);
+        let repo = &cfg.projects[0].repos[0];
+        let interrupted = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("incremental-a", "2026-08-11T11:00:00Z")],
+                    Some("incremental cursor"),
+                    4900,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .failing_activity_page(1, Some("incremental cursor"));
+        let mut first_stats = Stats::default();
+        let mut first_progress = RecordingProgress::default();
+
+        sync_activity(
+            &interrupted,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            None,
+            now(),
+            &mut first_stats,
+            &mut first_progress,
+        )
+        .await;
+
+        assert_eq!(first_stats.activity_events, 1);
+        assert_eq!(first_stats.activity_errors, 1);
+        assert_eq!(first_progress.pages, [("activity".into(), 1, 1)]);
+        assert_eq!(
+            ledger
+                .activity_incremental(repo_id, 1)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .as_deref(),
+            Some("incremental cursor")
+        );
+
+        let resumed = FakeForge::new(vec![]).with_activity_page(
+            1,
+            Some("incremental cursor"),
+            activity_page(
+                vec![activity("incremental-b", "2026-08-11T10:00:00Z")],
+                None,
+                4899,
+                None,
+            ),
+        );
+        sync_activity(
+            &resumed,
+            &ledger,
+            repo_id,
+            repo,
+            "ashb",
+            None,
+            None,
+            now(),
+            &mut Stats::default(),
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        assert_eq!(
+            resumed.activities_asked(),
+            vec![(1, Some("incremental cursor".into()))]
+        );
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .filter_map(|event| event.external_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["incremental-a", "incremental-b"]
+        );
+        assert_eq!(
+            ledger
+                .activity_incremental(repo_id, 1)
+                .unwrap()
+                .unwrap()
+                .cursor,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_budget_stop_keeps_the_cursor_and_runs_later_healthy_pools() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        for number in [1, 2, 3] {
+            track_for_backfill(&ledger, repo_id, number);
+            complete_initial_activity(&ledger, repo_id, number);
+            give_attention(&ledger, repo_id, number);
+        }
+        assert_eq!(
+            ledger
+                .commit_incremental_activity_page(
+                    repo_id,
+                    2,
+                    &ledger
+                        .begin_incremental_activity(repo_id, 2, now())
+                        .unwrap(),
+                    &[],
+                    Some("request cursor"),
+                    Some(ActivityRateLimitUnit::Requests)
+                )
+                .unwrap(),
+            ActivityPageCommit::Applied { inserted: 0 }
+        );
+        assert_eq!(
+            ledger
+                .commit_incremental_activity_page(
+                    repo_id,
+                    3,
+                    &ledger
+                        .begin_incremental_activity(repo_id, 3, now())
+                        .unwrap(),
+                    &[],
+                    Some("free incremental cursor"),
+                    None
+                )
+                .unwrap(),
+            ActivityPageCommit::Applied { inserted: 0 }
+        );
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("point-event", "2026-08-11T11:00:00Z")],
+                    Some("low-point cursor"),
+                    DETAIL_BUDGET_FLOOR - 1,
+                    Some(RateLimitUnit::Points),
+                ),
+            )
+            .with_activity_page(
+                2,
+                Some("request cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("request-event", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: Some(ActivityRateLimit {
+                        unit: RateLimitUnit::Requests,
+                        cost: 1,
+                        remaining: 4999,
+                    }),
+                    next_rate_limit: None,
+                },
+            )
+            .with_activity_page(
+                3,
+                Some("free incremental cursor"),
+                ForgeActivityPage {
+                    activities: vec![activity("free-event", "2026-08-11T10:00:00Z")],
+                    next: None,
+                    rate_limit: None,
+                    next_rate_limit: None,
+                },
+            );
+        let mut stats = Stats::default();
+
+        sync_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            None,
+            None,
+            now(),
+            &mut stats,
+            &mut RecordingProgress::default(),
+        )
+        .await;
+
+        let mut asked = forge.activities_asked();
+        asked.sort();
+        assert_eq!(
+            asked,
+            vec![
+                (1, None),
+                (2, Some("request cursor".into())),
+                (3, Some("free incremental cursor".into())),
+            ]
+        );
+        assert_eq!(stats.activity_events, 3);
+        assert_eq!(stats.activity_request_cost, 1);
+        assert_eq!(
+            ledger
+                .activity_incremental(repo_id, 1)
+                .unwrap()
+                .unwrap()
+                .cursor
+                .as_deref(),
+            Some("low-point cursor")
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_error_retains_partial_success_statistics() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        track_for_backfill(&ledger, repo_id, 2);
+        let mut malformed = activity("missing-id", "2026-08-11T10:00:00Z");
+        malformed.external_id = None;
+        let forge = FakeForge::new(vec![])
+            .with_activity_page(
+                1,
+                None,
+                activity_page(
+                    vec![activity("stored", "2026-08-11T11:00:00Z")],
+                    None,
+                    4900,
+                    None,
+                ),
+            )
+            .with_activity_page(2, None, activity_page(vec![malformed], None, 4899, None));
+
+        let error = backfill_activity(
+            &forge,
+            &ledger,
+            repo_id,
+            &config("").projects[0].repos[0],
+            "ashb",
+            now(),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<BackfillFailed>()
+            .expect("typed activity failure");
+
+        assert_eq!(failure.stats.events, 1);
+        assert_eq!(failure.stats.pages, 1);
+        assert_eq!(failure.stats.prs, 1);
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.failures[0].number, 2);
+    }
+
+    #[tokio::test]
+    async fn activity_failure_is_reported_without_blocking_detail_commit() {
+        let cfg = config("");
+        let mut malformed = activity("missing-id", "2026-08-11T11:00:00Z");
+        malformed.external_id = None;
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-11T11:00:00Z")])])
+            .with_review_request(1, 4900)
+            .with_activity_page(1, None, activity_page(vec![malformed], None, 4899, None));
+
+        let (ledger, repo_id, progress) = sync(&cfg, &forge).await;
+
+        assert_eq!(ledger.queue(repo_id).unwrap().len(), 1);
+        assert_eq!(progress.summaries[0].stats.activity_errors, 1);
+        assert!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .all(|event| event.kind == ActivityKind::AttentionChanged)
+        );
+        assert_eq!(
+            progress
+                .pages
+                .into_iter()
+                .filter(|(what, _, _)| what == "activity")
+                .collect::<Vec<_>>(),
+            [("activity".into(), 1, 1)]
         );
     }
 
@@ -1295,6 +3971,85 @@ mod engine_tests {
     }
 
     #[tokio::test]
+    async fn detail_sync_clears_an_old_resolution_without_waiting_for_history() {
+        let cfg = config("");
+        let ledger = Ledger::open_in_memory().unwrap();
+        let repo_id = ledger.ensure_repo(&repo_key()).unwrap();
+        track_for_backfill(&ledger, repo_id, 1);
+        let thread = reviewq_core::model::ThreadState {
+            thread_id: "resolved".into(),
+            i_own: true,
+            is_resolved: true,
+            resolved_by: Some("author".into()),
+            last_comment_author: Some("ashb".into()),
+            last_comment_at: Some(now()),
+            my_last_comment_at: Some(now()),
+        };
+        let first = FakeForge::new(vec![])
+            .with_detail(1, 4900)
+            .with_detail_activity(1, vec![thread.clone()], vec![]);
+        let snapshot = ledger.show(repo_id, 1).unwrap().unwrap().pr;
+        let result = refresh_one(
+            &first,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            &[],
+            false,
+            &HashSet::new(),
+            &snapshot,
+            "manual",
+            &[],
+            now(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Some((_, true))));
+        let review = ForgeActivity {
+            relation: reviewq_core::model::ActivityRelation::Own,
+            kind: ActivityKind::ReviewSubmitted,
+            payload: ActivityPayload::ReviewSubmitted {
+                result: reviewq_core::model::ReviewResult::Commented,
+                reviewed_sha: Some("sha1".into()),
+            },
+            ..activity("my-review", "2026-08-12T10:00:00Z")
+        };
+        let second = FakeForge::new(vec![])
+            .with_detail(1, 4900)
+            .with_current_head_review(1)
+            .with_detail_activity(1, vec![thread], vec![review]);
+        let result = refresh_one(
+            &second,
+            &ledger,
+            repo_id,
+            &cfg.projects[0].repos[0],
+            "ashb",
+            &[],
+            false,
+            &HashSet::new(),
+            &snapshot,
+            "manual",
+            &[],
+            "2026-08-12T11:00:00Z".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Some((_, false))));
+        assert!(ledger.queue(repo_id).unwrap().is_empty());
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::All, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            4
+        );
+        assert!(first.activities_asked().is_empty());
+        assert!(second.activities_asked().is_empty());
+    }
+
+    #[tokio::test]
     async fn refreshing_one_pr_surfaces_a_live_request_after_reviewing_the_head() {
         let cfg = config("");
         let forge = FakeForge::new(vec![Page::of(vec![pr(7, "2026-08-09T09:00:00Z")])])
@@ -1437,6 +4192,9 @@ mod engine_tests {
         // Reviewed and answered, so it wants nothing: tracked, open, waiting on
         // the author — which is where the PR this was reported against sat.
         ledger.clear_attention(repo_id, 7).expect("reviewed");
+        ledger
+            .set_done(repo_id, 7, "head", ts("2026-08-10T00:00:00Z"))
+            .unwrap();
         assert_eq!(
             ledger
                 .waiting(repo_id)
@@ -1451,7 +4209,7 @@ mod engine_tests {
         // one PR's detail.
         let forge = FakeForge::new(vec![])
             .with_detail(7, 4800)
-            .with_detail_state(7, PrState::Closed);
+            .with_detail_transition(7, PrState::Closed, Some(ts("2026-08-11T11:45:00Z")));
         let show = ledger.show(repo_id, 7).expect("show").expect("stored");
         let outcome = refresh_one(
             &forge,
@@ -1486,6 +4244,18 @@ mod engine_tests {
             "nobody is waiting on a closed PR"
         );
         assert!(ledger.queue(repo_id).expect("queue").is_empty());
+        let show = ledger.show(repo_id, 7).unwrap().unwrap();
+        assert_eq!(show.pr.state_changed_at, Some(ts("2026-08-11T11:45:00Z")));
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::Pr { repo_id, number: 7 }, None, 10)
+                .unwrap()
+                .events
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            vec![ActivityKind::AttentionChanged, ActivityKind::PrClosed]
+        );
     }
 
     #[tokio::test]

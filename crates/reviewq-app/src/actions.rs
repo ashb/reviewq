@@ -17,8 +17,9 @@
 
 use anyhow::{Context, Result, bail};
 use jiff::{Timestamp, Unit};
+use reviewq_core::model::{ActivityKind, ActivityPayload, ActivitySource};
 use reviewq_forge::Forge;
-use reviewq_ledger::{Ledger, RepoId};
+use reviewq_ledger::{Ledger, NewActivityEvent, RepoId};
 
 use crate::config::{Config, RepoRef};
 
@@ -28,9 +29,8 @@ use crate::config::{Config, RepoRef};
 /// withdrawn, clears that one — so a `done` on a PR you were asked to review
 /// leaves it asking, which is the point.
 pub fn done(ledger: &Ledger, repo_id: RepoId, number: u64, head_sha: &str) -> Result<()> {
-    ledger.set_done(repo_id, number, head_sha, Timestamp::now())?;
-    ledger.clear_done_attention(repo_id, number)?;
-    Ok(())
+    let now = Timestamp::now();
+    Ok(ledger.record_done_action(repo_id, number, head_sha, now, &done_event(head_sha, now))?)
 }
 
 /// Tell GitHub the PR's notifications have been read.
@@ -56,8 +56,17 @@ pub fn snooze(
     number: u64,
     until: Timestamp,
 ) -> Result<Timestamp> {
-    ledger.set_snoozed_until(repo_id, number, until)?;
-    ledger.clear_attention(repo_id, number)?;
+    let now = Timestamp::now();
+    ledger.record_snooze_action(
+        repo_id,
+        number,
+        until,
+        &local_event(
+            ActivityKind::Snoozed,
+            now,
+            ActivityPayload::Snoozed { until },
+        ),
+    )?;
     Ok(until.round(Unit::Second).unwrap_or(until))
 }
 
@@ -70,7 +79,19 @@ pub fn snooze(
 /// them, so a PR came back empty and stayed that way until the next sync
 /// rediscovered what had been true all along.
 pub fn set_muted(ledger: &Ledger, repo_id: RepoId, number: u64, muted: bool) -> Result<()> {
-    Ok(ledger.set_muted(repo_id, number, muted)?)
+    let now = Timestamp::now();
+    let kind = if muted {
+        ActivityKind::Muted
+    } else {
+        ActivityKind::Unmuted
+    };
+    ledger.record_muted_action(
+        repo_id,
+        number,
+        muted,
+        &local_event(kind, now, ActivityPayload::None),
+    )?;
+    Ok(())
 }
 
 /// Stop watching a PR: drop what it was tracked for, and the attention with it.
@@ -83,14 +104,31 @@ pub fn set_muted(ledger: &Ledger, repo_id: RepoId, number: u64, muted: bool) -> 
 ///
 /// [`track`] is the undo, which is why this stops short of deleting anything.
 pub fn untrack(ledger: &Ledger, repo_id: RepoId, number: u64) -> Result<bool> {
-    Ok(ledger.untrack(repo_id, number, Timestamp::now())?)
+    let now = Timestamp::now();
+    Ok(ledger.record_untrack_action(
+        repo_id,
+        number,
+        now,
+        &local_event(ActivityKind::Untracked, now, ActivityPayload::None),
+    )?)
 }
 
 /// Set or clear a PR's defer, which sinks it to the bottom of the queue without
 /// hiding it. It clears itself once something new happens on the PR.
 pub fn set_deferred(ledger: &Ledger, repo_id: RepoId, number: u64, deferred: bool) -> Result<()> {
-    let at = deferred.then(Timestamp::now);
-    ledger.set_deferred_at(repo_id, number, at)?;
+    let now = Timestamp::now();
+    let at = deferred.then_some(now);
+    let kind = if deferred {
+        ActivityKind::Deferred
+    } else {
+        ActivityKind::Undeferred
+    };
+    ledger.record_deferred_action(
+        repo_id,
+        number,
+        at,
+        &local_event(kind, now, ActivityPayload::None),
+    )?;
     Ok(())
 }
 
@@ -124,12 +162,19 @@ pub async fn track(
     number: u64,
     forge: &dyn Forge,
 ) -> Result<Tracked> {
+    let now = Timestamp::now();
     if ledger.show(repo_id, number)?.is_some() {
-        return Ok(if ledger.track(repo_id, number)? {
-            Tracked::Marked
-        } else {
-            Tracked::Already
-        });
+        return Ok(
+            if ledger.record_track_action(
+                repo_id,
+                number,
+                &local_event(ActivityKind::Tracked, now, ActivityPayload::None),
+            )? {
+                Tracked::Marked
+            } else {
+                Tracked::Already
+            },
+        );
     }
 
     let fetched = forge
@@ -147,12 +192,35 @@ pub async fn track(
             .map(|label| (label.name, label.color))
             .collect::<Vec<_>>(),
     )?;
-    ledger.upsert_pr(
+    ledger.record_fetched_track_action(
         repo_id,
         &fetched.pr,
-        Some(reviewq_ledger::TrackedReason::Involved("manual".into())),
+        now,
+        &local_event(ActivityKind::Tracked, now, ActivityPayload::None),
     )?;
     Ok(Tracked::Fetched)
+}
+
+fn local_event(kind: ActivityKind, at: Timestamp, payload: ActivityPayload) -> NewActivityEvent {
+    NewActivityEvent {
+        relation: reviewq_core::model::ActivityRelation::Own,
+        source: ActivitySource::Local,
+        kind,
+        occurred_at: at,
+        recorded_at: at,
+        actor: None,
+        head_sha: None,
+        external_id: None,
+        permalink: None,
+        payload,
+    }
+}
+
+fn done_event(head_sha: &str, at: Timestamp) -> NewActivityEvent {
+    NewActivityEvent {
+        head_sha: Some(head_sha.into()),
+        ..local_event(ActivityKind::Done, at, ActivityPayload::None)
+    }
 }
 
 /// Turn a friendly duration (`3d`, `12h`, `1w2d`) into the instant it reaches
@@ -178,8 +246,10 @@ pub fn snooze_until(now: Timestamp, duration: &str) -> Result<Timestamp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot, PrState};
-    use reviewq_ledger::{RepoKey, TrackedReason};
+    use reviewq_core::model::{
+        ActivityKind, ActivityPayload, Attention, AttentionReason, MyState, PrSnapshot, PrState,
+    };
+    use reviewq_ledger::{ActivityScope, RepoKey, TrackedReason};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -252,6 +322,21 @@ mod tests {
         AttentionReason::Mention { by: "kaxil".into() }
     }
 
+    fn own_activity(
+        ledger: &Ledger,
+        repo_id: RepoId,
+        number: u64,
+    ) -> Vec<(ActivityKind, ActivityPayload)> {
+        ledger
+            .activity_page(ActivityScope::Pr { repo_id, number }, None, 100)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|event| event.kind != ActivityKind::AttentionChanged)
+            .map(|event| (event.kind, event.payload))
+            .collect()
+    }
+
     #[test]
     fn done_records_the_head_and_takes_it_off_the_queue() {
         let (ledger, repo_id, number) = queued(mention());
@@ -263,6 +348,19 @@ mod tests {
         let mine = ledger.my_state(repo_id, number).unwrap();
         assert_eq!(mine.done_sha.as_deref(), Some("abc1234"));
         assert!(mine.done_at.is_some());
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Done, ActivityPayload::None)]
+        );
+        assert_eq!(
+            ledger
+                .activity_page(ActivityScope::Pr { repo_id, number }, None, 1)
+                .unwrap()
+                .events[0]
+                .head_sha
+                .as_deref(),
+            Some("abc1234")
+        );
     }
 
     #[test]
@@ -279,6 +377,22 @@ mod tests {
     }
 
     #[test]
+    fn repeating_done_records_each_decision() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        done(&ledger, repo_id, number, "abc1234").unwrap();
+        done(&ledger, repo_id, number, "abc1234").unwrap();
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [
+                (ActivityKind::Done, ActivityPayload::None),
+                (ActivityKind::Done, ActivityPayload::None),
+            ]
+        );
+    }
+
+    #[test]
     fn snooze_clears_the_queue_entry_and_reports_whole_seconds() {
         let (ledger, repo_id, number) = queued(mention());
         let until = ts("2026-08-14T12:00:00.123456Z");
@@ -291,6 +405,27 @@ mod tests {
             ledger.my_state(repo_id, number).unwrap().snoozed_until,
             Some(until),
             "stored at full precision, only the report is rounded"
+        );
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Snoozed, ActivityPayload::Snoozed { until })]
+        );
+    }
+
+    #[test]
+    fn repeating_snooze_records_each_decision() {
+        let (ledger, repo_id, number) = queued(mention());
+        let until = ts("2026-08-14T12:00:00Z");
+
+        snooze(&ledger, repo_id, number, until).unwrap();
+        snooze(&ledger, repo_id, number, until).unwrap();
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [
+                (ActivityKind::Snoozed, ActivityPayload::Snoozed { until }),
+                (ActivityKind::Snoozed, ActivityPayload::Snoozed { until }),
+            ]
         );
     }
 
@@ -305,6 +440,10 @@ mod tests {
         let hidden = ledger.muted(repo_id).unwrap();
         assert_eq!(hidden.len(), 1, "but findable, and it says why");
         assert_eq!(hidden[0].top.reason, mention());
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Muted, ActivityPayload::None)]
+        );
     }
 
     #[test]
@@ -319,6 +458,13 @@ mod tests {
         assert!(!ledger.my_state(repo_id, number).unwrap().muted);
         assert_eq!(ledger.queue(repo_id).unwrap().len(), 1);
         assert!(ledger.muted(repo_id).unwrap().is_empty());
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [
+                (ActivityKind::Unmuted, ActivityPayload::None),
+                (ActivityKind::Muted, ActivityPayload::None),
+            ]
+        );
     }
 
     #[test]
@@ -333,6 +479,116 @@ mod tests {
 
         set_deferred(&ledger, repo_id, number, false).unwrap();
         assert!(!ledger.queue(repo_id).unwrap()[0].deferred);
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [
+                (ActivityKind::Undeferred, ActivityPayload::None),
+                (ActivityKind::Deferred, ActivityPayload::None),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expired_defer_can_be_renewed() {
+        let (ledger, repo_id, number) = queued(mention());
+        ledger
+            .set_deferred_at(repo_id, number, Some(ts("2026-08-11T08:00:00Z")))
+            .unwrap();
+        assert!(!ledger.queue(repo_id).unwrap()[0].deferred);
+
+        set_deferred(&ledger, repo_id, number, true).unwrap();
+
+        assert!(ledger.queue(repo_id).unwrap()[0].deferred);
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Deferred, ActivityPayload::None)]
+        );
+    }
+
+    #[test]
+    fn muting_an_already_muted_pr_records_no_extra_event() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        set_muted(&ledger, repo_id, number, true).unwrap();
+        set_muted(&ledger, repo_id, number, true).unwrap();
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Muted, ActivityPayload::None)]
+        );
+    }
+
+    #[test]
+    fn unmuting_an_unmuted_pr_records_no_extra_event() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        set_muted(&ledger, repo_id, number, true).unwrap();
+        set_muted(&ledger, repo_id, number, false).unwrap();
+        set_muted(&ledger, repo_id, number, false).unwrap();
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [
+                (ActivityKind::Unmuted, ActivityPayload::None),
+                (ActivityKind::Muted, ActivityPayload::None),
+            ]
+        );
+    }
+
+    #[test]
+    fn deferring_an_already_deferred_pr_records_no_extra_event() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        set_deferred(&ledger, repo_id, number, true).unwrap();
+        set_deferred(&ledger, repo_id, number, true).unwrap();
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Deferred, ActivityPayload::None)]
+        );
+    }
+
+    #[test]
+    fn undefering_an_undeferred_pr_records_no_extra_event() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        set_deferred(&ledger, repo_id, number, true).unwrap();
+        set_deferred(&ledger, repo_id, number, false).unwrap();
+        set_deferred(&ledger, repo_id, number, false).unwrap();
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [
+                (ActivityKind::Undeferred, ActivityPayload::None),
+                (ActivityKind::Deferred, ActivityPayload::None),
+            ]
+        );
+    }
+
+    #[test]
+    fn untracking_records_the_action_without_losing_the_pr_or_history() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        assert!(untrack(&ledger, repo_id, number).unwrap());
+
+        assert!(ledger.show(repo_id, number).unwrap().is_some());
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Untracked, ActivityPayload::None)]
+        );
+    }
+
+    #[test]
+    fn untracking_an_untracked_pr_records_no_extra_event() {
+        let (ledger, repo_id, number) = queued(mention());
+
+        assert!(untrack(&ledger, repo_id, number).unwrap());
+        assert!(untrack(&ledger, repo_id, number).unwrap());
+
+        assert_eq!(
+            own_activity(&ledger, repo_id, number),
+            [(ActivityKind::Untracked, ActivityPayload::None)]
+        );
     }
 
     #[tokio::test]
@@ -357,6 +613,31 @@ mod tests {
             ledger.label_colours(repo_id).unwrap()["area:task-sdk"],
             "0e8a16"
         );
+        assert_eq!(
+            own_activity(&ledger, repo_id, 4242),
+            [(ActivityKind::Tracked, ActivityPayload::None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tracking_an_already_tracked_pr_records_no_event() {
+        let (ledger, repo_id, number) = queued(mention());
+        let repo = RepoRef {
+            owner: "apache".into(),
+            name: "airflow".into(),
+            host: "github.com".into(),
+            path: None,
+        };
+        let forge = crate::fake_forge::FakeForge::new(vec![]);
+
+        assert_eq!(
+            track(&ledger, repo_id, &repo, number, &forge)
+                .await
+                .unwrap(),
+            Tracked::Already
+        );
+
+        assert!(own_activity(&ledger, repo_id, number).is_empty());
     }
 
     #[test]

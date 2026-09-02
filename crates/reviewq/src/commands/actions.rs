@@ -135,8 +135,11 @@ pub async fn track(loaded: &Loaded, args: &TrackArgs, output: &impl Output) -> R
             .cloned()
     });
 
-    let (tracked, refreshed) =
-        reviewq_app::sync::track_one(&loaded.config, named.as_ref(), number).await?;
+    let reviewq_app::sync::TrackedOne {
+        tracked,
+        refreshed,
+        activity: _,
+    } = reviewq_app::sync::track_one(&loaded.config, named.as_ref(), number).await?;
 
     let what = match tracked {
         actions::Tracked::Already => "was already tracked",
