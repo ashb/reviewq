@@ -10,7 +10,10 @@ use std::sync::Mutex;
 
 use jiff::Timestamp;
 use reviewq_core::model::{PrSnapshot, PrState};
-use reviewq_forge::{FetchedPr, Forge, ForgeError, PrDetail, RateLimit, Result, SweepPage, Viewer};
+use reviewq_forge::{
+    FetchedPr, Forge, ForgeActivityPage, ForgeError, PrDetail, RateLimit, RateLimitUnit, Result,
+    SweepPage, Viewer,
+};
 
 /// Parse a timestamp, for the fixtures below and the tests that build on them.
 pub(crate) fn ts(s: &str) -> Timestamp {
@@ -121,8 +124,10 @@ impl FakeForge {
         self.details.lock().expect("lock").insert(
             number,
             PrDetail {
+                activities: Vec::new(),
                 number,
                 state: reviewq_core::model::PrState::Open,
+                state_changed_at: None,
                 head_sha: format!("sha{number}"),
                 body: String::new(),
                 last_reviewed_sha: None,
@@ -272,6 +277,26 @@ impl Forge for FakeForge {
             });
         }
         Ok(self.details.lock().expect("lock").get(&number).cloned())
+    }
+
+    fn initial_activity_rate_limit(&self) -> RateLimitUnit {
+        RateLimitUnit::Points
+    }
+
+    async fn fetch_pr_activity(
+        &self,
+        _owner: &str,
+        _name: &str,
+        _number: u64,
+        _actor: &str,
+        _cursor: Option<&str>,
+    ) -> Result<ForgeActivityPage> {
+        Ok(ForgeActivityPage {
+            activities: vec![],
+            next: None,
+            rate_limit: None,
+            next_rate_limit: None,
+        })
     }
 
     async fn fetch_labels(
