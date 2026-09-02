@@ -34,11 +34,10 @@ use reviewq_app::peek::Peeked;
 use reviewq_app::sync::{Refreshed, RepoSummary};
 use reviewq_core::model::{MyState, PrSnapshot, PrState};
 use reviewq_forge::ForgeError;
-use reviewq_ledger::RepoId;
 use std::collections::BTreeMap;
 
 use reviewq_ledger::{
-    AttentionRow, Ledger, LedgerError, Located, PrShow, QueueItem, RepoKey, TrackedPr,
+    AttentionRow, Ledger, LedgerError, Located, PrShow, QueueItem, RepoId, RepoKey, TrackedPr,
 };
 use std::sync::mpsc;
 
@@ -2144,6 +2143,7 @@ pub(super) mod tests {
             state: PrState::Open,
             updated_at: ts("2026-08-11T09:00:00Z"),
             created_at: None,
+            state_changed_at: None,
             labels: vec![],
             milestone: None,
             files: None,
@@ -2242,6 +2242,7 @@ pub(super) mod tests {
             state: PrState::Open,
             updated_at: ts("2026-08-11T09:00:00Z"),
             created_at: None,
+            state_changed_at: None,
             labels: vec![],
             milestone: None,
             files: None,
@@ -3513,6 +3514,7 @@ mod loop_tests {
         let repo_id = ledger.repos().expect("repos")[0].0;
         let mut labelled = pr_snapshot(70135);
         labelled.labels = vec!["area:async".into()];
+        labelled.updated_at = ts("2026-08-11T09:01:00Z");
         ledger
             .upsert_pr(repo_id, &labelled, None)
             .expect("labelled");

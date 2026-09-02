@@ -1,6 +1,47 @@
 --- a/schema.rs
 +++ b/schema.rs
-@@ -3,7 +3,7 @@
+@@ -2,9 +2,9 @@
+
+ diesel::table! {
+     activity_events (id) {
+-        id -> Nullable<BigInt>,
+-        repo_id -> Integer,
+-        pr_number -> Integer,
++        id -> BigInt,
++        repo_id -> BigInt,
++        pr_number -> BigInt,
+         source -> Text,
+         kind -> Text,
+         occurred_at -> Text,
+@@ -14,22 +14,22 @@
+         external_id -> Nullable<Text>,
+         permalink -> Nullable<Text>,
+         payload -> Text,
+-        observed_transition -> Integer,
++        observed_transition -> Bool,
+         relation -> Text,
+     }
+ }
+
+ diesel::table! {
+     activity_retention (singleton) {
+-        singleton -> Nullable<BigInt>,
++        singleton -> BigInt,
+         cutoff -> Text,
+     }
+ }
+
+ diesel::table! {
+     activity_sync_state (repo_id, pr_number) {
+-        repo_id -> Integer,
+-        pr_number -> Integer,
++        repo_id -> BigInt,
++        pr_number -> BigInt,
+         cursor -> Nullable<Text>,
+         completed_at -> Nullable<Text>,
+         next_rate_limit -> Nullable<Text>,
+@@ -48,8 +48,8 @@
+
  diesel::table! {
      attention (repo_id, pr_number, reason) {
 -        repo_id -> Integer,
@@ -10,7 +51,8 @@
          reason -> Text,
          since -> Text,
          payload -> Text,
-@@ -21,13 +21,13 @@
+@@ -66,14 +66,14 @@
+
  diesel::table! {
      my_state (repo_id, number) {
 -        repo_id -> Integer,
@@ -26,8 +68,8 @@
 +        muted -> Bool,
          deferred_at -> Nullable<Text>,
          done_at -> Nullable<Text>,
-     }
-@@ -36,24 +36,24 @@
+         last_review_event_id -> Nullable<BigInt>,
+@@ -83,24 +83,24 @@
  diesel::table! {
      prs (repo_id, number) {
          repo_id -> BigInt,
@@ -55,8 +97,9 @@
 +        after_merge -> Bool,
          untracked_at -> Nullable<Text>,
          created_at -> Nullable<Text>,
-     }
-@@ -62,6 +62,6 @@
+         state_changed_at -> Nullable<Text>,
+@@ -109,7 +109,7 @@
+
  diesel::table! {
      repos (id) {
 -        id -> Nullable<BigInt>,
@@ -64,7 +107,8 @@
          host -> Text,
          owner -> Text,
          name -> Text,
-@@ -71,7 +71,7 @@
+@@ -118,8 +118,8 @@
+
  diesel::table! {
      reviewers (repo_id, pr_number, login) {
 -        repo_id -> Integer,
@@ -74,7 +118,8 @@
          login -> Text,
          verdict -> Text,
          submitted_at -> Text,
-@@ -89,10 +89,10 @@
+@@ -136,11 +136,11 @@
+
  diesel::table! {
      threads (thread_id) {
 -        thread_id -> Nullable<Text>,

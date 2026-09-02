@@ -573,6 +573,7 @@ impl PrNode {
             state,
             updated_at: self.updated_at,
             created_at: self.created_at,
+            state_changed_at: None,
             labels: self.labels.nodes.into_iter().map(|l| l.name).collect(),
             milestone: self.milestone.map(|m| m.title),
             files: Some(paths),

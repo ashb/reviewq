@@ -389,6 +389,7 @@ fn show_disambiguates_a_shared_pr_number_by_url() {
             state: reviewq_core::model::PrState::Open,
             updated_at: "2026-08-05T12:00:00Z".parse().unwrap(),
             created_at: None,
+            state_changed_at: None,
             labels: vec![],
             milestone: None,
             files: None,

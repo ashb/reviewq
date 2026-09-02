@@ -216,7 +216,7 @@ async fn sync_repo(
     // Merged/closed PRs are not re-fetched, so drop any attention they still
     // carry — bar the merged ones post-merge review keeps, whether that is this
     // project's `include_merged` or their own rule's `after_merge`.
-    ledger.clear_archived_attention(repo_id, project.include_merged)?;
+    ledger.clear_archived_attention(repo_id, project.include_merged, now)?;
 
     let (tracked, total) = ledger.counts(repo_id)?;
     let summary = RepoSummary {
@@ -642,6 +642,7 @@ pub async fn refresh_one(
         review_request,
         new_commits: detail.new_commits,
         include_merged,
+        ..Default::default()
     };
     let attention = classify(&pr, &mine, &detail.threads, now, &ctx);
     let queued = !attention.is_empty();
