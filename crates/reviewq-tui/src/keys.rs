@@ -63,6 +63,10 @@ pub enum Action {
     ShowMuted,
     /// Swap the list between the queue and what is waiting on somebody else.
     ShowWaiting,
+    /// Open retained activity for the selected pull request.
+    History,
+    /// Toggle relevant and all activity for one PR.
+    ToggleHistoryActivity,
     /// Show or hide the key reference.
     Help,
     /// Save what is on screen as an SVG.
@@ -122,6 +126,15 @@ pub struct Binding {
 
 /// The heading order in the help overlay, which is declaration order here.
 pub const BINDINGS: &[Binding] = &[
+    Binding {
+        action: Action::ToggleHistoryActivity,
+        chords: &[key(KeyCode::Char('a'))],
+        keys: "a",
+        what: "toggle Relevant / All activity",
+        group: "Navigate",
+        footer: false,
+        hidden: false,
+    },
     Binding {
         action: Action::Down,
         chords: &[key(KeyCode::Char('j')), key(KeyCode::Down)],
@@ -257,6 +270,15 @@ pub const BINDINGS: &[Binding] = &[
         chords: &[key(KeyCode::Char('M'))],
         keys: "M",
         what: "show what you have muted, or go back",
+        group: "View",
+        footer: false,
+        hidden: false,
+    },
+    Binding {
+        action: Action::History,
+        chords: &[key(KeyCode::Char('H'))],
+        keys: "H",
+        what: "show activity history",
         group: "View",
         footer: false,
         hidden: false,
@@ -508,6 +530,11 @@ mod tests {
     fn an_unbound_key_asks_for_nothing() {
         assert_eq!(action_for(press(KeyCode::Char('x'))), None);
         assert_eq!(action_for(press(KeyCode::F(4))), None);
+    }
+
+    #[test]
+    fn capital_h_is_a_bound_action() {
+        assert_eq!(action_for(press(KeyCode::Char('H'))), Some(Action::History));
     }
 
     #[test]
