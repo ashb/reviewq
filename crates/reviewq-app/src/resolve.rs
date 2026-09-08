@@ -11,7 +11,7 @@
 //! simply don't consult it.
 
 use anyhow::{Context, Result, bail};
-use reviewq_ledger::{Ledger, PrShow, RepoKey};
+use reviewq_ledger::{Ledger, PrShow, RepoId, RepoKey};
 
 use crate::paths;
 
@@ -48,7 +48,7 @@ pub fn repo_for(ledger: &Ledger, number: u64) -> Result<RepoKey> {
 
 /// [`repo_for`], then the ledger and that repo's id, with the PR's full detail
 /// already loaded — what every action command needs before it writes.
-pub fn open_for_number(number: u64) -> Result<(Ledger, i64, PrShow)> {
+pub fn open_for_number(number: u64) -> Result<(Ledger, RepoId, PrShow)> {
     let ledger = open()?;
     let repo = repo_for(&ledger, number)?;
     // A read, not `ensure_repo`: the repo came *from* the ledger a line ago, so

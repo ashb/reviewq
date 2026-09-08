@@ -12,10 +12,32 @@ use jiff::Timestamp;
 use reviewq_core::model::{
     Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
 };
-use rusqlite::types::Type;
-use rusqlite::{Connection, Error::FromSqlConversionFailure, OptionalExtension, params};
+use rusqlite::types::{FromSql, FromSqlResult, ToSqlOutput, Type, ValueRef};
+use rusqlite::{Connection, Error::FromSqlConversionFailure, OptionalExtension, ToSql, params};
 
 pub use schema::SCHEMA_VERSION;
+
+/// A repository row in this ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RepoId(i64);
+
+impl std::fmt::Display for RepoId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl ToSql for RepoId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.0.into())
+    }
+}
+
+impl FromSql for RepoId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        i64::column_result(value).map(Self)
+    }
+}
 
 /// What can go wrong in the ledger.
 ///
@@ -251,7 +273,7 @@ pub struct Located<T> {
     /// Without it a caller holding one of these had to ask
     /// [`ensure_repo`](Ledger::ensure_repo) for the id back — a *write*, on what
     /// is otherwise a read path, once per selection move in the interface.
-    pub repo_id: i64,
+    pub repo_id: RepoId,
     /// The item itself.
     pub item: T,
 }
@@ -492,7 +514,7 @@ impl Ledger {
 
     /// `repo`'s id, if the ledger already knows it. A read — see
     /// [`ensure_repo`](Self::ensure_repo) for the version that registers one.
-    pub fn repo_id(&self, repo: &RepoKey) -> Result<Option<i64>> {
+    pub fn repo_id(&self, repo: &RepoKey) -> Result<Option<RepoId>> {
         self.conn
             .query_row(
                 "SELECT id FROM repos WHERE host = ?1 AND owner = ?2 AND name = ?3",
@@ -514,8 +536,8 @@ impl Ledger {
     /// rather than leaving them attributed to a repo nothing will ever query
     /// by that name. Every call after that, for any repo, is a plain
     /// get-or-create.
-    pub fn ensure_repo(&self, repo: &RepoKey) -> Result<i64> {
-        let placeholder: Option<i64> = self
+    pub fn ensure_repo(&self, repo: &RepoKey) -> Result<RepoId> {
+        let placeholder: Option<RepoId> = self
             .conn
             .query_row(
                 "SELECT id FROM repos WHERE host = '' AND owner = '' AND name = ''",
@@ -553,7 +575,7 @@ impl Ledger {
     /// like every other read here: it reflects whatever has actually been
     /// synced, not what a (possibly stale, possibly absent) config currently
     /// says should exist.
-    pub fn repos(&self) -> Result<Vec<(i64, RepoKey)>> {
+    pub fn repos(&self) -> Result<Vec<(RepoId, RepoKey)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, host, owner, name FROM repos")?;
@@ -576,7 +598,7 @@ impl Ledger {
     /// stored. Returns `true` if the PR was newly inserted.
     pub fn upsert_pr(
         &self,
-        repo_id: i64,
+        repo_id: RepoId,
         pr: &PrSnapshot,
         reason: Option<TrackedReason>,
         now: Timestamp,
@@ -589,7 +611,7 @@ impl Ledger {
     /// writes are one commit, not one per PR). Returns how many PRs were new.
     pub fn commit_sweep_page(
         &self,
-        repo_id: i64,
+        repo_id: RepoId,
         prs: &[(PrSnapshot, Option<TrackedReason>)],
         now: Timestamp,
         cursor_key: &str,
@@ -608,7 +630,7 @@ impl Ledger {
     }
 
     /// A metadata value, e.g. the sync cursor.
-    pub fn get_meta(&self, repo_id: i64, key: &str) -> Result<Option<String>> {
+    pub fn get_meta(&self, repo_id: RepoId, key: &str) -> Result<Option<String>> {
         self.conn
             .query_row(
                 "SELECT value FROM sync_meta WHERE repo_id = ?1 AND key = ?2",
@@ -620,12 +642,12 @@ impl Ledger {
     }
 
     /// Set a metadata value.
-    pub fn set_meta(&self, repo_id: i64, key: &str, value: &str) -> Result<()> {
+    pub fn set_meta(&self, repo_id: RepoId, key: &str, value: &str) -> Result<()> {
         set_meta_row(&self.conn, repo_id, key, value)
     }
 
     /// Every tracked PR, ordered by number.
-    pub fn list_tracked(&self, repo_id: i64) -> Result<Vec<TrackedPr>> {
+    pub fn list_tracked(&self, repo_id: RepoId) -> Result<Vec<TrackedPr>> {
         let mut stmt = self.conn.prepare(
             r"
             SELECT number, title, author, author_association, head_sha, is_draft,
@@ -646,7 +668,7 @@ impl Ledger {
     }
 
     /// `(tracked, total)` PR counts, for the sync summary.
-    pub fn counts(&self, repo_id: i64) -> Result<(u64, u64)> {
+    pub fn counts(&self, repo_id: RepoId) -> Result<(u64, u64)> {
         let tracked = self.conn.query_row(
             "SELECT COUNT(*) FROM prs WHERE repo_id = ?1 AND tracked_reason IS NOT NULL",
             params![repo_id],
@@ -666,7 +688,7 @@ impl Ledger {
     /// Per repo, because a colour is the repo's rather than the label's: the
     /// same name is painted differently in another project, and a table keyed by
     /// name alone would answer for whichever repo was swept last.
-    pub fn set_label_colours(&self, repo_id: i64, labels: &[(String, String)]) -> Result<()> {
+    pub fn set_label_colours(&self, repo_id: RepoId, labels: &[(String, String)]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for (name, color) in labels {
             tx.execute(
@@ -682,7 +704,7 @@ impl Ledger {
 
     /// One repo's label colours, by name — what a frontend needs to paint a row
     /// the way the forge does.
-    pub fn label_colours(&self, repo_id: i64) -> Result<BTreeMap<String, String>> {
+    pub fn label_colours(&self, repo_id: RepoId) -> Result<BTreeMap<String, String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT name, color FROM labels WHERE repo_id = ?1")?;
@@ -694,7 +716,7 @@ impl Ledger {
 
     /// One repo's stored PR rows, counted the ways that say what the ledger is
     /// accumulating. See [`Census`].
-    pub fn census(&self, repo_id: i64) -> Result<Census> {
+    pub fn census(&self, repo_id: RepoId) -> Result<Census> {
         // The join carries the predicate rather than a `WHERE`, so a PR with a
         // `my_state` row that says nothing (every field back at its default)
         // counts as having none — which is what "something I set" means.
@@ -734,7 +756,7 @@ impl Ledger {
 
     /// Count of stored PRs whose file list GitHub truncated and that matched no
     /// rule — the "unknown, not non-matching" set `doctor` should surface.
-    pub fn count_truncated_untracked(&self, repo_id: i64) -> Result<u64> {
+    pub fn count_truncated_untracked(&self, repo_id: RepoId) -> Result<u64> {
         let n = self.conn.query_row(
             "SELECT COUNT(*) FROM prs WHERE repo_id = ?1 AND files_truncated = 1 AND tracked_reason IS NULL",
             params![repo_id],
@@ -751,7 +773,7 @@ impl Ledger {
     /// tracked reason so the caller can classify without a second read.
     pub fn prs_needing_detail(
         &self,
-        repo_id: i64,
+        repo_id: RepoId,
         include_merged: bool,
         which: Detail,
     ) -> Result<Vec<TrackedPr>> {
@@ -780,7 +802,7 @@ impl Ledger {
     }
 
     /// My history on a PR, or the default (all-empty) state if none is stored.
-    pub fn my_state(&self, repo_id: i64, number: u64) -> Result<MyState> {
+    pub fn my_state(&self, repo_id: RepoId, number: u64) -> Result<MyState> {
         self.conn
             .query_row(
                 r"
@@ -806,7 +828,7 @@ impl Ledger {
     /// [`show`](Self::show) first for a clearer message.
     pub fn set_done(
         &self,
-        repo_id: i64,
+        repo_id: RepoId,
         number: u64,
         done_sha: &str,
         done_at: Timestamp,
@@ -827,7 +849,7 @@ impl Ledger {
 
     /// Record `reviewq snooze`. Touches only `snoozed_until`; see
     /// [`set_done`](Self::set_done) for why that matters.
-    pub fn set_snoozed_until(&self, repo_id: i64, number: u64, until: Timestamp) -> Result<()> {
+    pub fn set_snoozed_until(&self, repo_id: RepoId, number: u64, until: Timestamp) -> Result<()> {
         self.conn
             .execute(
                 r"
@@ -841,7 +863,7 @@ impl Ledger {
     }
 
     /// Record `reviewq mute`/`unmute`. Touches only `muted`.
-    pub fn set_muted(&self, repo_id: i64, number: u64, muted: bool) -> Result<()> {
+    pub fn set_muted(&self, repo_id: RepoId, number: u64, muted: bool) -> Result<()> {
         self.conn
             .execute(
                 r"
@@ -857,7 +879,7 @@ impl Ledger {
     /// Record `reviewq defer`/`undefer`. Touches only `deferred_at`.
     pub fn set_deferred_at(
         &self,
-        repo_id: i64,
+        repo_id: RepoId,
         number: u64,
         deferred_at: Option<Timestamp>,
     ) -> Result<()> {
@@ -879,7 +901,7 @@ impl Ledger {
     /// what snooze/mute both mean (`classify` suppresses everything for
     /// either). `done` uses the narrower
     /// [`clear_done_attention`](Self::clear_done_attention) instead.
-    pub fn clear_attention(&self, repo_id: i64, number: u64) -> Result<()> {
+    pub fn clear_attention(&self, repo_id: RepoId, number: u64) -> Result<()> {
         self.conn
             .execute(
                 "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
@@ -899,7 +921,12 @@ impl Ledger {
     ///
     /// Self-correcting if the PR comes back — a sweep seeing it again advances
     /// `updated_at` past this stamp, which makes it due for detail once more.
-    pub fn mark_detail_unavailable(&self, repo_id: i64, number: u64, now: Timestamp) -> Result<()> {
+    pub fn mark_detail_unavailable(
+        &self,
+        repo_id: RepoId,
+        number: u64,
+        now: Timestamp,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
@@ -928,7 +955,7 @@ impl Ledger {
     /// Only the state: everything else a detail fetch knows is committed by
     /// [`commit_detail`](Self::commit_detail), and the rest of the snapshot
     /// (title, labels, milestone) is the sweep's to own.
-    pub fn set_state(&self, repo_id: i64, number: u64, state: PrState) -> Result<()> {
+    pub fn set_state(&self, repo_id: RepoId, number: u64, state: PrState) -> Result<()> {
         self.conn
             .execute(
                 "UPDATE prs SET state = ?3 WHERE repo_id = ?1 AND number = ?2",
@@ -941,7 +968,7 @@ impl Ledger {
     /// The instant-hide half of `reviewq done`: every reason `done` is allowed
     /// to clear per the reason table, but not `review_requested` — only my
     /// review or the request being withdrawn clears that one.
-    pub fn clear_done_attention(&self, repo_id: i64, number: u64) -> Result<()> {
+    pub fn clear_done_attention(&self, repo_id: RepoId, number: u64) -> Result<()> {
         self.conn
             .execute(
                 "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2 AND reason != 'review_requested'",
@@ -959,7 +986,7 @@ impl Ledger {
     /// [`merge_reason`] never downgrades `involved:` back down). The PR must
     /// already have a row (from a sweep); the caller checks with
     /// [`show`](Self::show) first.
-    pub fn track(&self, repo_id: i64, number: u64) -> Result<bool> {
+    pub fn track(&self, repo_id: RepoId, number: u64) -> Result<bool> {
         if tracked_reason(&self.conn, repo_id, number)?.is_some() {
             return Ok(false);
         }
@@ -993,7 +1020,7 @@ impl Ledger {
     ///
     /// [`MyState`] survives: what you reviewed and when you were done with it
     /// stays true whether or not you are still watching.
-    pub fn untrack(&self, repo_id: i64, number: u64, now: Timestamp) -> Result<bool> {
+    pub fn untrack(&self, repo_id: RepoId, number: u64, now: Timestamp) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx
             .execute(
@@ -1040,7 +1067,7 @@ impl Ledger {
     #[allow(clippy::too_many_arguments)]
     pub fn commit_detail(
         &self,
-        repo_id: i64,
+        repo_id: RepoId,
         number: u64,
         my_state: &MyState,
         threads: &[ThreadState],
@@ -1108,7 +1135,7 @@ impl Ledger {
     /// [`prs_needing_detail`](Self::prs_needing_detail)), so without this their
     /// stale rows would linger and show up in `show`. Run once at the end of a
     /// sync.
-    pub fn clear_archived_attention(&self, repo_id: i64, include_merged: bool) -> Result<()> {
+    pub fn clear_archived_attention(&self, repo_id: RepoId, include_merged: bool) -> Result<()> {
         self.conn
             .execute(
                 "DELETE FROM attention WHERE repo_id = ?1 AND pr_number IN
@@ -1126,7 +1153,7 @@ impl Ledger {
     /// oldest within the band, then PR number) — except a deferred PR (see
     /// [`QueueItem::deferred`]), which sorts after every non-deferred item
     /// regardless of priority.
-    pub fn queue(&self, repo_id: i64) -> Result<Vec<QueueItem>> {
+    pub fn queue(&self, repo_id: RepoId) -> Result<Vec<QueueItem>> {
         self.queued(repo_id, Muted::Hidden)
     }
 
@@ -1137,11 +1164,11 @@ impl Ledger {
     /// it being shown (see `classify`) — which is what makes this answerable at
     /// all, and what makes unmuting immediate rather than a wait for the next
     /// sync to rediscover them.
-    pub fn muted(&self, repo_id: i64) -> Result<Vec<QueueItem>> {
+    pub fn muted(&self, repo_id: RepoId) -> Result<Vec<QueueItem>> {
         self.queued(repo_id, Muted::Only)
     }
 
-    fn queued(&self, repo_id: i64, muted: Muted) -> Result<Vec<QueueItem>> {
+    fn queued(&self, repo_id: RepoId, muted: Muted) -> Result<Vec<QueueItem>> {
         // Open PRs, plus merged PRs when a project opted into post-merge review
         // (those only carry attention rows when it did). Closed-unmerged never.
         let mut stmt = self.conn.prepare(&format!(
@@ -1207,7 +1234,7 @@ impl Ledger {
     /// A muted PR is not one of these however quiet it is. It is off the queue
     /// because you put it there, not because anybody else has the ball, and
     /// [`muted`](Self::muted) is where it belongs.
-    pub fn waiting(&self, repo_id: i64) -> Result<Vec<TrackedPr>> {
+    pub fn waiting(&self, repo_id: RepoId) -> Result<Vec<TrackedPr>> {
         let mut stmt = self.conn.prepare(&format!(
             r"
             SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge, {MY_STATE_COLUMNS}
@@ -1232,7 +1259,7 @@ impl Ledger {
     /// flatten the results, each tagged with the repo it came from.
     fn across_repos<T>(
         &self,
-        read: impl Fn(&Self, i64) -> Result<Vec<T>>,
+        read: impl Fn(&Self, RepoId) -> Result<Vec<T>>,
     ) -> Result<Vec<Located<T>>> {
         let mut out = Vec::new();
         for (repo_id, repo) in self.repos()? {
@@ -1262,7 +1289,7 @@ impl Ledger {
 
     fn ordered(
         &self,
-        read: fn(&Self, i64) -> Result<Vec<QueueItem>>,
+        read: fn(&Self, RepoId) -> Result<Vec<QueueItem>>,
     ) -> Result<Vec<Located<QueueItem>>> {
         let mut queue = self.across_repos(read)?;
         queue.sort_by_key(|l| {
@@ -1295,7 +1322,7 @@ impl Ledger {
 
     /// Everything `reviewq show` needs about one PR, or `None` if it is not
     /// stored.
-    pub fn show(&self, repo_id: i64, number: u64) -> Result<Option<PrShow>> {
+    pub fn show(&self, repo_id: RepoId, number: u64) -> Result<Option<PrShow>> {
         let base = self
             .conn
             .query_row(
@@ -1336,7 +1363,7 @@ impl Ledger {
     }
 
     /// A PR's reviewers, most recently submitted first.
-    fn reviewers(&self, repo_id: i64, number: u64) -> Result<Vec<ReviewerVerdict>> {
+    fn reviewers(&self, repo_id: RepoId, number: u64) -> Result<Vec<ReviewerVerdict>> {
         let mut stmt = self.conn.prepare(
             "SELECT login, verdict, submitted_at FROM reviewers \
              WHERE repo_id = ?1 AND pr_number = ?2 ORDER BY submitted_at DESC",
@@ -1348,7 +1375,7 @@ impl Ledger {
     }
 
     /// A PR's review threads, ordered by id for stability.
-    fn threads(&self, repo_id: i64, number: u64) -> Result<Vec<ThreadState>> {
+    fn threads(&self, repo_id: RepoId, number: u64) -> Result<Vec<ThreadState>> {
         let mut stmt = self.conn.prepare(
             r"
             SELECT thread_id, i_own, is_resolved, resolved_by, last_comment_author,
@@ -1390,7 +1417,7 @@ impl Ledger {
     }
 
     /// A PR's attention rows, most-urgent first.
-    fn attention(&self, repo_id: i64, number: u64) -> Result<Vec<AttentionRow>> {
+    fn attention(&self, repo_id: RepoId, number: u64) -> Result<Vec<AttentionRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT since, payload FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
         )?;
@@ -1409,7 +1436,7 @@ impl Ledger {
 /// `true` if the row was newly inserted.
 fn upsert_row(
     conn: &Connection,
-    repo_id: i64,
+    repo_id: RepoId,
     pr: &PrSnapshot,
     reason: Option<&TrackedReason>,
     now: Timestamp,
@@ -1477,7 +1504,7 @@ fn upsert_row(
     Ok(is_new)
 }
 
-fn set_meta_row(conn: &Connection, repo_id: i64, key: &str, value: &str) -> Result<()> {
+fn set_meta_row(conn: &Connection, repo_id: RepoId, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO sync_meta (repo_id, key, value) VALUES (?1, ?2, ?3)
          ON CONFLICT(repo_id, key) DO UPDATE SET value = excluded.value",
@@ -1487,13 +1514,13 @@ fn set_meta_row(conn: &Connection, repo_id: i64, key: &str, value: &str) -> Resu
     Ok(())
 }
 
-fn tracked_reason(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<String>> {
+fn tracked_reason(conn: &Connection, repo_id: RepoId, number: u64) -> Result<Option<String>> {
     Ok(stored_tracking(conn, repo_id, number)?.reason)
 }
 
 /// What the row already says about why this PR is tracked. All-default when
 /// there is no row yet.
-fn stored_tracking(conn: &Connection, repo_id: i64, number: u64) -> Result<Tracking> {
+fn stored_tracking(conn: &Connection, repo_id: RepoId, number: u64) -> Result<Tracking> {
     conn.query_row(
         "SELECT tracked_reason, after_merge, untracked_at FROM prs \
          WHERE repo_id = ?1 AND number = ?2",
@@ -1511,7 +1538,7 @@ fn stored_tracking(conn: &Connection, repo_id: i64, number: u64) -> Result<Track
     .map(Option::unwrap_or_default)
 }
 
-fn existing_row(conn: &Connection, repo_id: i64, number: u64) -> Result<Option<u64>> {
+fn existing_row(conn: &Connection, repo_id: RepoId, number: u64) -> Result<Option<u64>> {
     conn.query_row(
         "SELECT number FROM prs WHERE repo_id = ?1 AND number = ?2",
         params![repo_id, number as i64],
@@ -1742,7 +1769,7 @@ fn attention_is_more_urgent(candidate: &AttentionRow, best: &AttentionRow) -> bo
 /// concurrent `reviewq done`/`snooze`/`mute`/`defer` with a stale copy. Each
 /// of those has its own targeted setter (`Ledger::set_done`, etc.) that writes
 /// only its own column, for the same reason in reverse.
-fn write_forge_state(conn: &Connection, repo_id: i64, number: u64, s: &MyState) -> Result<()> {
+fn write_forge_state(conn: &Connection, repo_id: RepoId, number: u64, s: &MyState) -> Result<()> {
     conn.execute(
         r"
         INSERT INTO my_state (repo_id, number, last_reviewed_sha, last_verdict, last_action_at)
@@ -1766,7 +1793,7 @@ fn write_forge_state(conn: &Connection, repo_id: i64, number: u64, s: &MyState) 
 
 fn replace_threads(
     conn: &Connection,
-    repo_id: i64,
+    repo_id: RepoId,
     number: u64,
     threads: &[ThreadState],
 ) -> Result<()> {
@@ -1801,7 +1828,7 @@ fn replace_threads(
 
 fn replace_reviewers(
     conn: &Connection,
-    repo_id: i64,
+    repo_id: RepoId,
     number: u64,
     reviewers: &[ReviewerVerdict],
 ) -> Result<()> {
@@ -1828,7 +1855,7 @@ fn replace_reviewers(
 
 fn replace_attention(
     conn: &Connection,
-    repo_id: i64,
+    repo_id: RepoId,
     number: u64,
     attention: &[Attention],
 ) -> Result<()> {
@@ -1903,7 +1930,7 @@ mod tests {
 
     /// A ready-to-use ledger and the id of one repo already registered in it —
     /// what almost every test below needs and doesn't care to set up itself.
-    fn ledger_with_repo() -> (Ledger, i64) {
+    fn ledger_with_repo() -> (Ledger, RepoId) {
         let ledger = Ledger::open_in_memory().unwrap();
         let repo_id = ledger.ensure_repo(&repo()).unwrap();
         (ledger, repo_id)
@@ -1991,7 +2018,8 @@ mod tests {
 
         let id = ledger.ensure_repo(&repo()).unwrap();
         assert_eq!(
-            id, 1,
+            id,
+            RepoId(1),
             "adopted the placeholder rather than creating a new row"
         );
         assert!(
@@ -2575,7 +2603,7 @@ mod tests {
         }
     }
 
-    fn track(ledger: &Ledger, repo_id: i64, p: &PrSnapshot) {
+    fn track(ledger: &Ledger, repo_id: RepoId, p: &PrSnapshot) {
         ledger
             .upsert_pr(repo_id, p, Some(interest("label area:task-sdk")), now())
             .unwrap();
@@ -3134,7 +3162,7 @@ mod tests {
     /// Give an already-tracked PR one attention reason, putting it on the queue.
     fn wants_attention(
         ledger: &Ledger,
-        repo_id: i64,
+        repo_id: RepoId,
         number: u64,
         reason: AttentionReason,
         since: &str,

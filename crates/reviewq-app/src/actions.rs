@@ -18,7 +18,7 @@
 use anyhow::{Context, Result, bail};
 use jiff::{Timestamp, Unit};
 use reviewq_forge::Forge;
-use reviewq_ledger::Ledger;
+use reviewq_ledger::{Ledger, RepoId};
 
 use crate::config::{Config, RepoRef};
 
@@ -27,7 +27,7 @@ use crate::config::{Config, RepoRef};
 /// Not `review_requested`: only submitting a review, or the request being
 /// withdrawn, clears that one — so a `done` on a PR you were asked to review
 /// leaves it asking, which is the point.
-pub fn done(ledger: &Ledger, repo_id: i64, number: u64, head_sha: &str) -> Result<()> {
+pub fn done(ledger: &Ledger, repo_id: RepoId, number: u64, head_sha: &str) -> Result<()> {
     ledger.set_done(repo_id, number, head_sha, Timestamp::now())?;
     ledger.clear_done_attention(repo_id, number)?;
     Ok(())
@@ -50,7 +50,12 @@ pub async fn mark_notifications_read(cfg: &Config, repo: &RepoRef, number: u64) 
 /// Takes an instant rather than a duration, so a caller can choose one however
 /// suits it — typed as `3d`, or picked from presets — without this knowing about
 /// either. [`snooze_until`] turns the CLI's syntax into one.
-pub fn snooze(ledger: &Ledger, repo_id: i64, number: u64, until: Timestamp) -> Result<Timestamp> {
+pub fn snooze(
+    ledger: &Ledger,
+    repo_id: RepoId,
+    number: u64,
+    until: Timestamp,
+) -> Result<Timestamp> {
     ledger.set_snoozed_until(repo_id, number, until)?;
     ledger.clear_attention(repo_id, number)?;
     Ok(until.round(Unit::Second).unwrap_or(until))
@@ -64,7 +69,7 @@ pub fn snooze(ledger: &Ledger, repo_id: i64, number: u64, until: Timestamp) -> R
 /// have silenced and why. It also makes unmuting immediate: this used to clear
 /// them, so a PR came back empty and stayed that way until the next sync
 /// rediscovered what had been true all along.
-pub fn set_muted(ledger: &Ledger, repo_id: i64, number: u64, muted: bool) -> Result<()> {
+pub fn set_muted(ledger: &Ledger, repo_id: RepoId, number: u64, muted: bool) -> Result<()> {
     Ok(ledger.set_muted(repo_id, number, muted)?)
 }
 
@@ -77,13 +82,13 @@ pub fn set_muted(ledger: &Ledger, repo_id: i64, number: u64, muted: bool) -> Res
 /// reporting a success it didn't have.
 ///
 /// [`track`] is the undo, which is why this stops short of deleting anything.
-pub fn untrack(ledger: &Ledger, repo_id: i64, number: u64) -> Result<bool> {
+pub fn untrack(ledger: &Ledger, repo_id: RepoId, number: u64) -> Result<bool> {
     Ok(ledger.untrack(repo_id, number, Timestamp::now())?)
 }
 
 /// Set or clear a PR's defer, which sinks it to the bottom of the queue without
 /// hiding it. It clears itself once something new happens on the PR.
-pub fn set_deferred(ledger: &Ledger, repo_id: i64, number: u64, deferred: bool) -> Result<()> {
+pub fn set_deferred(ledger: &Ledger, repo_id: RepoId, number: u64, deferred: bool) -> Result<()> {
     let at = deferred.then(Timestamp::now);
     ledger.set_deferred_at(repo_id, number, at)?;
     Ok(())
@@ -114,7 +119,7 @@ pub enum Tracked {
 /// queue.
 pub async fn track(
     ledger: &Ledger,
-    repo_id: i64,
+    repo_id: RepoId,
     repo: &RepoRef,
     number: u64,
     forge: &dyn Forge,
@@ -205,7 +210,7 @@ mod tests {
     ///
     /// A real ledger rather than a fake: these functions exist to pin what the
     /// writes do to the queue, which only the real thing can answer.
-    fn queued(reason: AttentionReason) -> (Ledger, i64, u64) {
+    fn queued(reason: AttentionReason) -> (Ledger, RepoId, u64) {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let repo_id = ledger
             .ensure_repo(&RepoKey {
