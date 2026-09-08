@@ -169,13 +169,8 @@ async fn sync_repo(
         // it, atomically. A ^C leaves the cursor at the last committed page, so
         // the next sync resumes rather than re-sweeps.
         if let Some(watermark) = watermark {
-            stats.new += ledger.commit_sweep_page(
-                repo_id,
-                &batch,
-                now,
-                CURSOR_KEY,
-                &watermark.to_string(),
-            )?;
+            stats.new +=
+                ledger.commit_sweep_page(repo_id, &batch, CURSOR_KEY, &watermark.to_string())?;
         }
         progress.page("updated", stats.swept, stats.total_count);
 
@@ -196,7 +191,6 @@ async fn sync_repo(
         me,
         cfg.involving_reasons(project),
         cfg.sync.page_size,
-        now,
         &mut stats,
         progress,
     )
@@ -297,7 +291,6 @@ async fn involvement_search(
     login: &str,
     reasons: &[String],
     page_size: u32,
-    now: Timestamp,
     stats: &mut Stats,
     progress: &mut dyn SyncProgress,
 ) -> Result<HashSet<u64>> {
@@ -328,12 +321,7 @@ async fn involvement_search(
             stats.cost += page.cost;
             stats.remaining = Some(page.remaining);
             for pr in &page.prs {
-                if ledger.upsert_pr(
-                    repo_id,
-                    pr,
-                    Some(TrackedReason::Involved(reason.clone())),
-                    now,
-                )? {
+                if ledger.upsert_pr(repo_id, pr, Some(TrackedReason::Involved(reason.clone())))? {
                     stats.new += 1;
                 }
                 involved.insert(pr.number);
@@ -571,15 +559,7 @@ pub async fn track_one(
     let ledger = Ledger::open(&paths::database_file()?)?;
     let repo_id = ledger.ensure_repo(&repo.key())?;
     let forge = cfg.forge_for(&repo.host)?;
-    let tracked = actions::track(
-        &ledger,
-        repo_id,
-        &repo,
-        number,
-        forge.as_ref(),
-        Timestamp::now(),
-    )
-    .await?;
+    let tracked = actions::track(&ledger, repo_id, &repo, number, forge.as_ref()).await?;
 
     // A freshly-stored PR holds no attention until something classifies it, so
     // the detail pass is what actually puts it on the queue.

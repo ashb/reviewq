@@ -2193,7 +2193,6 @@ pub(super) mod tests {
                 repo_id,
                 &pr_snapshot(number),
                 Some(TrackedReason::Involved("manual".into())),
-                now,
             )
             .expect("upsert");
         ledger
@@ -2227,7 +2226,6 @@ pub(super) mod tests {
                     rule: "label x".into(),
                     after_merge: false,
                 }),
-                now,
             )
             .expect("upsert");
         ledger
@@ -2291,7 +2289,6 @@ pub(super) mod tests {
                     rule: "label x".into(),
                     after_merge: false,
                 }),
-                now,
             )
             .expect("upsert");
         ledger
@@ -2393,10 +2390,7 @@ pub(super) mod tests {
     fn a_busy_ledger_says_to_try_again_rather_than_quoting_sqlite() {
         let mut app = app();
         let busy = LedgerError::Busy {
-            source: rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(5),
-                Some("database is locked".to_string()),
-            ),
+            source: Box::new(std::io::Error::other("database is locked")),
         };
         app.deliver(70135, Err(busy.into()));
 
@@ -2482,7 +2476,6 @@ mod scroll_tests {
                         rule: "label x".into(),
                         after_merge: false,
                     }),
-                    now,
                 )
                 .expect("upsert");
             ledger
@@ -3554,7 +3547,7 @@ mod loop_tests {
         let mut labelled = pr_snapshot(70135);
         labelled.labels = vec!["area:async".into()];
         ledger
-            .upsert_pr(repo_id, &labelled, None, ts("2026-08-11T12:00:00Z"))
+            .upsert_pr(repo_id, &labelled, None)
             .expect("labelled");
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![], None, false);
@@ -3669,7 +3662,6 @@ mod loop_tests {
                     rule: "label x".into(),
                     after_merge: false,
                 }),
-                ts("2026-08-11T12:00:00Z"),
             )
             .expect("tracked, no detail");
         reviewq_app::actions::set_muted(&ledger, repo_id, 70999, true).expect("mute");
@@ -3752,7 +3744,7 @@ mod loop_tests {
         let mut swept = pr_snapshot(70999);
         swept.labels.clear();
         ledger
-            .upsert_pr(repo_id, &swept, None, ts("2026-08-11T12:00:00Z"))
+            .upsert_pr(repo_id, &swept, None)
             .expect("stored, untracked");
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         let (hooks, _) = fake_hooks(vec![], None, false);
@@ -3796,7 +3788,6 @@ mod loop_tests {
                     rule: "label x".into(),
                     after_merge: false,
                 }),
-                ts("2026-08-11T12:00:00Z"),
             )
             .expect("stored");
         let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
@@ -4033,9 +4024,7 @@ mod loop_tests {
         let repo_id = ledger.repos().expect("repos")[0].0;
         let mut merged = pr_snapshot(70999);
         merged.state = reviewq_core::model::PrState::Merged;
-        ledger
-            .upsert_pr(repo_id, &merged, None, ts("2026-08-11T12:00:00Z"))
-            .expect("stored");
+        ledger.upsert_pr(repo_id, &merged, None).expect("stored");
         let mut stored = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
         feed(
             &mut stored,

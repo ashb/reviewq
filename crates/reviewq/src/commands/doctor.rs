@@ -550,22 +550,15 @@ mod tests {
             files: None,
             files_truncated: false,
         };
-        let now = "2026-08-11T12:00:00Z".parse().expect("timestamp");
         ledger
             .upsert_pr(
                 repo_id,
                 &pr(1, reviewq_core::model::PrState::Open),
                 Some(reviewq_ledger::TrackedReason::Involved("mention".into())),
-                now,
             )
             .expect("tracked");
         ledger
-            .upsert_pr(
-                repo_id,
-                &pr(2, reviewq_core::model::PrState::Merged),
-                None,
-                now,
-            )
+            .upsert_pr(repo_id, &pr(2, reviewq_core::model::PrState::Merged), None)
             .expect("residue");
         ledger.set_muted(repo_id, 2, true).expect("muted by hand");
         let mut problems = 0;

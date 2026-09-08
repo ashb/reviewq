@@ -123,7 +123,6 @@ pub async fn track(
     repo: &RepoRef,
     number: u64,
     forge: &dyn Forge,
-    now: Timestamp,
 ) -> Result<Tracked> {
     if ledger.show(repo_id, number)?.is_some() {
         return Ok(if ledger.track(repo_id, number)? {
@@ -152,7 +151,6 @@ pub async fn track(
         repo_id,
         &fetched.pr,
         Some(reviewq_ledger::TrackedReason::Involved("manual".into())),
-        now,
     )?;
     Ok(Tracked::Fetched)
 }
@@ -228,7 +226,6 @@ mod tests {
                     rule: "label x".into(),
                     after_merge: false,
                 }),
-                now,
             )
             .expect("upsert");
         ledger
@@ -352,16 +349,7 @@ mod tests {
         let forge = crate::fake_forge::FakeForge::new(vec![])
             .with_fetched_labels(&[("area:task-sdk", "0e8a16")]);
 
-        let tracked = track(
-            &ledger,
-            repo_id,
-            &repo,
-            4242,
-            &forge,
-            ts("2026-08-11T12:00:00Z"),
-        )
-        .await
-        .unwrap();
+        let tracked = track(&ledger, repo_id, &repo, 4242, &forge).await.unwrap();
 
         assert_eq!(tracked, Tracked::Fetched);
         assert_eq!(

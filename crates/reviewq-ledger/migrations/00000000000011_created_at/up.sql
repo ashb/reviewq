@@ -1,0 +1,1 @@
+ALTER TABLE prs ADD COLUMN created_at TEXT;

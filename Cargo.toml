@@ -35,6 +35,9 @@ crossterm = { version = "0.29", features = ["osc52"] }
 async-trait = "0.1"
 clap = { version = "4.6.5", features = ["derive"] }
 etcetera = "0.11.0"
+diesel = { version = "2.3.5", features = ["sqlite", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
+diesel_migrations = "2.3.1"
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 globset = "0.4.20"
 insta = "1.48.0"
 jiff = { version = "0.2.35", features = ["serde"] }
@@ -50,8 +53,6 @@ ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 # highlighting — a lot of dependency for a description panel that's mostly prose
 # and checklists. One line to turn on if code blocks start mattering.
 tui-markdown = { version = "0.3.9", default-features = false }
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tempfile = "3.27.0"

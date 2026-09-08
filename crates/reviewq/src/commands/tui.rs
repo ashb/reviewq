@@ -76,8 +76,8 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             let config = Arc::clone(&for_refresh);
             // `spawn_blocking` rather than `spawn`, because `sync_one`'s future is
             // not `Send`: it holds a ledger handle across the forge round trip,
-            // and `rusqlite::Connection` is `Send` but not `Sync`, so a reference
-            // to one cannot cross threads. Driving the future on a single
+            // and the ledger connection is `Send` but not `Sync`, so a reference to
+            // one cannot cross threads. Driving the future on a single
             // blocking-pool thread sidesteps that — nothing `!Send` ever moves.
             tokio::task::spawn_blocking(move || {
                 let outcome =
@@ -91,7 +91,7 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             let config = Arc::clone(&for_sync);
             // `spawn_blocking` for the same reason the refresh above uses it:
             // the sync holds a ledger handle across every forge round trip, and
-            // `rusqlite::Connection` is not `Sync`, so its future is not `Send`.
+            // the ledger connection is not `Sync`, so its future is not `Send`.
             // The interface reads through a connection of its own meanwhile,
             // which is what WAL is turned on for.
             tokio::task::spawn_blocking(move || {
