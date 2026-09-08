@@ -14,7 +14,7 @@ use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ClassifyCtx, PrSnapshot, PrState, classify};
 use reviewq_core::rules::{Evaluation, Interest};
 use reviewq_forge::{Forge, PrDetail};
-use reviewq_ledger::{Committed, Detail, Ledger, TrackedReason};
+use reviewq_ledger::{Committed, Detail, Ledger, RepoId, TrackedReason};
 
 use crate::config::{Config, Project, RepoRef};
 use crate::identity::Logins;
@@ -86,7 +86,7 @@ async fn sync_repo(
     cfg: &Config,
     forge: &dyn Forge,
     ledger: &Ledger,
-    repo_id: i64,
+    repo_id: RepoId,
     project: &Project,
     repo: &RepoRef,
     rules: &Interest,
@@ -248,7 +248,12 @@ async fn sync_repo(
 
 /// The lower bound for this sweep: the stored cursor minus an overlap buffer,
 /// or a bootstrap window on the first-ever run.
-fn sweep_since(ledger: &Ledger, repo_id: i64, cfg: &Config, now: Timestamp) -> Result<Timestamp> {
+fn sweep_since(
+    ledger: &Ledger,
+    repo_id: RepoId,
+    cfg: &Config,
+    now: Timestamp,
+) -> Result<Timestamp> {
     match ledger.get_meta(repo_id, CURSOR_KEY)? {
         Some(stored) => {
             let cursor: Timestamp = stored
@@ -287,7 +292,7 @@ fn search_time(ts: Timestamp) -> String {
 async fn involvement_search(
     forge: &dyn Forge,
     ledger: &Ledger,
-    repo_id: i64,
+    repo_id: RepoId,
     repo: &RepoRef,
     login: &str,
     reasons: &[String],
@@ -372,7 +377,7 @@ fn budget_is_low(remaining: Option<u32>) -> bool {
 async fn detail_pass(
     forge: &dyn Forge,
     ledger: &Ledger,
-    repo_id: i64,
+    repo_id: RepoId,
     repo: &RepoRef,
     login: &str,
     bots: &[String],
@@ -595,7 +600,7 @@ pub async fn track_one(
 pub async fn refresh_one(
     forge: &dyn Forge,
     ledger: &Ledger,
-    repo_id: i64,
+    repo_id: RepoId,
     repo: &RepoRef,
     login: &str,
     bots: &[String],
@@ -955,7 +960,7 @@ mod engine_tests {
     }
 
     /// Run one repo's whole sync against `forge`, returning the ledger it wrote.
-    async fn sync(cfg: &Config, forge: &dyn Forge) -> (Ledger, i64, RecordingProgress) {
+    async fn sync(cfg: &Config, forge: &dyn Forge) -> (Ledger, RepoId, RecordingProgress) {
         synced(cfg, forge, false).await
     }
 
@@ -964,7 +969,7 @@ mod engine_tests {
         cfg: &Config,
         forge: &dyn Forge,
         labels: bool,
-    ) -> (Ledger, i64, RecordingProgress) {
+    ) -> (Ledger, RepoId, RecordingProgress) {
         let ledger = Ledger::open_in_memory().expect("ledger");
         let repo_id = ledger.ensure_repo(&repo_key()).expect("repo");
         let mut progress = RecordingProgress::default();

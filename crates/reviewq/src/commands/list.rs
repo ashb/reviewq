@@ -502,13 +502,15 @@ mod tests {
     }
 
     fn located<T>(item: T) -> Located<T> {
+        let ledger = Ledger::open_in_memory().expect("ledger");
+        let repo = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "airflow".into(),
+        };
         Located {
-            repo: RepoKey {
-                host: "github.com".into(),
-                owner: "apache".into(),
-                name: "airflow".into(),
-            },
-            repo_id: 1,
+            repo_id: ledger.ensure_repo(&repo).expect("repo"),
+            repo,
             item,
         }
     }

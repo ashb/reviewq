@@ -35,6 +35,7 @@ use reviewq_app::peek::Peeked;
 use reviewq_app::sync::{Refreshed, RepoSummary};
 use reviewq_core::model::{MyState, PrSnapshot, PrState};
 use reviewq_forge::ForgeError;
+use reviewq_ledger::RepoId;
 use std::collections::BTreeMap;
 
 use reviewq_ledger::{
@@ -153,7 +154,7 @@ pub struct App {
     pub elsewhere: Counts,
     /// Each repo's label colours, by repo id. Read once per reload rather than
     /// per row: a repo's palette is small, and every row on screen wants it.
-    pub label_colours: std::collections::HashMap<i64, BTreeMap<String, String>>,
+    pub label_colours: std::collections::HashMap<RepoId, BTreeMap<String, String>>,
     /// Index into [`queue`](Self::queue) of the highlighted row. Always a valid
     /// index when the queue is non-empty; meaningless when it's empty.
     pub selected: usize,
@@ -1311,7 +1312,7 @@ impl App {
     }
 
     /// The `repo_id` the selected PR belongs to, as the queue read reported it.
-    fn selected_repo_id(&self) -> Option<i64> {
+    fn selected_repo_id(&self) -> Option<RepoId> {
         self.current().map(|item| item.repo_id)
     }
 
@@ -2185,7 +2186,7 @@ pub(super) mod tests {
     }
 
     /// Add a queued PR to an existing ledger, as a fetch-and-track would.
-    pub(super) fn add_queued(ledger: &Ledger, repo_id: i64, number: u64) {
+    pub(super) fn add_queued(ledger: &Ledger, repo_id: RepoId, number: u64) {
         let now = ts("2026-08-11T12:00:00Z");
         ledger
             .upsert_pr(
@@ -2258,7 +2259,7 @@ pub(super) mod tests {
     /// Put the fixture's contents into an already-open ledger, returning the
     /// repo's id. Separate from [`fixture`] so a test that needs a second
     /// connection can seed a file-backed one.
-    pub(super) fn seed(ledger: &Ledger) -> i64 {
+    pub(super) fn seed(ledger: &Ledger) -> RepoId {
         let repo = reviewq_ledger::RepoKey {
             host: "github.com".into(),
             owner: "apache".into(),

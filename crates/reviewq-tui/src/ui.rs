@@ -1341,7 +1341,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot};
-    use reviewq_ledger::{Ledger, TrackedReason};
+    use reviewq_ledger::{Ledger, RepoId, TrackedReason};
 
     fn repo() -> RepoKey {
         RepoKey {
@@ -1446,7 +1446,7 @@ sensor = S3KeySensor(deferrable=True)
 
     /// Store `pr` as the only thing on the queue: tracked, with one attention row,
     /// since the queue is built from attention rather than from tracking alone.
-    fn queue_only(ledger: &Ledger, repo_id: i64, pr: &PrSnapshot) {
+    fn queue_only(ledger: &Ledger, repo_id: RepoId, pr: &PrSnapshot) {
         let now = ts("2026-08-10T12:00:00Z");
         ledger
             .upsert_pr(
