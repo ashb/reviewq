@@ -25,6 +25,34 @@ lint:
 test:
     cargo test --workspace
 
+# Install the SQLite-only Diesel CLI used to regenerate the ledger schema
+install-diesel:
+    cargo install diesel_cli --version 2.3.2 --no-default-features --features sqlite-bundled
+
+# Regenerate Diesel's typed ledger schema from all committed migrations
+diesel-schema:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    schema_tmp=$(mktemp -d)
+    trap 'rm -r "$schema_tmp"' EXIT
+    DATABASE_URL="$schema_tmp/ledger.sqlite" diesel migration run \
+        --migration-dir crates/reviewq-ledger/migrations >/dev/null
+    DATABASE_URL="$schema_tmp/ledger.sqlite" diesel print-schema \
+        --config-file crates/reviewq-ledger/diesel.toml \
+        > crates/reviewq-ledger/src/schema.rs
+    cargo fmt --all
+
+# Assert that Diesel's generated schema matches all committed migrations
+diesel-schema-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    schema_tmp=$(mktemp -d)
+    trap 'rm -r "$schema_tmp"' EXIT
+    DATABASE_URL="$schema_tmp/ledger.sqlite" diesel migration run \
+        --migration-dir crates/reviewq-ledger/migrations >/dev/null
+    DATABASE_URL="$schema_tmp/ledger.sqlite" diesel print-schema \
+        --config-file crates/reviewq-ledger/diesel.toml --locked-schema >/dev/null
+
 # `just test` asserts the committed screenshots match what the interface
 # currently draws, so this is what to run when it says they don't — and then to
 # look at what changed before committing it.

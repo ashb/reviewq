@@ -1,0 +1,92 @@
+--- a/schema.rs
++++ b/schema.rs
+@@ -3,7 +3,7 @@
+ diesel::table! {
+     attention (repo_id, pr_number, reason) {
+-        repo_id -> Integer,
+-        pr_number -> Integer,
++        repo_id -> BigInt,
++        pr_number -> BigInt,
+         reason -> Text,
+         since -> Text,
+         payload -> Text,
+@@ -21,13 +21,13 @@
+ diesel::table! {
+     my_state (repo_id, number) {
+-        repo_id -> Integer,
+-        number -> Integer,
++        repo_id -> BigInt,
++        number -> BigInt,
+         last_reviewed_sha -> Nullable<Text>,
+         last_verdict -> Nullable<Text>,
+         last_action_at -> Nullable<Text>,
+         done_sha -> Nullable<Text>,
+         snoozed_until -> Nullable<Text>,
+-        muted -> Integer,
++        muted -> Bool,
+         deferred_at -> Nullable<Text>,
+         done_at -> Nullable<Text>,
+     }
+@@ -36,24 +36,24 @@
+ diesel::table! {
+     prs (repo_id, number) {
+         repo_id -> BigInt,
+-        number -> Integer,
++        number -> BigInt,
+         title -> Text,
+         author -> Text,
+         author_association -> Text,
+         head_sha -> Text,
+-        is_draft -> Integer,
++        is_draft -> Bool,
+         state -> Text,
+         updated_at -> Text,
+         labels -> Text,
+         milestone -> Nullable<Text>,
+         files -> Nullable<Text>,
+-        files_truncated -> Integer,
++        files_truncated -> Bool,
+         tracked_reason -> Nullable<Text>,
+         first_seen_at -> Text,
+         detail_synced_at -> Nullable<Text>,
+         body -> Nullable<Text>,
+         base_ref -> Text,
+-        after_merge -> Integer,
++        after_merge -> Bool,
+         untracked_at -> Nullable<Text>,
+         created_at -> Nullable<Text>,
+     }
+@@ -62,6 +62,6 @@
+ diesel::table! {
+     repos (id) {
+-        id -> Nullable<BigInt>,
++        id -> BigInt,
+         host -> Text,
+         owner -> Text,
+         name -> Text,
+@@ -71,7 +71,7 @@
+ diesel::table! {
+     reviewers (repo_id, pr_number, login) {
+-        repo_id -> Integer,
+-        pr_number -> Integer,
++        repo_id -> BigInt,
++        pr_number -> BigInt,
+         login -> Text,
+         verdict -> Text,
+         submitted_at -> Text,
+@@ -89,10 +89,10 @@
+ diesel::table! {
+     threads (thread_id) {
+-        thread_id -> Nullable<Text>,
+-        repo_id -> Integer,
+-        pr_number -> Integer,
+-        i_own -> Integer,
+-        is_resolved -> Integer,
++        thread_id -> Text,
++        repo_id -> BigInt,
++        pr_number -> BigInt,
++        i_own -> Bool,
++        is_resolved -> Bool,
+         resolved_by -> Nullable<Text>,
+         last_comment_author -> Nullable<Text>,
+         last_comment_at -> Nullable<Text>,

@@ -523,7 +523,7 @@ fn ledger() -> Ledger {
             files_truncated: false,
         };
         ledger
-            .upsert_pr(repo_id, &pr, Some(f.tracked.clone()), now())
+            .upsert_pr(repo_id, &pr, Some(f.tracked.clone()))
             .expect("upsert");
         ledger
             .commit_detail(

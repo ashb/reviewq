@@ -1,0 +1,5 @@
+[print_schema]
+file = "src/schema.rs"
+allow_tables_to_appear_in_same_query_config = "all_tables"
+sqlite_integer_primary_key_is_bigint = true
+patch_file = "schema.patch"

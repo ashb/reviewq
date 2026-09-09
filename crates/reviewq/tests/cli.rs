@@ -409,22 +409,8 @@ fn show_disambiguates_a_shared_pr_number_by_url() {
                 name: "astro".into(),
             })
             .unwrap();
-        ledger
-            .upsert_pr(
-                airflow,
-                &pr("Airflow #42"),
-                None,
-                "2026-08-05T12:00:00Z".parse().unwrap(),
-            )
-            .unwrap();
-        ledger
-            .upsert_pr(
-                astro,
-                &pr("Astro #42"),
-                None,
-                "2026-08-05T12:00:00Z".parse().unwrap(),
-            )
-            .unwrap();
+        ledger.upsert_pr(airflow, &pr("Airflow #42"), None).unwrap();
+        ledger.upsert_pr(astro, &pr("Astro #42"), None).unwrap();
     }
 
     let (_dir, config, _) = workspace();

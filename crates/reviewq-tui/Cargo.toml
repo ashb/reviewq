@@ -21,7 +21,6 @@ toml.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

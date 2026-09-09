@@ -1,41 +1,49 @@
 //! The SQLite ledger.
 //!
-//! A thin, typed wrapper over `rusqlite`. It owns the schema and migrations and
+//! A thin, typed wrapper over Diesel. It owns the schema and migrations and
 //! trades in `reviewq-core` snapshot types; nothing above it writes SQL. The
 //! sync API is synchronous, which is fine for a CLI.
 
+mod connection;
+mod db_types;
+mod migrations;
+mod models;
 mod schema;
 
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap};
 
+use connection::DbConnection;
+use db_types::{DbPrState, DbTimestamp};
+use diesel::{
+    connection::SimpleConnection,
+    deserialize::FromSqlRow,
+    dsl::{case_when, count, count_star},
+    expression::AsExpression,
+    prelude::*,
+    sql_types::{BigInt, Bool, Nullable, Text},
+    sqlite::Sqlite,
+    upsert::excluded,
+};
 use jiff::Timestamp;
+use models::{
+    AttentionRecord, ForgeState, LabelRecord, MyStateRecord, NewPr, Pr, PrSummary, ReviewerRecord,
+    ThreadRecord,
+};
 use reviewq_core::model::{
     Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
 };
-use rusqlite::types::{FromSql, FromSqlResult, ToSqlOutput, Type, ValueRef};
-use rusqlite::{Connection, Error::FromSqlConversionFailure, OptionalExtension, ToSql, params};
+use schema::{attention, labels, my_state, prs, repos, reviewers, sync_meta, threads};
 
-pub use schema::SCHEMA_VERSION;
+pub use migrations::SCHEMA_VERSION;
 
 /// A repository row in this ledger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsExpression, FromSqlRow)]
+#[diesel(sql_type = BigInt)]
 pub struct RepoId(i64);
 
 impl std::fmt::Display for RepoId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
-    }
-}
-
-impl ToSql for RepoId {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(self.0.into())
-    }
-}
-
-impl FromSql for RepoId {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        i64::column_result(value).map(Self)
     }
 }
 
@@ -57,6 +65,13 @@ pub enum LedgerError {
     )]
     FromTheFuture,
 
+    /// Diesel requires a UTF-8 SQLite database URL.
+    #[error("database path is not valid UTF-8: {}", path.display())]
+    InvalidPath {
+        /// The path that could not be represented without changing it.
+        path: std::path::PathBuf,
+    },
+
     /// Somebody else held the write lock for longer than the busy timeout.
     #[error(
         "another reviewq held the ledger's write lock for more than {}s — it is \
@@ -66,7 +81,7 @@ pub enum LedgerError {
     Busy {
         /// What SQLite reported.
         #[source]
-        source: rusqlite::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// A PR the caller expected to be there isn't.
@@ -116,39 +131,53 @@ pub enum LedgerError {
         doing: String,
         /// What SQLite reported.
         #[source]
-        source: rusqlite::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
-impl From<rusqlite::Error> for LedgerError {
+impl From<diesel::result::Error> for LedgerError {
     /// Classify as it converts, so a `?` anywhere in the crate yields [`Busy`]
     /// rather than burying it in a message only a human can read.
     ///
     /// [`Busy`]: LedgerError::Busy
-    fn from(source: rusqlite::Error) -> Self {
-        if is_busy(&source) {
-            Self::Busy { source }
-        } else {
-            Self::Sql {
-                doing: "talking to the ledger".to_string(),
-                source,
-            }
-        }
+    fn from(source: diesel::result::Error) -> Self {
+        classify_sql_error(source, "talking to the ledger")
     }
 }
 
 /// Whether SQLite gave up waiting for the write lock.
-fn is_busy(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
-                ..
-            },
-            _
-        )
-    )
+fn is_busy(mut err: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if matches!(
+            err.downcast_ref::<diesel::result::Error>(),
+            Some(diesel::result::Error::DatabaseError(_, information))
+                if matches!(information.message(), "database is locked" | "database table is locked")
+        ) {
+            return true;
+        }
+        let Some(source) = err.source() else {
+            return false;
+        };
+        err = source;
+    }
+}
+
+fn classify_sql_error(source: diesel::result::Error, doing: impl Into<String>) -> LedgerError {
+    if is_busy(&source) {
+        return LedgerError::Busy {
+            source: Box::new(source),
+        };
+    }
+    if let diesel::result::Error::DeserializationError(source) = source {
+        return LedgerError::Corrupt {
+            what: "stored value".into(),
+            source,
+        };
+    }
+    LedgerError::Sql {
+        doing: doing.into(),
+        source: Box::new(source),
+    }
 }
 
 /// Every fallible operation here fails with a [`LedgerError`].
@@ -160,27 +189,16 @@ trait Doing<T> {
     fn doing(self, what: impl Into<String>) -> Result<T>;
 }
 
-impl<T> Doing<T> for rusqlite::Result<T> {
+impl<T> Doing<T> for diesel::QueryResult<T> {
     fn doing(self, what: impl Into<String>) -> Result<T> {
-        self.map_err(|source| {
-            if is_busy(&source) {
-                LedgerError::Busy { source }
-            } else {
-                LedgerError::Sql {
-                    doing: what.into(),
-                    source,
-                }
-            }
-        })
+        self.map_err(|source| classify_sql_error(source, what))
     }
 }
 
 /// Say what was being encoded, when it cannot be turned into storage.
 ///
-/// There is no matching `decoding`: a value read back is decoded inside a
-/// `query_map` closure, which must fail with `rusqlite::Error` — so those go
-/// through [`decode_err`] and arrive here as [`LedgerError::Corrupt`] via the
-/// conversion instead.
+/// Values read from storage are decoded separately and reported as
+/// [`LedgerError::Corrupt`].
 trait Encoding<T> {
     /// Wrap a failure to encode something for storage.
     fn encoding(self, what: impl Into<String>) -> Result<T>;
@@ -229,15 +247,16 @@ const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// instead. `journal_mode` persists in the file once set, so this only does
 /// real work the first time. An in-memory database can't use WAL and stays
 /// `memory`, which is harmless — nothing else ever opens it.
-fn prepare_conn(conn: &Connection) -> Result<()> {
-    conn.pragma_update(None, "foreign_keys", "ON")
+fn prepare_conn(conn: &mut DbConnection) -> Result<()> {
+    conn.batch_execute("PRAGMA foreign_keys = ON;")
         .doing("enabling foreign keys")?;
-    // `PRAGMA journal_mode` reports the mode it settled on as a result row,
-    // which plain `pragma_update` rejects; this variant tolerates one.
-    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
+    conn.batch_execute(&format!(
+        "PRAGMA busy_timeout = {};",
+        BUSY_TIMEOUT.as_millis()
+    ))
+    .doing("setting the busy timeout")?;
+    conn.batch_execute("PRAGMA journal_mode = WAL;")
         .doing("enabling WAL")?;
-    conn.busy_timeout(BUSY_TIMEOUT)
-        .doing("setting the busy timeout")?;
     Ok(())
 }
 
@@ -291,7 +310,7 @@ pub enum Committed {
     /// one. Applying it would have moved the PR backwards.
     Superseded {
         /// The watermark already stored, for a caller that wants to say so.
-        stored: String,
+        stored: Timestamp,
     },
 }
 
@@ -315,7 +334,7 @@ impl Committed {
 /// handle itself being scoped to one repo: a project with several repos
 /// shares a single `Ledger`.
 pub struct Ledger {
-    conn: Connection,
+    conn: RefCell<DbConnection>,
 }
 
 /// Why a PR is tracked, before it is rendered into the stored `tracked_reason`.
@@ -338,13 +357,6 @@ pub enum TrackedReason {
 }
 
 impl TrackedReason {
-    fn rank(&self) -> u8 {
-        match self {
-            Self::Interest { .. } => 1,
-            Self::Involved(_) => 2,
-        }
-    }
-
     /// The string stored in `tracked_reason` and shown to the user.
     pub fn render(&self) -> String {
         match self {
@@ -493,34 +505,46 @@ pub struct PrShow {
 impl Ledger {
     /// Open (creating if absent) the ledger at `path` and migrate it.
     pub fn open(path: &std::path::Path) -> Result<Self> {
+        let database_url = path.to_str().ok_or_else(|| LedgerError::InvalidPath {
+            path: path.to_owned(),
+        })?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .on_disk(format!("creating ledger dir {}", dir.display()))?;
         }
-        let conn = Connection::open(path).doing(format!("opening ledger {}", path.display()))?;
+        let conn = connection::establish(database_url).map_err(|source| LedgerError::Sql {
+            doing: format!("opening ledger {}", path.display()),
+            source: Box::new(source),
+        })?;
         Self::from_conn(conn)
     }
 
     /// An in-memory ledger, for tests.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_conn(Connection::open_in_memory()?)
+        let conn = connection::establish(":memory:").map_err(|source| LedgerError::Sql {
+            doing: "opening an in-memory ledger".into(),
+            source: Box::new(source),
+        })?;
+        Self::from_conn(conn)
     }
 
-    fn from_conn(mut conn: Connection) -> Result<Self> {
-        prepare_conn(&conn)?;
-        schema::migrate(&mut conn)?;
-        Ok(Self { conn })
+    fn from_conn(mut conn: DbConnection) -> Result<Self> {
+        prepare_conn(&mut conn)?;
+        migrations::migrate(&mut conn)?;
+        Ok(Self {
+            conn: RefCell::new(conn),
+        })
     }
 
     /// `repo`'s id, if the ledger already knows it. A read — see
     /// [`ensure_repo`](Self::ensure_repo) for the version that registers one.
     pub fn repo_id(&self, repo: &RepoKey) -> Result<Option<RepoId>> {
-        self.conn
-            .query_row(
-                "SELECT id FROM repos WHERE host = ?1 AND owner = ?2 AND name = ?3",
-                params![repo.host, repo.owner, repo.name],
-                |row| row.get(0),
-            )
+        repos::table
+            .filter(repos::host.eq(&repo.host))
+            .filter(repos::owner.eq(&repo.owner))
+            .filter(repos::name.eq(&repo.name))
+            .select(repos::id)
+            .first::<RepoId>(&mut *self.conn.borrow_mut())
             .optional()
             .doing(format!("looking up repo {}", repo.slug()))
     }
@@ -537,36 +561,41 @@ impl Ledger {
     /// by that name. Every call after that, for any repo, is a plain
     /// get-or-create.
     pub fn ensure_repo(&self, repo: &RepoKey) -> Result<RepoId> {
-        let placeholder: Option<RepoId> = self
-            .conn
-            .query_row(
-                "SELECT id FROM repos WHERE host = '' AND owner = '' AND name = ''",
-                [],
-                |row| row.get(0),
-            )
+        let conn = &mut *self.conn.borrow_mut();
+        let placeholder = repos::table
+            .filter(repos::host.eq(""))
+            .filter(repos::owner.eq(""))
+            .filter(repos::name.eq(""))
+            .select(repos::id)
+            .first::<RepoId>(conn)
             .optional()
             .doing("checking for a pre-v4 placeholder repo")?;
         if let Some(id) = placeholder {
-            self.conn
-                .execute(
-                    "UPDATE repos SET host = ?2, owner = ?3, name = ?4 WHERE id = ?1",
-                    params![id, repo.host, repo.owner, repo.name],
-                )
+            diesel::update(repos::table.find(id))
+                .set((
+                    repos::host.eq(&repo.host),
+                    repos::owner.eq(&repo.owner),
+                    repos::name.eq(&repo.name),
+                ))
+                .execute(conn)
                 .doing("adopting the pre-v4 placeholder repo")?;
             return Ok(id);
         }
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO repos (host, owner, name) VALUES (?1, ?2, ?3)",
-                params![repo.host, repo.owner, repo.name],
-            )
+        diesel::insert_into(repos::table)
+            .values((
+                repos::host.eq(&repo.host),
+                repos::owner.eq(&repo.owner),
+                repos::name.eq(&repo.name),
+            ))
+            .on_conflict_do_nothing()
+            .execute(conn)
             .doing("registering repo")?;
-        self.conn
-            .query_row(
-                "SELECT id FROM repos WHERE host = ?1 AND owner = ?2 AND name = ?3",
-                params![repo.host, repo.owner, repo.name],
-                |row| row.get(0),
-            )
+        repos::table
+            .filter(repos::host.eq(&repo.host))
+            .filter(repos::owner.eq(&repo.owner))
+            .filter(repos::name.eq(&repo.name))
+            .select(repos::id)
+            .first::<RepoId>(conn)
             .doing("resolving repo id")
     }
 
@@ -576,34 +605,26 @@ impl Ledger {
     /// synced, not what a (possibly stale, possibly absent) config currently
     /// says should exist.
     pub fn repos(&self) -> Result<Vec<(RepoId, RepoKey)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, host, owner, name FROM repos")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    RepoKey {
-                        host: row.get(1)?,
-                        owner: row.get(2)?,
-                        name: row.get(3)?,
-                    },
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        repos::table
+            .select((repos::id, repos::host, repos::owner, repos::name))
+            .load::<(RepoId, String, String, String)>(&mut *self.conn.borrow_mut())
+            .doing("listing repositories")
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(id, host, owner, name)| (id, RepoKey { host, owner, name }))
+                    .collect()
+            })
     }
 
     /// Insert or update a PR, merging its tracked reason with any already
-    /// stored. Returns `true` if the PR was newly inserted.
+    /// stored. Returns whether the PR was newly inserted.
     pub fn upsert_pr(
         &self,
         repo_id: RepoId,
         pr: &PrSnapshot,
         reason: Option<TrackedReason>,
-        now: Timestamp,
     ) -> Result<bool> {
-        upsert_row(&self.conn, repo_id, pr, reason.as_ref(), now)
+        upsert_pr_snapshot(&mut self.conn.borrow_mut(), repo_id, pr, reason.as_ref())
     }
 
     /// Persist a whole sweep page and advance the cursor in one transaction, so
@@ -613,73 +634,61 @@ impl Ledger {
         &self,
         repo_id: RepoId,
         prs: &[(PrSnapshot, Option<TrackedReason>)],
-        now: Timestamp,
         cursor_key: &str,
         cursor_value: &str,
     ) -> Result<u64> {
-        let tx = self.conn.unchecked_transaction()?;
-        let mut new = 0;
-        for (pr, reason) in prs {
-            if upsert_row(&tx, repo_id, pr, reason.as_ref(), now)? {
-                new += 1;
+        self.conn.borrow_mut().transaction(|conn| {
+            let mut inserted_count = 0;
+            for (pr, reason) in prs {
+                inserted_count +=
+                    u64::from(upsert_pr_snapshot(conn, repo_id, pr, reason.as_ref())?);
             }
-        }
-        set_meta_row(&tx, repo_id, cursor_key, cursor_value)?;
-        tx.commit().doing("committing sweep page")?;
-        Ok(new)
+            set_meta_row(conn, repo_id, cursor_key, cursor_value)?;
+            Ok(inserted_count)
+        })
     }
 
     /// A metadata value, e.g. the sync cursor.
     pub fn get_meta(&self, repo_id: RepoId, key: &str) -> Result<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT value FROM sync_meta WHERE repo_id = ?1 AND key = ?2",
-                params![repo_id, key],
-                |row| row.get(0),
-            )
+        sync_meta::table
+            .find((repo_id, key))
+            .select(sync_meta::value)
+            .first(&mut *self.conn.borrow_mut())
             .optional()
             .doing(format!("reading sync_meta {key}"))
     }
 
     /// Set a metadata value.
     pub fn set_meta(&self, repo_id: RepoId, key: &str, value: &str) -> Result<()> {
-        set_meta_row(&self.conn, repo_id, key, value)
+        set_meta_row(&mut self.conn.borrow_mut(), repo_id, key, value)
     }
 
     /// Every tracked PR, ordered by number.
     pub fn list_tracked(&self, repo_id: RepoId) -> Result<Vec<TrackedPr>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT number, title, author, author_association, head_sha, is_draft,
-                   state, updated_at, labels, milestone, files, files_truncated,
-                   base_ref, created_at, tracked_reason, after_merge,
-                   last_reviewed_sha, last_verdict, last_action_at, done_sha,
-                   snoozed_until, muted, deferred_at, done_at
-            FROM prs
-            LEFT JOIN my_state USING (repo_id, number)
-            WHERE repo_id = ?1 AND tracked_reason IS NOT NULL
-            ORDER BY number
-            ",
-        )?;
-        let rows = stmt
-            .query_map(params![repo_id], row_to_tracked)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        tracked_prs(repo_id)
+            .load::<(Pr, Option<String>, bool, Option<MyStateRecord>)>(&mut *self.conn.borrow_mut())
+            .doing("listing tracked PRs")?
+            .into_iter()
+            .map(|(pr, reason, after_merge, state)| {
+                tracked_from_stored(pr, reason, after_merge, state)
+            })
+            .collect()
     }
 
     /// `(tracked, total)` PR counts, for the sync summary.
     pub fn counts(&self, repo_id: RepoId) -> Result<(u64, u64)> {
-        let tracked = self.conn.query_row(
-            "SELECT COUNT(*) FROM prs WHERE repo_id = ?1 AND tracked_reason IS NOT NULL",
-            params![repo_id],
-            |row| row.get::<_, i64>(0),
-        )?;
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM prs WHERE repo_id = ?1",
-            params![repo_id],
-            |row| row.get::<_, i64>(0),
-        )?;
-        Ok((tracked as u64, total as u64))
+        prs::table
+            .filter(prs::repo_id.eq(repo_id))
+            .select((
+                count(case_when(
+                    prs::tracked_reason.is_not_null(),
+                    1_i64.into_sql::<BigInt>(),
+                )),
+                count_star(),
+            ))
+            .first::<(i64, i64)>(&mut *self.conn.borrow_mut())
+            .doing("counting PRs")
+            .map(|(tracked, total)| (tracked as u64, total as u64))
     }
 
     /// Record the colours a repo paints its labels, replacing any it has moved
@@ -689,79 +698,101 @@ impl Ledger {
     /// same name is painted differently in another project, and a table keyed by
     /// name alone would answer for whichever repo was swept last.
     pub fn set_label_colours(&self, repo_id: RepoId, labels: &[(String, String)]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        for (name, color) in labels {
-            tx.execute(
-                "INSERT INTO labels (repo_id, name, color) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(repo_id, name) DO UPDATE SET color = excluded.color",
-                params![repo_id, name, color],
-            )
-            .doing(format!("storing the colour of {name}"))?;
+        if labels.is_empty() {
+            return Ok(());
         }
-        tx.commit().doing("committing label colours")?;
+        let records = labels
+            .iter()
+            .map(|(name, color)| LabelRecord {
+                repo_id,
+                name: name.clone(),
+                color: color.clone(),
+            })
+            .collect::<Vec<_>>();
+        diesel::insert_into(labels::table)
+            .values(&records)
+            .on_conflict((labels::repo_id, labels::name))
+            .do_update()
+            .set(labels::color.eq(excluded(labels::color)))
+            .execute(&mut *self.conn.borrow_mut())
+            .doing("storing label colours")?;
         Ok(())
     }
 
     /// One repo's label colours, by name — what a frontend needs to paint a row
     /// the way the forge does.
     pub fn label_colours(&self, repo_id: RepoId) -> Result<BTreeMap<String, String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name, color FROM labels WHERE repo_id = ?1")?;
-        let rows = stmt
-            .query_map(params![repo_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<BTreeMap<String, String>>>()?;
-        Ok(rows)
+        labels::table
+            .filter(labels::repo_id.eq(repo_id))
+            .select((labels::name, labels::color))
+            .load::<(String, String)>(&mut *self.conn.borrow_mut())
+            .doing("reading label colours")
+            .map(IntoIterator::into_iter)
+            .map(Iterator::collect)
     }
 
     /// One repo's stored PR rows, counted the ways that say what the ledger is
     /// accumulating. See [`Census`].
     pub fn census(&self, repo_id: RepoId) -> Result<Census> {
-        // The join carries the predicate rather than a `WHERE`, so a PR with a
-        // `my_state` row that says nothing (every field back at its default)
-        // counts as having none — which is what "something I set" means.
-        self.conn
-            .query_row(
-                r"
-                SELECT COUNT(*),
-                       COALESCE(SUM(p.tracked_reason IS NOT NULL), 0),
-                       COALESCE(SUM(p.state = 'OPEN'), 0),
-                       COALESCE(SUM(p.state = 'MERGED'), 0),
-                       COALESCE(SUM(p.state = 'CLOSED'), 0),
-                       COALESCE(SUM(m.number IS NOT NULL), 0),
-                       COALESCE(SUM(m.number IS NOT NULL AND p.tracked_reason IS NULL), 0)
-                FROM prs p
-                LEFT JOIN my_state m
-                  ON m.repo_id = p.repo_id AND m.number = p.number
-                 AND (m.done_at IS NOT NULL OR m.snoozed_until IS NOT NULL
-                      OR m.muted = 1 OR m.deferred_at IS NOT NULL)
-                WHERE p.repo_id = ?1
-                ",
-                params![repo_id],
-                |row| {
-                    let count = |index: usize| row.get::<_, i64>(index).map(|n| n as u64);
-                    Ok(Census {
-                        total: count(0)?,
-                        tracked: count(1)?,
-                        open: count(2)?,
-                        merged: count(3)?,
-                        closed: count(4)?,
-                        mine: count(5)?,
-                        mine_untracked: count(6)?,
-                    })
-                },
+        let mine = my_state::done_at
+            .nullable()
+            .is_not_null()
+            .or(my_state::snoozed_until.nullable().is_not_null())
+            .or(my_state::muted.nullable().eq(true))
+            .or(my_state::deferred_at.nullable().is_not_null());
+        let (total, tracked, open, merged, closed, mine, mine_untracked) = prs::table
+            .left_join(
+                my_state::table.on(my_state::repo_id
+                    .eq(prs::repo_id)
+                    .and(my_state::number.eq(prs::number))),
             )
-            .doing("counting stored PRs")
+            .filter(prs::repo_id.eq(repo_id))
+            .select((
+                count_star(),
+                count(case_when(
+                    prs::tracked_reason.is_not_null(),
+                    1_i64.into_sql::<BigInt>(),
+                )),
+                count(case_when(
+                    prs::state.eq(DbPrState::from(PrState::Open)),
+                    1_i64.into_sql::<BigInt>(),
+                )),
+                count(case_when(
+                    prs::state.eq(DbPrState::from(PrState::Merged)),
+                    1_i64.into_sql::<BigInt>(),
+                )),
+                count(case_when(
+                    prs::state.eq(DbPrState::from(PrState::Closed)),
+                    1_i64.into_sql::<BigInt>(),
+                )),
+                count(case_when(mine, 1_i64.into_sql::<BigInt>())),
+                count(case_when(
+                    mine.and(prs::tracked_reason.is_null()),
+                    1_i64.into_sql::<BigInt>(),
+                )),
+            ))
+            .get_result::<(i64, i64, i64, i64, i64, i64, i64)>(&mut *self.conn.borrow_mut())
+            .doing("counting stored PRs")?;
+        Ok(Census {
+            total: total as u64,
+            tracked: tracked as u64,
+            open: open as u64,
+            merged: merged as u64,
+            closed: closed as u64,
+            mine: mine as u64,
+            mine_untracked: mine_untracked as u64,
+        })
     }
 
     /// Count of stored PRs whose file list GitHub truncated and that matched no
     /// rule — the "unknown, not non-matching" set `doctor` should surface.
     pub fn count_truncated_untracked(&self, repo_id: RepoId) -> Result<u64> {
-        let n = self.conn.query_row(
-            "SELECT COUNT(*) FROM prs WHERE repo_id = ?1 AND files_truncated = 1 AND tracked_reason IS NULL",
-            params![repo_id],
-            |row| row.get::<_, i64>(0),
-        )?;
+        let n = prs::table
+            .filter(prs::repo_id.eq(repo_id))
+            .filter(prs::files_truncated.eq(true))
+            .filter(prs::tracked_reason.is_null())
+            .count()
+            .get_result::<i64>(&mut *self.conn.borrow_mut())?;
         Ok(n as u64)
     }
 
@@ -777,44 +808,42 @@ impl Ledger {
         include_merged: bool,
         which: Detail,
     ) -> Result<Vec<TrackedPr>> {
-        // Timestamps are stored as fixed-precision RFC3339 (see `commit_detail`
-        // and the sweep), so this lexicographic `<` is a correct chronological
-        // comparison.
-        let mut stmt = self.conn.prepare(&format!(
-            r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge, {MY_STATE_COLUMNS}
-            FROM prs p
-            LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
-            WHERE p.repo_id = ?1 AND p.tracked_reason IS NOT NULL
-              AND (p.state = 'OPEN'
-                   OR (p.state = 'MERGED' AND (?2 OR p.after_merge = 1)))
-              AND (?3 OR p.detail_synced_at IS NULL OR p.detail_synced_at < p.updated_at)
-            ORDER BY p.number
-            ",
-        ))?;
-        let rows = stmt
-            .query_map(
-                params![repo_id, include_merged, which == Detail::Every],
-                row_to_tracked,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        let mut query = tracked_prs(repo_id).into_boxed();
+        query = if include_merged {
+            query.filter(
+                prs::state
+                    .eq(DbPrState::from(PrState::Open))
+                    .or(prs::state.eq(DbPrState::from(PrState::Merged))),
+            )
+        } else {
+            query.filter(
+                prs::state.eq(DbPrState::from(PrState::Open)).or(prs::state
+                    .eq(DbPrState::from(PrState::Merged))
+                    .and(prs::after_merge.eq(true))),
+            )
+        };
+        if which == Detail::Stale {
+            query = query.filter(
+                prs::detail_synced_at
+                    .is_null()
+                    .or(prs::detail_synced_at.lt(prs::updated_at.nullable())),
+            );
+        }
+        query
+            .load::<(Pr, Option<String>, bool, Option<MyStateRecord>)>(&mut *self.conn.borrow_mut())
+            .doing("listing PRs needing detail")?
+            .into_iter()
+            .map(|(pr, reason, after_merge, state)| {
+                tracked_from_stored(pr, reason, after_merge, state)
+            })
+            .collect()
     }
 
     /// My history on a PR, or the default (all-empty) state if none is stored.
     pub fn my_state(&self, repo_id: RepoId, number: u64) -> Result<MyState> {
-        self.conn
-            .query_row(
-                r"
-                SELECT last_reviewed_sha, last_verdict, last_action_at, done_sha,
-                       snoozed_until, muted, deferred_at, done_at
-                FROM my_state WHERE repo_id = ?1 AND number = ?2
-                ",
-                params![repo_id, number as i64],
-                row_to_my_state,
-            )
-            .optional()
-            .doing(format!("reading my_state for #{number}"))
+        load_my_state(&mut self.conn.borrow_mut(), repo_id, number)?
+            .map(my_state_from_stored)
+            .transpose()
             .map(Option::unwrap_or_default)
     }
 
@@ -833,16 +862,21 @@ impl Ledger {
         done_sha: &str,
         done_at: Timestamp,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                r"
-                INSERT INTO my_state (repo_id, number, done_sha, done_at) VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(repo_id, number) DO UPDATE SET
-                  done_sha = excluded.done_sha,
-                  done_at = excluded.done_at
-                ",
-                params![repo_id, number as i64, done_sha, done_at.to_string()],
-            )
+        let done_at = DbTimestamp::from(done_at);
+        diesel::insert_into(my_state::table)
+            .values((
+                my_state::repo_id.eq(repo_id),
+                my_state::number.eq(number as i64),
+                my_state::done_sha.eq(done_sha),
+                my_state::done_at.eq(&done_at),
+            ))
+            .on_conflict((my_state::repo_id, my_state::number))
+            .do_update()
+            .set((
+                my_state::done_sha.eq(done_sha),
+                my_state::done_at.eq(&done_at),
+            ))
+            .execute(&mut *self.conn.borrow_mut())
             .doing(format!("recording done for #{number}"))?;
         Ok(())
     }
@@ -850,28 +884,33 @@ impl Ledger {
     /// Record `reviewq snooze`. Touches only `snoozed_until`; see
     /// [`set_done`](Self::set_done) for why that matters.
     pub fn set_snoozed_until(&self, repo_id: RepoId, number: u64, until: Timestamp) -> Result<()> {
-        self.conn
-            .execute(
-                r"
-                INSERT INTO my_state (repo_id, number, snoozed_until) VALUES (?1, ?2, ?3)
-                ON CONFLICT(repo_id, number) DO UPDATE SET snoozed_until = excluded.snoozed_until
-                ",
-                params![repo_id, number as i64, until.to_string()],
-            )
+        let until = DbTimestamp::from(until);
+        diesel::insert_into(my_state::table)
+            .values((
+                my_state::repo_id.eq(repo_id),
+                my_state::number.eq(number as i64),
+                my_state::snoozed_until.eq(&until),
+            ))
+            .on_conflict((my_state::repo_id, my_state::number))
+            .do_update()
+            .set(my_state::snoozed_until.eq(&until))
+            .execute(&mut *self.conn.borrow_mut())
             .doing(format!("snoozing #{number}"))?;
         Ok(())
     }
 
     /// Record `reviewq mute`/`unmute`. Touches only `muted`.
     pub fn set_muted(&self, repo_id: RepoId, number: u64, muted: bool) -> Result<()> {
-        self.conn
-            .execute(
-                r"
-                INSERT INTO my_state (repo_id, number, muted) VALUES (?1, ?2, ?3)
-                ON CONFLICT(repo_id, number) DO UPDATE SET muted = excluded.muted
-                ",
-                params![repo_id, number as i64, muted as i64],
-            )
+        diesel::insert_into(my_state::table)
+            .values((
+                my_state::repo_id.eq(repo_id),
+                my_state::number.eq(number as i64),
+                my_state::muted.eq(muted),
+            ))
+            .on_conflict((my_state::repo_id, my_state::number))
+            .do_update()
+            .set(my_state::muted.eq(muted))
+            .execute(&mut *self.conn.borrow_mut())
             .doing(format!("setting muted for #{number}"))?;
         Ok(())
     }
@@ -883,14 +922,17 @@ impl Ledger {
         number: u64,
         deferred_at: Option<Timestamp>,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                r"
-                INSERT INTO my_state (repo_id, number, deferred_at) VALUES (?1, ?2, ?3)
-                ON CONFLICT(repo_id, number) DO UPDATE SET deferred_at = excluded.deferred_at
-                ",
-                params![repo_id, number as i64, deferred_at.map(|t| t.to_string())],
-            )
+        let deferred_at = deferred_at.map(DbTimestamp::from);
+        diesel::insert_into(my_state::table)
+            .values((
+                my_state::repo_id.eq(repo_id),
+                my_state::number.eq(number as i64),
+                my_state::deferred_at.eq(&deferred_at),
+            ))
+            .on_conflict((my_state::repo_id, my_state::number))
+            .do_update()
+            .set(my_state::deferred_at.eq(&deferred_at))
+            .execute(&mut *self.conn.borrow_mut())
             .doing(format!("setting deferred_at for #{number}"))?;
         Ok(())
     }
@@ -902,12 +944,13 @@ impl Ledger {
     /// either). `done` uses the narrower
     /// [`clear_done_attention`](Self::clear_done_attention) instead.
     pub fn clear_attention(&self, repo_id: RepoId, number: u64) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
-                params![repo_id, number as i64],
-            )
-            .doing(format!("clearing attention for #{number}"))?;
+        diesel::delete(
+            attention::table
+                .filter(attention::repo_id.eq(repo_id))
+                .filter(attention::pr_number.eq(number as i64)),
+        )
+        .execute(&mut *self.conn.borrow_mut())
+        .doing(format!("clearing attention for #{number}"))?;
         Ok(())
     }
 
@@ -927,21 +970,22 @@ impl Ledger {
         number: u64,
         now: Timestamp,
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
-            params![repo_id, number as i64],
-        )
-        .doing(format!("clearing attention for unreachable #{number}"))?;
-        tx.execute(
-            "UPDATE prs SET detail_synced_at = ?3 WHERE repo_id = ?1 AND number = ?2",
-            params![repo_id, number as i64, now.to_string()],
-        )
-        .doing(format!(
-            "stamping detail_synced_at for unreachable #{number}"
-        ))?;
-        tx.commit()?;
-        Ok(())
+        self.conn.borrow_mut().transaction(|conn| {
+            diesel::delete(
+                attention::table
+                    .filter(attention::repo_id.eq(repo_id))
+                    .filter(attention::pr_number.eq(number as i64)),
+            )
+            .execute(conn)
+            .doing(format!("clearing attention for unreachable #{number}"))?;
+            diesel::update(prs::table.find((repo_id, number as i64)))
+                .set(prs::detail_synced_at.eq(DbTimestamp::from(now)))
+                .execute(conn)
+                .doing(format!(
+                    "stamping detail_synced_at for unreachable #{number}"
+                ))?;
+            Ok(())
+        })
     }
 
     /// Record the state a detail fetch found the PR in — open, merged, or
@@ -956,11 +1000,9 @@ impl Ledger {
     /// [`commit_detail`](Self::commit_detail), and the rest of the snapshot
     /// (title, labels, milestone) is the sweep's to own.
     pub fn set_state(&self, repo_id: RepoId, number: u64, state: PrState) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE prs SET state = ?3 WHERE repo_id = ?1 AND number = ?2",
-                params![repo_id, number as i64, state.as_str()],
-            )
+        diesel::update(prs::table.find((repo_id, number as i64)))
+            .set(prs::state.eq(DbPrState::from(state)))
+            .execute(&mut *self.conn.borrow_mut())
             .doing(format!("recording #{number}'s state"))?;
         Ok(())
     }
@@ -969,12 +1011,14 @@ impl Ledger {
     /// to clear per the reason table, but not `review_requested` — only my
     /// review or the request being withdrawn clears that one.
     pub fn clear_done_attention(&self, repo_id: RepoId, number: u64) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2 AND reason != 'review_requested'",
-                params![repo_id, number as i64],
-            )
-            .doing(format!("clearing done attention for #{number}"))?;
+        diesel::delete(
+            attention::table
+                .filter(attention::repo_id.eq(repo_id))
+                .filter(attention::pr_number.eq(number as i64))
+                .filter(attention::reason.ne("review_requested")),
+        )
+        .execute(&mut *self.conn.borrow_mut())
+        .doing(format!("clearing done attention for #{number}"))?;
         Ok(())
     }
 
@@ -987,22 +1031,16 @@ impl Ledger {
     /// already have a row (from a sweep); the caller checks with
     /// [`show`](Self::show) first.
     pub fn track(&self, repo_id: RepoId, number: u64) -> Result<bool> {
-        if tracked_reason(&self.conn, repo_id, number)?.is_some() {
+        let conn = &mut *self.conn.borrow_mut();
+        if tracked_reason(conn, repo_id, number)?.is_some() {
             return Ok(false);
         }
-        self.conn
-            .execute(
-                // `untracked_at` cleared as well: `track` is what undoes an
-                // untrack, and leaving the stamp would let the next sweep drop
-                // the reason this just wrote.
-                "UPDATE prs SET tracked_reason = ?3, untracked_at = NULL \
-                 WHERE repo_id = ?1 AND number = ?2",
-                params![
-                    repo_id,
-                    number as i64,
-                    TrackedReason::Involved("manual".into()).render()
-                ],
-            )
+        diesel::update(prs::table.find((repo_id, number as i64)))
+            .set((
+                prs::tracked_reason.eq(TrackedReason::Involved("manual".into()).render()),
+                prs::untracked_at.eq(None::<String>),
+            ))
+            .execute(conn)
             .doing(format!("force-tracking #{number}"))?;
         Ok(true)
     }
@@ -1021,24 +1059,26 @@ impl Ledger {
     /// [`MyState`] survives: what you reviewed and when you were done with it
     /// stays true whether or not you are still watching.
     pub fn untrack(&self, repo_id: RepoId, number: u64, now: Timestamp) -> Result<bool> {
-        let tx = self.conn.unchecked_transaction()?;
-        let changed = tx
-            .execute(
-                "UPDATE prs SET tracked_reason = NULL, untracked_at = ?3 \
-                 WHERE repo_id = ?1 AND number = ?2",
-                params![repo_id, number as i64, now.to_string()],
+        self.conn.borrow_mut().transaction(|conn| {
+            let changed = diesel::update(prs::table.find((repo_id, number as i64)))
+                .set((
+                    prs::tracked_reason.eq(None::<String>),
+                    prs::untracked_at.eq(DbTimestamp::from(now)),
+                ))
+                .execute(conn)
+                .doing(format!("untracking #{number}"))?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            diesel::delete(
+                attention::table
+                    .filter(attention::repo_id.eq(repo_id))
+                    .filter(attention::pr_number.eq(number as i64)),
             )
-            .doing(format!("untracking #{number}"))?;
-        if changed == 0 {
-            return Ok(false);
-        }
-        tx.execute(
-            "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
-            params![repo_id, number as i64],
-        )
-        .doing(format!("clearing attention for untracked #{number}"))?;
-        tx.commit()?;
-        Ok(true)
+            .execute(conn)
+            .doing(format!("clearing attention for untracked #{number}"))?;
+            Ok(true)
+        })
     }
 
     /// Persist a PR's tier-2 detail and freshly-classified attention in one
@@ -1076,7 +1116,6 @@ impl Ledger {
         body: Option<&str>,
         now: Timestamp,
     ) -> Result<Committed> {
-        let tx = self.conn.unchecked_transaction()?;
         // The watermark first, and as one compare-and-set rather than a read
         // followed by a write: a separate read could be answered from before a
         // racing commit landed, and then this write would clobber it. As the
@@ -1093,39 +1132,42 @@ impl Ledger {
         // with everything else the detail pass saw. A `None` leaves whatever is
         // stored alone rather than blanking it — a caller with no body to offer
         // isn't asserting the PR has none.
-        let stamp = whole_second(now).to_string();
-        let applied = tx
-            .execute(
-                "UPDATE prs SET detail_synced_at = ?3, body = COALESCE(?4, body) \
-                 WHERE repo_id = ?1 AND number = ?2 \
-                   AND (detail_synced_at IS NULL OR detail_synced_at <= ?3)",
-                params![repo_id, number as i64, stamp, body],
-            )
-            .doing(format!("stamping detail_synced_at for #{number}"))?;
-        if applied == 0 {
-            // Either the row is gone — a caller bug — or somebody stored a newer
-            // detail while this one was being fetched.
-            let stored: Option<String> = tx
-                .query_row(
-                    "SELECT detail_synced_at FROM prs WHERE repo_id = ?1 AND number = ?2",
-                    params![repo_id, number as i64],
-                    |row| row.get(0),
-                )
-                .optional()
-                .doing(format!("reading #{number}'s detail watermark"))?
-                .flatten();
-            let Some(stored) = stored else {
-                return Err(LedgerError::NotStored { number });
-            };
-            return Ok(Committed::Superseded { stored });
-        }
+        let stamp = DbTimestamp::from(whole_second(now));
+        self.conn.borrow_mut().transaction(|conn| {
+            let target = prs::table.find((repo_id, number as i64)).filter(
+                prs::detail_synced_at
+                    .is_null()
+                    .or(prs::detail_synced_at.le(&stamp)),
+            );
+            let applied = diesel::update(target)
+                .set((
+                    prs::detail_synced_at.eq(&stamp),
+                    body.map(|body| prs::body.eq(body)),
+                ))
+                .execute(conn)
+                .doing(format!("stamping detail_synced_at for #{number}"))?;
+            if applied == 0 {
+                let stored = prs::table
+                    .find((repo_id, number as i64))
+                    .select(prs::detail_synced_at)
+                    .first::<Option<DbTimestamp>>(conn)
+                    .optional()
+                    .doing(format!("reading #{number}'s detail watermark"))?
+                    .flatten();
+                let Some(stored) = stored else {
+                    return Err(LedgerError::NotStored { number });
+                };
+                return Ok(Committed::Superseded {
+                    stored: stored.into_timestamp(),
+                });
+            }
 
-        write_forge_state(&tx, repo_id, number, my_state)?;
-        replace_threads(&tx, repo_id, number, threads)?;
-        replace_reviewers(&tx, repo_id, number, reviewers)?;
-        replace_attention(&tx, repo_id, number, attention)?;
-        tx.commit().doing("committing PR detail")?;
-        Ok(Committed::Applied)
+            write_forge_state(conn, repo_id, number, my_state)?;
+            replace_threads(conn, repo_id, number, threads)?;
+            replace_reviewers(conn, repo_id, number, reviewers)?;
+            replace_attention(conn, repo_id, number, attention)?;
+            Ok(Committed::Applied)
+        })
     }
 
     /// Drop attention rows that no longer belong to a queued PR: closed-unmerged
@@ -1136,15 +1178,27 @@ impl Ledger {
     /// stale rows would linger and show up in `show`. Run once at the end of a
     /// sync.
     pub fn clear_archived_attention(&self, repo_id: RepoId, include_merged: bool) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM attention WHERE repo_id = ?1 AND pr_number IN
-                 (SELECT number FROM prs WHERE repo_id = ?1
-                    AND state <> 'OPEN'
-                    AND NOT (state = 'MERGED' AND (?2 OR after_merge = 1)))",
-                params![repo_id, include_merged],
-            )
-            .doing("clearing archived attention")?;
+        let mut archived = prs::table
+            .filter(prs::repo_id.eq(repo_id))
+            .filter(prs::state.ne(DbPrState::from(PrState::Open)))
+            .select(prs::number)
+            .into_boxed();
+        if include_merged {
+            archived = archived.filter(prs::state.ne(DbPrState::from(PrState::Merged)));
+        } else {
+            archived = archived.filter(
+                prs::state
+                    .ne(DbPrState::from(PrState::Merged))
+                    .or(prs::after_merge.eq(false)),
+            );
+        }
+        diesel::delete(
+            attention::table
+                .filter(attention::repo_id.eq(repo_id))
+                .filter(attention::pr_number.eq_any(archived)),
+        )
+        .execute(&mut *self.conn.borrow_mut())
+        .doing("clearing archived attention")?;
         Ok(())
     }
 
@@ -1169,31 +1223,56 @@ impl Ledger {
     }
 
     fn queued(&self, repo_id: RepoId, muted: Muted) -> Result<Vec<QueueItem>> {
-        // Open PRs, plus merged PRs when a project opted into post-merge review
-        // (those only carry attention rows when it did). Closed-unmerged never.
-        let mut stmt = self.conn.prepare(&format!(
-            r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, a.since, a.payload, {MY_STATE_COLUMNS}
-            FROM prs p
-            JOIN attention a ON a.repo_id = p.repo_id AND a.pr_number = p.number
-            LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
-            WHERE p.repo_id = ?1 AND p.state IN ('OPEN', 'MERGED') AND p.tracked_reason IS NOT NULL
-              AND COALESCE(ms.muted, 0) = ?2
-            ",
-        ))?;
-        let muted = i64::from(muted == Muted::Only);
-        let rows = stmt
-            .query_map(params![repo_id, muted], |row| {
-                let pr = snapshot_from_row(row, 0)?;
-                let tracked_reason: String = row.get(14)?;
-                let attention = attention_from_row(row, 15)?;
-                let my_state = my_state_from_row(row, 17)?;
-                Ok((pr, tracked_reason, attention, my_state))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut query = prs::table
+            .inner_join(
+                attention::table.on(attention::repo_id
+                    .eq(prs::repo_id)
+                    .and(attention::pr_number.eq(prs::number))),
+            )
+            .left_join(
+                my_state::table.on(my_state::repo_id
+                    .eq(prs::repo_id)
+                    .and(my_state::number.eq(prs::number))),
+            )
+            .filter(prs::repo_id.eq(repo_id))
+            .filter(
+                prs::state
+                    .eq(DbPrState::from(PrState::Open))
+                    .or(prs::state.eq(DbPrState::from(PrState::Merged))),
+            )
+            .filter(prs::tracked_reason.is_not_null())
+            .select((
+                Pr::as_select(),
+                prs::tracked_reason,
+                AttentionRecord::as_select(),
+                Option::<MyStateRecord>::as_select(),
+            ))
+            .into_boxed();
+        query = match muted {
+            Muted::Hidden => query.filter(
+                my_state::muted
+                    .eq(false)
+                    .nullable()
+                    .or(my_state::muted.is_null()),
+            ),
+            Muted::Only => query.filter(my_state::muted.eq(true).nullable()),
+        };
+        let rows = query
+            .load::<(Pr, Option<String>, AttentionRecord, Option<MyStateRecord>)>(
+                &mut *self.conn.borrow_mut(),
+            )
+            .doing("reading queued PRs")?;
 
         let mut items: Vec<QueueItem> = Vec::new();
         for (pr, tracked_reason, attention, my_state) in rows {
+            let tracked_reason = tracked_reason
+                .ok_or_else(|| corrupt_message("tracked reason", "tracked row has no reason"))?;
+            let pr = snapshot_from_stored(pr)?;
+            let attention = attention_from_stored(attention)?;
+            let my_state = my_state
+                .map(my_state_from_stored)
+                .transpose()?
+                .unwrap_or_default();
             match items.iter_mut().find(|i| i.pr.number == pr.number) {
                 Some(existing) => {
                     if attention_is_more_urgent(&attention, &existing.top) {
@@ -1235,24 +1314,27 @@ impl Ledger {
     /// because you put it there, not because anybody else has the ball, and
     /// [`muted`](Self::muted) is where it belongs.
     pub fn waiting(&self, repo_id: RepoId) -> Result<Vec<TrackedPr>> {
-        let mut stmt = self.conn.prepare(&format!(
-            r"
-            SELECT {PR_COLUMNS}, p.tracked_reason, p.after_merge, {MY_STATE_COLUMNS}
-            FROM prs p
-            LEFT JOIN my_state ms ON ms.repo_id = p.repo_id AND ms.number = p.number
-            WHERE p.repo_id = ?1 AND p.state = 'OPEN' AND p.tracked_reason IS NOT NULL
-              AND COALESCE(ms.muted, 0) = 0
-              AND NOT EXISTS (
-                SELECT 1 FROM attention a
-                WHERE a.repo_id = p.repo_id AND a.pr_number = p.number
-              )
-            ORDER BY p.number
-            ",
-        ))?;
-        let rows = stmt
-            .query_map(params![repo_id], row_to_tracked)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        tracked_prs(repo_id)
+            .left_join(
+                attention::table.on(attention::repo_id
+                    .eq(prs::repo_id)
+                    .and(attention::pr_number.eq(prs::number))),
+            )
+            .filter(prs::state.eq(DbPrState::from(PrState::Open)))
+            .filter(
+                my_state::muted
+                    .eq(false)
+                    .nullable()
+                    .or(my_state::muted.is_null()),
+            )
+            .filter(attention::repo_id.is_null())
+            .load::<(Pr, Option<String>, bool, Option<MyStateRecord>)>(&mut *self.conn.borrow_mut())
+            .doing("listing waiting PRs")?
+            .into_iter()
+            .map(|(pr, reason, after_merge, state)| {
+                tracked_from_stored(pr, reason, after_merge, state)
+            })
+            .collect()
     }
 
     /// Run a per-repo read against every repo in [`repos`](Self::repos) and
@@ -1323,28 +1405,21 @@ impl Ledger {
     /// Everything `reviewq show` needs about one PR, or `None` if it is not
     /// stored.
     pub fn show(&self, repo_id: RepoId, number: u64) -> Result<Option<PrShow>> {
-        let base = self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT {PR_COLUMNS}, p.tracked_reason, p.body, p.after_merge FROM prs p \
-                     WHERE p.repo_id = ?1 AND p.number = ?2"
-                ),
-                params![repo_id, number as i64],
-                |row| {
-                    Ok((
-                        snapshot_from_row(row, 0)?,
-                        row.get::<_, Option<String>>(14)?,
-                        row.get::<_, Option<String>>(15)?,
-                        row.get::<_, i64>(16)? != 0,
-                    ))
-                },
-            )
+        let base = prs::table
+            .find((repo_id, number as i64))
+            .select((
+                Pr::as_select(),
+                prs::tracked_reason,
+                prs::body,
+                prs::after_merge,
+            ))
+            .first::<(Pr, Option<String>, Option<String>, bool)>(&mut *self.conn.borrow_mut())
             .optional()
             .doing(format!("reading PR #{number}"))?;
-        let Some((pr, tracked_reason, body, after_merge)) = base else {
+        let Some((stored, tracked_reason, body, after_merge)) = base else {
             return Ok(None);
         };
+        let pr = snapshot_from_stored(stored)?;
 
         let my_state = self.my_state(repo_id, number)?;
         let threads = self.threads(repo_id, number)?;
@@ -1364,29 +1439,30 @@ impl Ledger {
 
     /// A PR's reviewers, most recently submitted first.
     fn reviewers(&self, repo_id: RepoId, number: u64) -> Result<Vec<ReviewerVerdict>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT login, verdict, submitted_at FROM reviewers \
-             WHERE repo_id = ?1 AND pr_number = ?2 ORDER BY submitted_at DESC",
-        )?;
-        let rows = stmt
-            .query_map(params![repo_id, number as i64], row_to_reviewer)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        reviewers::table
+            .filter(reviewers::repo_id.eq(repo_id))
+            .filter(reviewers::pr_number.eq(number as i64))
+            .order(reviewers::submitted_at.desc())
+            .select(ReviewerRecord::as_select())
+            .load::<ReviewerRecord>(&mut *self.conn.borrow_mut())
+            .doing(format!("reading reviewers for #{number}"))?
+            .into_iter()
+            .map(reviewer_from_stored)
+            .collect()
     }
 
     /// A PR's review threads, ordered by id for stability.
     fn threads(&self, repo_id: RepoId, number: u64) -> Result<Vec<ThreadState>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT thread_id, i_own, is_resolved, resolved_by, last_comment_author,
-                   last_comment_at, my_last_comment_at
-            FROM threads WHERE repo_id = ?1 AND pr_number = ?2 ORDER BY thread_id
-            ",
-        )?;
-        let rows = stmt
-            .query_map(params![repo_id, number as i64], row_to_thread)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        threads::table
+            .filter(threads::repo_id.eq(repo_id))
+            .filter(threads::pr_number.eq(number as i64))
+            .order(threads::thread_id)
+            .select(ThreadRecord::as_select())
+            .load::<ThreadRecord>(&mut *self.conn.borrow_mut())
+            .doing(format!("reading threads for #{number}"))?
+            .into_iter()
+            .map(thread_from_stored)
+            .collect()
     }
 
     /// Every repo this ledger knows that has PR `number`.
@@ -1400,240 +1476,172 @@ impl Ledger {
     /// lookup, and every caller then opened a second one to do anything with the
     /// answer.
     pub fn repos_with_pr(&self, number: u64) -> Result<Vec<RepoKey>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT r.host, r.owner, r.name FROM prs p \
-             JOIN repos r ON r.id = p.repo_id WHERE p.number = ?1",
-        )?;
-        let rows = stmt
-            .query_map(params![number as i64], |row| {
-                Ok(RepoKey {
-                    host: row.get(0)?,
-                    owner: row.get(1)?,
-                    name: row.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        prs::table
+            .inner_join(repos::table)
+            .filter(prs::number.eq(number as i64))
+            .select((repos::host, repos::owner, repos::name))
+            .load::<(String, String, String)>(&mut *self.conn.borrow_mut())
+            .doing(format!("finding repositories with PR #{number}"))
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(host, owner, name)| RepoKey { host, owner, name })
+                    .collect()
+            })
     }
 
     /// A PR's attention rows, most-urgent first.
     fn attention(&self, repo_id: RepoId, number: u64) -> Result<Vec<AttentionRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT since, payload FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
-        )?;
-        let mut rows = stmt
-            .query_map(params![repo_id, number as i64], |row| {
-                attention_from_row(row, 0)
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = attention::table
+            .filter(attention::repo_id.eq(repo_id))
+            .filter(attention::pr_number.eq(number as i64))
+            .select(AttentionRecord::as_select())
+            .load::<AttentionRecord>(&mut *self.conn.borrow_mut())
+            .doing(format!("reading attention for #{number}"))?
+            .into_iter()
+            .map(attention_from_stored)
+            .collect::<Result<Vec<_>>>()?;
         rows.sort_by_key(|a| (a.priority(), a.since));
         Ok(rows)
     }
 }
 
-/// Insert or update one PR row against `conn` (a connection or an open
-/// transaction), merging its tracked reason with any already stored. Returns
-/// `true` if the row was newly inserted.
-fn upsert_row(
-    conn: &Connection,
+#[diesel::dsl::auto_type]
+fn tracked_prs(repo_id: RepoId) -> _ {
+    let pr: diesel::dsl::AsSelect<Pr, Sqlite> = Pr::as_select();
+    let state: diesel::dsl::AsSelect<Option<MyStateRecord>, Sqlite> =
+        Option::<MyStateRecord>::as_select();
+    prs::table
+        .left_join(
+            my_state::table.on(my_state::repo_id
+                .eq(prs::repo_id)
+                .and(my_state::number.eq(prs::number))),
+        )
+        .filter(prs::repo_id.eq(repo_id))
+        .filter(prs::tracked_reason.is_not_null())
+        .order(prs::number)
+        .select((pr, prs::tracked_reason, prs::after_merge, state))
+}
+
+/// Insert or update one PR, preserving its original first-seen timestamp.
+fn upsert_pr_snapshot(
+    conn: &mut DbConnection,
     repo_id: RepoId,
     pr: &PrSnapshot,
     reason: Option<&TrackedReason>,
-    now: Timestamp,
 ) -> Result<bool> {
-    let merged = merge_tracking(stored_tracking(conn, repo_id, pr.number)?, reason);
-    let is_new = existing_row(conn, repo_id, pr.number)?.is_none();
+    // Conflict updates retain the original timestamp, so returning this attempt's
+    // freshly generated first_seen_at identifies an insertion.
+    let first_seen_at = Timestamp::now();
 
-    let labels = serde_json::to_string(&pr.labels).encoding("a label list")?;
-    let files = pr
-        .files
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .encoding("a file list")?;
-
-    conn.execute(
-        r"
-        INSERT INTO prs (
-          repo_id, number, title, author, author_association, head_sha, is_draft,
-          state, updated_at, labels, milestone, files, files_truncated,
-          tracked_reason, first_seen_at, base_ref, after_merge, created_at
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-        ON CONFLICT(repo_id, number) DO UPDATE SET
-          title=excluded.title,
-          author=excluded.author,
-          author_association=excluded.author_association,
-          head_sha=excluded.head_sha,
-          is_draft=excluded.is_draft,
-          state=excluded.state,
-          updated_at=excluded.updated_at,
-          labels=excluded.labels,
-          milestone=excluded.milestone,
-          files=excluded.files,
-          files_truncated=excluded.files_truncated,
-          tracked_reason=excluded.tracked_reason,
-          base_ref=excluded.base_ref,
-          after_merge=excluded.after_merge,
-          -- Never back to unknown: a snapshot from a caller that has no opening
-          -- date (a fixture, or a response captured before the query asked for
-          -- it) must not erase one an earlier sweep learnt.
-          created_at=COALESCE(excluded.created_at, prs.created_at)
-        ",
-        params![
-            repo_id,
-            pr.number as i64,
-            pr.title,
-            pr.author,
-            pr.author_association,
-            pr.head_sha,
-            pr.is_draft as i64,
-            pr.state.as_str(),
-            pr.updated_at.to_string(),
-            labels,
-            pr.milestone,
-            files,
-            pr.files_truncated as i64,
-            merged.reason,
-            now.to_string(),
-            pr.base_ref,
-            merged.after_merge as i64,
-            pr.created_at.map(|at| at.to_string()),
-        ],
-    )
-    .doing(format!("upserting PR #{}", pr.number))?;
-    Ok(is_new)
+    let record = NewPr {
+        repo_id,
+        pr: Pr::try_from(pr)?,
+        tracked_reason: reason.map(TrackedReason::render),
+        first_seen_at: DbTimestamp::from(first_seen_at),
+        detail_synced_at: None,
+        body: None,
+        after_merge: matches!(
+            reason,
+            Some(TrackedReason::Interest {
+                after_merge: true,
+                ..
+            })
+        ),
+        untracked_at: None,
+    };
+    let summary = PrSummary {
+        title: &record.pr.title,
+        author: &record.pr.author,
+        author_association: &record.pr.author_association,
+        head_sha: &record.pr.head_sha,
+        is_draft: record.pr.is_draft,
+        state: &record.pr.state,
+        updated_at: &record.pr.updated_at,
+        labels: &record.pr.labels,
+        milestone: record.pr.milestone.as_deref(),
+        files: record.pr.files.as_deref(),
+        files_truncated: record.pr.files_truncated,
+        base_ref: &record.pr.base_ref,
+        created_at: record.pr.created_at.as_ref(),
+    };
+    let insert = diesel::insert_into(prs::table)
+        .values(&record)
+        .on_conflict((prs::repo_id, prs::number))
+        .do_update();
+    let result = match reason {
+        None => insert
+            .set(&summary)
+            .returning(prs::first_seen_at)
+            .get_result::<DbTimestamp>(conn),
+        Some(TrackedReason::Involved(_)) => insert
+            .set((
+                &summary,
+                prs::tracked_reason.eq(case_when::<_, _, Nullable<Text>>(
+                    prs::untracked_at.is_null(),
+                    record.tracked_reason.as_deref(),
+                )),
+            ))
+            .returning(prs::first_seen_at)
+            .get_result::<DbTimestamp>(conn),
+        Some(TrackedReason::Interest { after_merge, .. }) => insert
+            .set((
+                &summary,
+                prs::tracked_reason.eq(case_when::<_, _, Nullable<Text>>(
+                    prs::untracked_at.is_not_null(),
+                    None::<&str>,
+                )
+                .when(prs::tracked_reason.like("involved:%"), prs::tracked_reason)
+                .otherwise(record.tracked_reason.as_deref())),
+                prs::after_merge.eq(case_when::<_, _, Bool>(
+                    prs::untracked_at.is_null(),
+                    *after_merge,
+                )
+                .otherwise(prs::after_merge)),
+            ))
+            .returning(prs::first_seen_at)
+            .get_result::<DbTimestamp>(conn),
+    };
+    let stored = result.doing(format!("upserting PR #{}", pr.number))?;
+    Ok(stored.into_timestamp() == first_seen_at)
 }
 
-fn set_meta_row(conn: &Connection, repo_id: RepoId, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO sync_meta (repo_id, key, value) VALUES (?1, ?2, ?3)
-         ON CONFLICT(repo_id, key) DO UPDATE SET value = excluded.value",
-        params![repo_id, key, value],
-    )
-    .doing(format!("writing sync_meta {key}"))?;
+fn set_meta_row(conn: &mut DbConnection, repo_id: RepoId, key: &str, value: &str) -> Result<()> {
+    diesel::insert_into(sync_meta::table)
+        .values((
+            sync_meta::repo_id.eq(repo_id),
+            sync_meta::key.eq(key),
+            sync_meta::value.eq(value),
+        ))
+        .on_conflict((sync_meta::repo_id, sync_meta::key))
+        .do_update()
+        .set(sync_meta::value.eq(excluded(sync_meta::value)))
+        .execute(conn)
+        .doing(format!("writing sync_meta {key}"))?;
     Ok(())
 }
 
-fn tracked_reason(conn: &Connection, repo_id: RepoId, number: u64) -> Result<Option<String>> {
-    Ok(stored_tracking(conn, repo_id, number)?.reason)
+fn tracked_reason(conn: &mut DbConnection, repo_id: RepoId, number: u64) -> Result<Option<String>> {
+    prs::table
+        .find((repo_id, number as i64))
+        .select(prs::tracked_reason)
+        .first::<Option<String>>(conn)
+        .optional()
+        .doing(format!("reading tracked_reason for #{number}"))
+        .map(Option::flatten)
 }
 
-/// What the row already says about why this PR is tracked. All-default when
-/// there is no row yet.
-fn stored_tracking(conn: &Connection, repo_id: RepoId, number: u64) -> Result<Tracking> {
-    conn.query_row(
-        "SELECT tracked_reason, after_merge, untracked_at FROM prs \
-         WHERE repo_id = ?1 AND number = ?2",
-        params![repo_id, number as i64],
-        |row| {
-            Ok(Tracking {
-                reason: row.get(0)?,
-                after_merge: row.get::<_, i64>(1)? != 0,
-                untracked: row.get::<_, Option<String>>(2)?.is_some(),
-            })
-        },
-    )
-    .optional()
-    .doing(format!("reading tracked_reason for #{number}"))
-    .map(Option::unwrap_or_default)
-}
-
-fn existing_row(conn: &Connection, repo_id: RepoId, number: u64) -> Result<Option<u64>> {
-    conn.query_row(
-        "SELECT number FROM prs WHERE repo_id = ?1 AND number = ?2",
-        params![repo_id, number as i64],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .doing(format!("checking for PR #{number}"))
-    .map(|opt| opt.map(|n| n as u64))
-}
-
-/// Why a PR is tracked as the row holds it: the rendered reason, and whether it
-/// survives the PR merging.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Tracking {
-    reason: Option<String>,
-    after_merge: bool,
-    /// `reviewq untrack` said to stop watching this one, so no rule may track
-    /// it again until `reviewq track` says otherwise.
-    untracked: bool,
-}
-
-/// Merge stored tracking with an incoming reason by precedence: keep the
-/// stronger, refresh on a tie, never downgrade. `None` incoming leaves the
-/// stored value.
-///
-/// The post-merge flag does not follow the winning reason: it is the rules'
-/// answer, so it changes when a rule match arrives and at no other time, whether
-/// or not that match also wins the reason. Only the sweep evaluates rules — an
-/// involvement search knows nothing of them, and letting it overwrite the flag
-/// on the way past would drop a PR a post-merge rule matched at merge, purely
-/// because somebody had also asked you to review it.
-fn merge_tracking(stored: Tracking, incoming: Option<&TrackedReason>) -> Tracking {
-    // An untracked PR keeps being swept — its title, labels and state stay
-    // current, so `show` and a later `track` have something to work with — but
-    // nothing a sweep or an involvement search finds may track it again. That
-    // is the difference between this and `done`: one says "not now", this says
-    // "not until I say so".
-    if stored.untracked {
-        return Tracking {
-            reason: None,
-            ..stored
-        };
-    }
-    let after_merge = match incoming {
-        Some(TrackedReason::Interest { after_merge, .. }) => *after_merge,
-        Some(TrackedReason::Involved(_)) | None => stored.after_merge,
-    };
-    let reason = match (stored.reason, incoming) {
-        (stored, None) => stored,
-        (None, Some(new)) => Some(new.render()),
-        (Some(old), Some(new)) => Some(if new.rank() >= stored_rank(&old) {
-            new.render()
-        } else {
-            old
-        }),
-    };
-    Tracking {
-        reason,
-        after_merge,
-        untracked: false,
+fn corrupt(
+    what: impl Into<String>,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> LedgerError {
+    LedgerError::Corrupt {
+        what: what.into(),
+        source: Box::new(source),
     }
 }
 
-fn stored_rank(reason: &str) -> u8 {
-    if reason.starts_with("involved:") {
-        2
-    } else if reason.starts_with("interest:") {
-        1
-    } else {
-        0
-    }
-}
-
-/// The `prs` snapshot columns, `p.`-qualified and in the order
-/// [`snapshot_from_row`] reads them. A single source for every query that
-/// reconstructs a [`PrSnapshot`], so column order and reader cannot drift.
-const PR_COLUMNS: &str = "p.number, p.title, p.author, p.author_association, \
-     p.head_sha, p.is_draft, p.state, p.updated_at, p.labels, p.milestone, \
-     p.files, p.files_truncated, p.base_ref, p.created_at";
-
-/// The `my_state` columns, `ms.`-qualified and in the order
-/// [`my_state_from_row`] reads them — the same single-source arrangement as
-/// [`PR_COLUMNS`], for the queries that outer-join my history onto a PR.
-const MY_STATE_COLUMNS: &str = "ms.last_reviewed_sha, ms.last_verdict, \
-     ms.last_action_at, ms.done_sha, ms.snoozed_until, ms.muted, \
-     ms.deferred_at, ms.done_at";
-
-/// Turn a text-decode failure into the rusqlite error a `query_map` closure
-/// must return.
-fn decode_err(e: Box<dyn std::error::Error + Send + Sync>) -> rusqlite::Error {
-    FromSqlConversionFailure(0, Type::Text, e)
-}
-
-fn parse_ts(s: &str) -> rusqlite::Result<Timestamp> {
-    s.parse().map_err(|e: jiff::Error| decode_err(e.into()))
+fn corrupt_message(what: impl Into<String>, message: impl Into<String>) -> LedgerError {
+    corrupt(what, std::io::Error::other(message.into()))
 }
 
 /// Truncate a timestamp to whole seconds, dropping sub-second precision so
@@ -1642,115 +1650,124 @@ fn whole_second(ts: Timestamp) -> Timestamp {
     Timestamp::from_second(ts.as_second()).unwrap_or(ts)
 }
 
-/// Read a [`PrSnapshot`] from the [`PR_COLUMNS`] starting at `base`.
-fn snapshot_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<PrSnapshot> {
-    let state_str: String = row.get(base + 6)?;
-    let labels_str: String = row.get(base + 8)?;
-    let files_str: Option<String> = row.get(base + 10)?;
-
-    let state = PrState::from_wire(&state_str)
-        .ok_or_else(|| decode_err(format!("bad state {state_str:?}").into()))?;
+fn snapshot_from_stored(row: Pr) -> Result<PrSnapshot> {
     let labels: Vec<String> =
-        serde_json::from_str(&labels_str).map_err(|e| decode_err(e.into()))?;
-    let files: Option<Vec<String>> = files_str
+        serde_json::from_str(&row.labels).map_err(|source| corrupt("label list", source))?;
+    let files: Option<Vec<String>> = row
+        .files
         .map(|s| serde_json::from_str(&s))
         .transpose()
-        .map_err(|e| decode_err(e.into()))?;
+        .map_err(|source| corrupt("file list", source))?;
 
     Ok(PrSnapshot {
-        number: row.get::<_, i64>(base)? as u64,
-        title: row.get(base + 1)?,
-        author: row.get(base + 2)?,
-        author_association: row.get(base + 3)?,
-        head_sha: row.get(base + 4)?,
-        is_draft: row.get::<_, i64>(base + 5)? != 0,
-        state,
-        updated_at: parse_ts(&row.get::<_, String>(base + 7)?)?,
+        number: row.number as u64,
+        title: row.title,
+        author: row.author,
+        author_association: row.author_association,
+        head_sha: row.head_sha,
+        is_draft: row.is_draft,
+        state: row.state.into_state(),
+        updated_at: row.updated_at.into_timestamp(),
         labels,
-        milestone: row.get(base + 9)?,
+        milestone: row.milestone,
         files,
-        files_truncated: row.get::<_, i64>(base + 11)? != 0,
-        base_ref: row.get(base + 12)?,
-        created_at: row
-            .get::<_, Option<String>>(base + 13)?
-            .map(|at| parse_ts(&at))
-            .transpose()?,
+        files_truncated: row.files_truncated,
+        base_ref: row.base_ref,
+        created_at: row.created_at.map(DbTimestamp::into_timestamp),
     })
 }
 
-fn row_to_tracked(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedPr> {
+fn tracked_from_stored(
+    row: Pr,
+    tracked_reason: Option<String>,
+    after_merge: bool,
+    state: Option<MyStateRecord>,
+) -> Result<TrackedPr> {
+    let tracked_reason = tracked_reason
+        .ok_or_else(|| corrupt_message("tracked reason", "tracked row has no reason"))?;
     Ok(TrackedPr {
-        pr: snapshot_from_row(row, 0)?,
-        tracked_reason: row.get(14)?,
-        after_merge: row.get::<_, i64>(15)? != 0,
-        my_state: my_state_from_row(row, 16)?,
+        pr: snapshot_from_stored(row)?,
+        tracked_reason,
+        after_merge,
+        my_state: state
+            .map(my_state_from_stored)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
-fn row_to_my_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<MyState> {
-    my_state_from_row(row, 0)
+fn load_my_state(
+    conn: &mut DbConnection,
+    repo_id: RepoId,
+    number: u64,
+) -> Result<Option<MyStateRecord>> {
+    my_state::table
+        .find((repo_id, number as i64))
+        .select(MyStateRecord::as_select())
+        .first(conn)
+        .optional()
+        .doing(format!("reading my_state for #{number}"))
 }
 
-/// Read a [`MyState`] from the [`MY_STATE_COLUMNS`] starting at `base`.
-///
-/// Tolerates every column being null, which is what an outer join against a PR
-/// nobody has ever acted on returns — the all-default state, not an error.
-fn my_state_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<MyState> {
-    let verdict: Option<String> = row.get(base + 1)?;
-    let last_action_at: Option<String> = row.get(base + 2)?;
-    let snoozed_until: Option<String> = row.get(base + 4)?;
-    let deferred_at: Option<String> = row.get(base + 6)?;
-    let done_at: Option<String> = row.get(base + 7)?;
+fn my_state_from_stored(row: MyStateRecord) -> Result<MyState> {
+    let MyStateRecord {
+        repo_id: _,
+        number: _,
+        last_reviewed_sha,
+        last_verdict,
+        last_action_at,
+        done_sha,
+        snoozed_until,
+        muted,
+        deferred_at,
+        done_at,
+    } = row;
     Ok(MyState {
-        last_reviewed_sha: row.get(base)?,
-        last_verdict: verdict.as_deref().and_then(Verdict::from_wire),
-        last_action_at: last_action_at.as_deref().map(parse_ts).transpose()?,
-        done_sha: row.get(base + 3)?,
-        snoozed_until: snoozed_until.as_deref().map(parse_ts).transpose()?,
-        muted: row.get::<_, Option<i64>>(base + 5)?.unwrap_or(0) != 0,
-        deferred_at: deferred_at.as_deref().map(parse_ts).transpose()?,
-        done_at: done_at.as_deref().map(parse_ts).transpose()?,
+        last_reviewed_sha,
+        last_verdict: last_verdict.as_deref().and_then(Verdict::from_wire),
+        last_action_at: last_action_at.map(DbTimestamp::into_timestamp),
+        done_sha,
+        snoozed_until: snoozed_until.map(DbTimestamp::into_timestamp),
+        muted,
+        deferred_at: deferred_at.map(DbTimestamp::into_timestamp),
+        done_at: done_at.map(DbTimestamp::into_timestamp),
     })
 }
 
-fn row_to_reviewer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewerVerdict> {
-    let verdict_str: String = row.get(1)?;
-    let verdict = Verdict::from_wire(&verdict_str)
-        .ok_or_else(|| decode_err(format!("bad verdict {verdict_str:?}").into()))?;
+fn reviewer_from_stored(row: ReviewerRecord) -> Result<ReviewerVerdict> {
+    let verdict = Verdict::from_wire(&row.verdict).ok_or_else(|| {
+        corrupt_message("review verdict", format!("bad verdict {:?}", row.verdict))
+    })?;
     Ok(ReviewerVerdict {
-        login: row.get(0)?,
+        login: row.login,
         verdict,
-        at: parse_ts(&row.get::<_, String>(2)?)?,
+        at: row.submitted_at.into_timestamp(),
     })
 }
 
-fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadState> {
-    let last_comment_at: Option<String> = row.get(5)?;
-    let my_last_comment_at: Option<String> = row.get(6)?;
+fn thread_from_stored(row: ThreadRecord) -> Result<ThreadState> {
     Ok(ThreadState {
-        thread_id: row.get(0)?,
-        i_own: row.get::<_, i64>(1)? != 0,
-        is_resolved: row.get::<_, i64>(2)? != 0,
-        resolved_by: row.get(3)?,
-        last_comment_author: row.get(4)?,
-        last_comment_at: last_comment_at.as_deref().map(parse_ts).transpose()?,
-        my_last_comment_at: my_last_comment_at.as_deref().map(parse_ts).transpose()?,
+        thread_id: row.thread_id,
+        i_own: row.i_own,
+        is_resolved: row.is_resolved,
+        resolved_by: row.resolved_by,
+        last_comment_author: row.last_comment_author,
+        last_comment_at: row.last_comment_at.map(DbTimestamp::into_timestamp),
+        my_last_comment_at: row.my_last_comment_at.map(DbTimestamp::into_timestamp),
     })
 }
 
-/// Read an [`AttentionRow`] from `(reason, detail, since)` starting at `base`.
 /// Build an [`AttentionRow`] from `since`, `payload` at `base`.
 ///
 /// The stored `reason` discriminant isn't read: the payload carries the whole
 /// variant, discriminant included, so reading both would be two sources for one
 /// fact. The column exists for the primary key.
-fn attention_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<AttentionRow> {
-    let payload: String = row.get(base + 1)?;
-    let reason: AttentionReason = serde_json::from_str(&payload)
-        .map_err(|err| FromSqlConversionFailure(base + 1, Type::Text, Box::new(err)))?;
+fn attention_from_stored(row: AttentionRecord) -> Result<AttentionRow> {
+    let reason: AttentionReason =
+        serde_json::from_str(&row.payload).map_err(|source| corrupt("attention reason", source))?;
     Ok(AttentionRow {
         reason,
-        since: parse_ts(&row.get::<_, String>(base)?)?,
+        since: row.since.into_timestamp(),
     })
 }
 
@@ -1769,118 +1786,126 @@ fn attention_is_more_urgent(candidate: &AttentionRow, best: &AttentionRow) -> bo
 /// concurrent `reviewq done`/`snooze`/`mute`/`defer` with a stale copy. Each
 /// of those has its own targeted setter (`Ledger::set_done`, etc.) that writes
 /// only its own column, for the same reason in reverse.
-fn write_forge_state(conn: &Connection, repo_id: RepoId, number: u64, s: &MyState) -> Result<()> {
-    conn.execute(
-        r"
-        INSERT INTO my_state (repo_id, number, last_reviewed_sha, last_verdict, last_action_at)
-        VALUES (?1, ?2, ?3, ?4, ?5)
-        ON CONFLICT(repo_id, number) DO UPDATE SET
-          last_reviewed_sha=excluded.last_reviewed_sha,
-          last_verdict=excluded.last_verdict,
-          last_action_at=excluded.last_action_at
-        ",
-        params![
-            repo_id,
-            number as i64,
-            s.last_reviewed_sha,
-            s.last_verdict.map(|v| v.as_str()),
-            s.last_action_at.map(|t| t.to_string()),
-        ],
-    )
-    .doing(format!("writing forge-derived my_state for #{number}"))?;
+fn write_forge_state(
+    conn: &mut DbConnection,
+    repo_id: RepoId,
+    number: u64,
+    s: &MyState,
+) -> Result<()> {
+    let last_action_at = s.last_action_at.map(DbTimestamp::from);
+    let state = ForgeState {
+        repo_id,
+        number: number as i64,
+        last_reviewed_sha: s.last_reviewed_sha.as_deref(),
+        last_verdict: s.last_verdict.map(|verdict| verdict.as_str()),
+        last_action_at: last_action_at.as_ref(),
+    };
+    diesel::insert_into(my_state::table)
+        .values(&state)
+        .on_conflict((my_state::repo_id, my_state::number))
+        .do_update()
+        .set(&state)
+        .execute(conn)
+        .doing(format!("writing forge-derived my_state for #{number}"))?;
     Ok(())
 }
 
 fn replace_threads(
-    conn: &Connection,
+    conn: &mut DbConnection,
     repo_id: RepoId,
     number: u64,
     threads: &[ThreadState],
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM threads WHERE repo_id = ?1 AND pr_number = ?2",
-        params![repo_id, number as i64],
-    )?;
-    for t in threads {
-        conn.execute(
-            r"
-            INSERT INTO threads (
-              thread_id, repo_id, pr_number, i_own, is_resolved, resolved_by,
-              last_comment_author, last_comment_at, my_last_comment_at
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-            ",
-            params![
-                t.thread_id,
+    diesel::delete(
+        schema::threads::table
+            .filter(schema::threads::repo_id.eq(repo_id))
+            .filter(schema::threads::pr_number.eq(number as i64)),
+    )
+    .execute(conn)?;
+    if !threads.is_empty() {
+        let records = threads
+            .iter()
+            .map(|thread| ThreadRecord {
+                thread_id: thread.thread_id.clone(),
                 repo_id,
-                number as i64,
-                t.i_own as i64,
-                t.is_resolved as i64,
-                t.resolved_by,
-                t.last_comment_author,
-                t.last_comment_at.map(|x| x.to_string()),
-                t.my_last_comment_at.map(|x| x.to_string()),
-            ],
-        )
-        .doing(format!("writing thread {} for #{number}", t.thread_id))?;
+                pr_number: number as i64,
+                i_own: thread.i_own,
+                is_resolved: thread.is_resolved,
+                resolved_by: thread.resolved_by.clone(),
+                last_comment_author: thread.last_comment_author.clone(),
+                last_comment_at: thread.last_comment_at.map(DbTimestamp::from),
+                my_last_comment_at: thread.my_last_comment_at.map(DbTimestamp::from),
+            })
+            .collect::<Vec<_>>();
+        diesel::insert_into(schema::threads::table)
+            .values(&records)
+            .execute(conn)
+            .doing(format!("writing threads for #{number}"))?;
     }
     Ok(())
 }
 
 fn replace_reviewers(
-    conn: &Connection,
+    conn: &mut DbConnection,
     repo_id: RepoId,
     number: u64,
     reviewers: &[ReviewerVerdict],
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM reviewers WHERE repo_id = ?1 AND pr_number = ?2",
-        params![repo_id, number as i64],
-    )?;
-    for r in reviewers {
-        conn.execute(
-            "INSERT INTO reviewers (repo_id, pr_number, login, verdict, submitted_at) \
-             VALUES (?1,?2,?3,?4,?5)",
-            params![
+    diesel::delete(
+        schema::reviewers::table
+            .filter(schema::reviewers::repo_id.eq(repo_id))
+            .filter(schema::reviewers::pr_number.eq(number as i64)),
+    )
+    .execute(conn)?;
+    if !reviewers.is_empty() {
+        let records = reviewers
+            .iter()
+            .map(|reviewer| ReviewerRecord {
                 repo_id,
-                number as i64,
-                r.login,
-                r.verdict.as_str(),
-                r.at.to_string()
-            ],
-        )
-        .doing(format!("writing reviewer {} for #{number}", r.login))?;
+                pr_number: number as i64,
+                login: reviewer.login.clone(),
+                verdict: reviewer.verdict.as_str().to_owned(),
+                submitted_at: DbTimestamp::from(reviewer.at),
+            })
+            .collect::<Vec<_>>();
+        diesel::insert_into(schema::reviewers::table)
+            .values(&records)
+            .execute(conn)
+            .doing(format!("writing reviewers for #{number}"))?;
     }
     Ok(())
 }
 
 fn replace_attention(
-    conn: &Connection,
+    conn: &mut DbConnection,
     repo_id: RepoId,
     number: u64,
     attention: &[Attention],
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM attention WHERE repo_id = ?1 AND pr_number = ?2",
-        params![repo_id, number as i64],
-    )?;
-    for a in attention {
-        conn.execute(
-            "INSERT INTO attention (repo_id, pr_number, reason, since, payload) \
-             VALUES (?1,?2,?3,?4,?5)",
-            params![
-                repo_id,
-                number as i64,
-                a.reason.discriminant(),
-                a.since.to_string(),
-                serde_json::to_string(&a.reason).encoding("an attention reason")?,
-            ],
-        )
-        .doing({
-            format!(
-                "writing attention {} for #{number}",
-                a.reason.discriminant()
-            )
-        })?;
+    diesel::delete(
+        schema::attention::table
+            .filter(schema::attention::repo_id.eq(repo_id))
+            .filter(schema::attention::pr_number.eq(number as i64)),
+    )
+    .execute(conn)?;
+    if !attention.is_empty() {
+        let records = attention
+            .iter()
+            .map(|attention| {
+                Ok(AttentionRecord {
+                    repo_id,
+                    pr_number: number as i64,
+                    reason: attention.reason.discriminant().to_owned(),
+                    since: DbTimestamp::from(attention.since),
+                    payload: serde_json::to_string(&attention.reason)
+                        .encoding("an attention reason")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        diesel::insert_into(schema::attention::table)
+            .values(&records)
+            .execute(conn)
+            .doing(format!("writing attention for #{number}"))?;
     }
     Ok(())
 }
@@ -1888,6 +1913,30 @@ fn replace_attention(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(QueryableByName)]
+    struct UserVersion {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        user_version: i32,
+    }
+
+    #[derive(QueryableByName)]
+    struct BusyTimeout {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        timeout: i32,
+    }
+
+    #[derive(QueryableByName)]
+    struct JournalMode {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        journal_mode: String,
+    }
+
+    #[derive(QueryableByName)]
+    struct TableColumn {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
 
     fn repo() -> RepoKey {
         RepoKey {
@@ -1969,9 +2018,9 @@ mod tests {
             .unwrap();
 
         ledger
-            .upsert_pr(a, &pr(1), Some(interest("label x")), now())
+            .upsert_pr(a, &pr(1), Some(interest("label x")))
             .unwrap();
-        ledger.upsert_pr(b, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(b, &pr(1), None).unwrap();
         ledger.set_muted(b, 1, true).unwrap();
 
         assert_eq!(ledger.list_tracked(a).unwrap().len(), 1);
@@ -1991,30 +2040,42 @@ mod tests {
         let ledger = Ledger::open_in_memory().unwrap();
         // What migration 4 leaves behind on a real upgrade: a blank
         // placeholder row, FK-referenced by pre-existing data.
-        ledger
-            .conn
-            .execute(
-                "INSERT INTO repos (id, host, owner, name) VALUES (1, '', '', '')",
-                [],
-            )
-            .unwrap();
-        ledger
-            .conn
-            .execute(
-                "INSERT INTO prs (repo_id, number, title, author, author_association, \
-                 head_sha, is_draft, state, updated_at, labels, first_seen_at) \
-                 VALUES (1, 1, 'a PR', 'octocat', 'CONTRIBUTOR', 'abc123', 0, 'OPEN', \
-                 '2026-08-05T12:00:00Z', '[]', '2026-08-05T12:00:00Z')",
-                [],
-            )
-            .unwrap();
-        ledger
-            .conn
-            .execute(
-                "INSERT INTO my_state (repo_id, number, muted) VALUES (1, 1, 1)",
-                [],
-            )
-            .unwrap();
+        {
+            let conn = &mut *ledger.conn.borrow_mut();
+            diesel::insert_into(repos::table)
+                .values((
+                    repos::id.eq(1_i64),
+                    repos::host.eq(""),
+                    repos::owner.eq(""),
+                    repos::name.eq(""),
+                ))
+                .execute(conn)
+                .unwrap();
+            diesel::insert_into(prs::table)
+                .values((
+                    prs::repo_id.eq(1_i64),
+                    prs::number.eq(1_i64),
+                    prs::title.eq("a PR"),
+                    prs::author.eq("octocat"),
+                    prs::author_association.eq("CONTRIBUTOR"),
+                    prs::head_sha.eq("abc123"),
+                    prs::is_draft.eq(false),
+                    prs::state.eq("OPEN"),
+                    prs::updated_at.eq("2026-08-05T12:00:00Z"),
+                    prs::labels.eq("[]"),
+                    prs::first_seen_at.eq("2026-08-05T12:00:00Z"),
+                ))
+                .execute(conn)
+                .unwrap();
+            diesel::insert_into(my_state::table)
+                .values((
+                    my_state::repo_id.eq(1_i64),
+                    my_state::number.eq(1_i64),
+                    my_state::muted.eq(true),
+                ))
+                .execute(conn)
+                .unwrap();
+        }
 
         let id = ledger.ensure_repo(&repo()).unwrap();
         assert_eq!(
@@ -2053,9 +2114,9 @@ mod tests {
         assert!(ledger.repos_with_pr(1).unwrap().is_empty());
 
         let a = ledger.ensure_repo(&repo()).unwrap();
-        ledger.upsert_pr(a, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(a, &pr(1), None).unwrap();
         let b = ledger.ensure_repo(&other).unwrap();
-        ledger.upsert_pr(b, &pr(2), None, now()).unwrap();
+        ledger.upsert_pr(b, &pr(2), None).unwrap();
 
         assert_eq!(ledger.repos_with_pr(1).unwrap(), vec![repo()]);
         assert_eq!(ledger.repos_with_pr(2).unwrap(), vec![other]);
@@ -2094,38 +2155,51 @@ mod tests {
     #[test]
     fn migrate_sets_the_expected_version() {
         let ledger = Ledger::open_in_memory().unwrap();
-        let v: i64 = ledger
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(v as usize, SCHEMA_VERSION);
+        let version = diesel::sql_query("PRAGMA user_version")
+            .get_result::<UserVersion>(&mut *ledger.conn.borrow_mut())
+            .unwrap()
+            .user_version;
+        assert_eq!(version as usize, SCHEMA_VERSION);
     }
 
     #[test]
     fn a_newer_ledger_is_refused() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "user_version", (SCHEMA_VERSION + 1) as i64)
+        let mut conn = connection::establish(":memory:").unwrap();
+        conn.batch_execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
             .unwrap();
         // A DB past the last known migration, with no down-migrations defined,
         // is refused rather than run against.
-        assert!(schema::migrate(&mut conn).is_err());
+        assert!(migrations::migrate(&mut conn).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_database_path_is_rejected_without_changing_it() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+
+        let Err(error) = Ledger::open(&path) else {
+            panic!("non-UTF-8 path was accepted");
+        };
+
+        assert!(matches!(
+            error,
+            LedgerError::InvalidPath { path: rejected } if rejected == path
+        ));
     }
 
     #[test]
-    fn upsert_reports_new_then_not_new_and_round_trips() {
+    fn upsert_reports_insertion_then_updates() {
         let (ledger, repo_id) = ledger_with_repo();
         let reason = interest("label area:task-sdk");
 
         assert!(
             ledger
-                .upsert_pr(repo_id, &pr(1), Some(reason.clone()), now())
+                .upsert_pr(repo_id, &pr(1), Some(reason.clone()))
                 .unwrap()
         );
-        assert!(
-            !ledger
-                .upsert_pr(repo_id, &pr(1), Some(reason), now())
-                .unwrap()
-        );
+        assert!(!ledger.upsert_pr(repo_id, &pr(1), Some(reason)).unwrap());
 
         let tracked = ledger.list_tracked(repo_id).unwrap();
         assert_eq!(tracked.len(), 1);
@@ -2136,9 +2210,169 @@ mod tests {
         assert_eq!(tracked[0].tracked_reason, "interest: label area:task-sdk");
     }
 
-    /// The target branch has to survive every read that rebuilds a snapshot, not
-    /// just the one a test happened to pick: the reads share a column list and a
-    /// positional reader, so an index off by one shows up in only some of them.
+    #[test]
+    fn concurrent_upserts_report_only_one_insertion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let first = Ledger::open(&path).unwrap();
+        let repo_id = first.ensure_repo(&repo()).unwrap();
+        let second = Ledger::open(&path).unwrap();
+        let ready = std::sync::Barrier::new(2);
+
+        let mut inserted = std::thread::scope(|scope| {
+            let handles = [first, second].map(|ledger| {
+                let ready = &ready;
+                scope.spawn(move || {
+                    ready.wait();
+                    ledger.upsert_pr(repo_id, &pr(1), None).unwrap()
+                })
+            });
+            handles.map(|handle| handle.join().unwrap())
+        });
+
+        inserted.sort();
+        assert_eq!(inserted, [false, true]);
+    }
+
+    #[test]
+    fn upsert_outcomes_are_scoped_to_the_repository_and_pr() {
+        let (ledger, first) = ledger_with_repo();
+        let second = ledger.ensure_repo(&repo_named("another")).unwrap();
+        for (number, reason) in [
+            (1, None),
+            (2, Some(interest("label"))),
+            (3, Some(TrackedReason::Involved("mentioned".into()))),
+        ] {
+            for repo_id in [first, second] {
+                let mut snapshot = pr(number);
+                assert!(
+                    ledger
+                        .upsert_pr(repo_id, &snapshot, reason.clone())
+                        .unwrap()
+                );
+                snapshot.title = "Updated title".into();
+                assert!(
+                    !ledger
+                        .upsert_pr(repo_id, &snapshot, reason.clone())
+                        .unwrap()
+                );
+                assert!(
+                    !ledger
+                        .upsert_pr(repo_id, &snapshot, reason.clone())
+                        .unwrap()
+                );
+                assert_eq!(
+                    ledger.show(repo_id, number).unwrap().unwrap().pr.title,
+                    "Updated title"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_sweep_page_rolls_back_upserts_and_keeps_the_cursor() {
+        let (ledger, repo_id) = ledger_with_repo();
+        ledger.set_meta(repo_id, "cursor", "before").unwrap();
+        ledger
+            .conn
+            .borrow_mut()
+            .batch_execute(
+                "CREATE TRIGGER reject_pr BEFORE INSERT ON prs WHEN NEW.number = 2
+             BEGIN SELECT RAISE(ABORT, 'rejected PR'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            ledger
+                .commit_sweep_page(repo_id, &[(pr(1), None), (pr(2), None)], "cursor", "after")
+                .is_err()
+        );
+        assert!(ledger.show(repo_id, 1).unwrap().is_none());
+        assert_eq!(
+            ledger.get_meta(repo_id, "cursor").unwrap().as_deref(),
+            Some("before")
+        );
+        assert!(ledger.upsert_pr(repo_id, &pr(1), None).unwrap());
+    }
+
+    #[test]
+    fn pr_states_round_trip_through_the_database_binding() {
+        let (ledger, repo_id) = ledger_with_repo();
+        for (state, stored) in [
+            (PrState::Open, "OPEN"),
+            (PrState::Closed, "CLOSED"),
+            (PrState::Merged, "MERGED"),
+        ] {
+            let mut snapshot = pr(1);
+            snapshot.state = state;
+            ledger.upsert_pr(repo_id, &snapshot, None).unwrap();
+            let raw = prs::table
+                .find((repo_id, 1_i64))
+                .select(prs::state)
+                .first::<String>(&mut *ledger.conn.borrow_mut())
+                .unwrap();
+            assert_eq!(raw, stored);
+            let decoded = prs::table
+                .find((repo_id, 1_i64))
+                .select(prs::state)
+                .first::<DbPrState>(&mut *ledger.conn.borrow_mut())
+                .unwrap();
+            assert_eq!(decoded.into_state(), state);
+            assert_eq!(ledger.show(repo_id, 1).unwrap().unwrap().pr.state, state);
+        }
+    }
+
+    #[test]
+    fn an_invalid_stored_pr_state_is_reported_as_corrupt_with_its_column() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        diesel::update(prs::table.find((repo_id, 1_i64)))
+            .set(prs::state.eq("INVALID_STATE"))
+            .execute(&mut *ledger.conn.borrow_mut())
+            .unwrap();
+
+        let Err(LedgerError::Corrupt { source, .. }) = ledger.show(repo_id, 1) else {
+            panic!("invalid PR state was not reported as corrupt");
+        };
+        assert!(source.to_string().contains("field 'state'"), "{source}");
+        assert!(source.to_string().contains("INVALID_STATE"), "{source}");
+    }
+
+    #[test]
+    fn an_invalid_stored_timestamp_is_reported_as_corrupt() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        diesel::update(prs::table.find((repo_id, 1_i64)))
+            .set(prs::updated_at.eq("not a timestamp"))
+            .execute(&mut *ledger.conn.borrow_mut())
+            .unwrap();
+
+        let Err(error) = ledger.show(repo_id, 1) else {
+            panic!("invalid timestamp was accepted");
+        };
+
+        let LedgerError::Corrupt { source, .. } = error else {
+            panic!("{error:?}");
+        };
+        assert!(source.to_string().contains("updated_at"), "{source}");
+        assert!(source.source().is_some(), "{source}");
+    }
+
+    #[test]
+    fn a_non_timestamp_deserialization_failure_is_corrupt_and_retains_its_source() {
+        let source = diesel::result::Error::DeserializationError(Box::new(
+            diesel::result::UnexpectedNullError,
+        ));
+
+        let error = classify_sql_error(source, "reading a PR");
+
+        let LedgerError::Corrupt { source, .. } = error else {
+            panic!("{error:?}");
+        };
+        assert!(source.is::<diesel::result::UnexpectedNullError>());
+    }
+
+    /// The target branch has to survive every read that rebuilds a snapshot.
     #[test]
     fn the_target_branch_reads_back_from_every_snapshot_query() {
         let (ledger, repo_id) = ledger_with_repo();
@@ -2257,9 +2491,9 @@ mod tests {
         let opened: Timestamp = "2026-05-04T08:30:00Z".parse().unwrap();
         let mut swept = pr(1);
         swept.created_at = Some(opened);
-        ledger.upsert_pr(repo_id, &swept, None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &swept, None).unwrap();
 
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
 
         assert_eq!(
             ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
@@ -2272,7 +2506,7 @@ mod tests {
     #[test]
     fn an_existing_row_has_no_opening_date_until_a_sweep_learns_one() {
         let (ledger, repo_id) = ledger_with_repo();
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
 
         assert_eq!(
             ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
@@ -2282,7 +2516,7 @@ mod tests {
 
         let mut swept = pr(1);
         swept.created_at = Some("2026-05-04T08:30:00Z".parse().unwrap());
-        ledger.upsert_pr(repo_id, &swept, None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &swept, None).unwrap();
         assert_eq!(
             ledger.show(repo_id, 1).unwrap().unwrap().pr.created_at,
             swept.created_at
@@ -2294,18 +2528,18 @@ mod tests {
     #[test]
     fn an_existing_row_gains_an_empty_target_branch_and_a_sync_fills_it() {
         let (ledger, repo_id) = ledger_with_repo();
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
         // Stand in for a row migration 7 backfilled: the column exists, and no
         // sweep has written a real value into it yet.
-        ledger
-            .conn
-            .execute("UPDATE prs SET base_ref = '' WHERE number = 1", [])
+        diesel::update(prs::table.filter(prs::number.eq(1_i64)))
+            .set(prs::base_ref.eq(""))
+            .execute(&mut *ledger.conn.borrow_mut())
             .unwrap();
 
         let before = ledger.show(repo_id, 1).unwrap().unwrap();
         assert_eq!(before.pr.base_ref, "", "unknown, not a wrong branch");
 
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
         assert_eq!(
             ledger.show(repo_id, 1).unwrap().unwrap().pr.base_ref,
             "main"
@@ -2321,13 +2555,7 @@ mod tests {
         ];
 
         let new = ledger
-            .commit_sweep_page(
-                repo_id,
-                &page,
-                now(),
-                "last_sync_at",
-                "2026-08-05T12:00:00Z",
-            )
+            .commit_sweep_page(repo_id, &page, "last_sync_at", "2026-08-05T12:00:00Z")
             .unwrap();
         assert_eq!(new, 2, "both PRs were newly inserted");
         // ...but only the one with a reason is tracked.
@@ -2340,13 +2568,7 @@ mod tests {
         // Re-committing the same page (a resume over the overlap) is a no-op for
         // the "new" count and just advances the cursor.
         let again = ledger
-            .commit_sweep_page(
-                repo_id,
-                &page,
-                now(),
-                "last_sync_at",
-                "2026-08-05T12:05:00Z",
-            )
+            .commit_sweep_page(repo_id, &page, "last_sync_at", "2026-08-05T12:05:00Z")
             .unwrap();
         assert_eq!(again, 0);
         assert_eq!(
@@ -2358,7 +2580,7 @@ mod tests {
     #[test]
     fn untracked_prs_are_stored_but_not_listed() {
         let (ledger, repo_id) = ledger_with_repo();
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
         assert!(ledger.list_tracked(repo_id).unwrap().is_empty());
         assert_eq!(ledger.counts(repo_id).unwrap(), (0, 1));
     }
@@ -2366,33 +2588,31 @@ mod tests {
     #[test]
     fn first_seen_at_survives_a_later_upsert() {
         let (ledger, repo_id) = ledger_with_repo();
-        ledger
-            .upsert_pr(
-                repo_id,
-                &pr(1),
-                None,
-                "2026-01-01T00:00:00Z".parse().unwrap(),
-            )
+        let before = Timestamp::now();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
+        let seen = prs::table
+            .find((repo_id, 1_i64))
+            .select(prs::first_seen_at)
+            .first::<DbTimestamp>(&mut *ledger.conn.borrow_mut())
             .unwrap();
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
-        let seen: String = ledger
-            .conn
-            .query_row(
-                "SELECT first_seen_at FROM prs WHERE repo_id = ?1 AND number = 1",
-                params![repo_id],
-                |r| r.get(0),
-            )
+        let seen = seen.into_timestamp();
+        assert!(seen >= before && seen <= Timestamp::now());
+
+        assert!(!ledger.upsert_pr(repo_id, &pr(1), None).unwrap());
+
+        let after = prs::table
+            .find((repo_id, 1_i64))
+            .select(prs::first_seen_at)
+            .first::<DbTimestamp>(&mut *ledger.conn.borrow_mut())
             .unwrap();
-        assert_eq!(seen, "2026-01-01T00:00:00Z");
+        assert_eq!(after.into_timestamp(), seen);
     }
 
     #[test]
     fn involvement_beats_interest_and_is_not_downgraded() {
         let (ledger, repo_id) = ledger_with_repo();
         let matched = || interest("label area:task-sdk");
-        ledger
-            .upsert_pr(repo_id, &pr(1), Some(matched()), now())
-            .unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), Some(matched())).unwrap();
 
         // The involvement search upserts the same PR as involved.
         ledger
@@ -2400,7 +2620,6 @@ mod tests {
                 repo_id,
                 &pr(1),
                 Some(TrackedReason::Involved("review_requested".into())),
-                now(),
             )
             .unwrap();
         assert_eq!(
@@ -2409,9 +2628,7 @@ mod tests {
         );
 
         // A later sweep re-asserting interest must not clobber involvement.
-        ledger
-            .upsert_pr(repo_id, &pr(1), Some(matched()), now())
-            .unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), Some(matched())).unwrap();
         assert_eq!(
             ledger.list_tracked(repo_id).unwrap()[0].tracked_reason,
             "involved: review_requested"
@@ -2442,10 +2659,10 @@ mod tests {
         // Untracked residue, of the kind a sweep leaves by the thousand.
         let mut merged = pr(2);
         merged.state = PrState::Merged;
-        ledger.upsert_pr(repo_id, &merged, None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &merged, None).unwrap();
         let mut closed = pr(3);
         closed.state = PrState::Closed;
-        ledger.upsert_pr(repo_id, &closed, None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &closed, None).unwrap();
         // Untracked, but muted by hand — the row that cannot be re-fetched.
         ledger.set_muted(repo_id, 3, true).unwrap();
         // A `my_state` row that says nothing does not count as mine.
@@ -2522,74 +2739,81 @@ mod tests {
         let mut p = pr(1);
         p.files = Some(vec!["docs/x.rst".into()]);
         p.files_truncated = true;
-        ledger.upsert_pr(repo_id, &p, None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &p, None).unwrap();
         assert_eq!(ledger.count_truncated_untracked(repo_id).unwrap(), 1);
     }
 
     #[test]
-    fn merge_tracking_keeps_the_stronger_reason() {
+    fn upserting_keeps_the_stronger_tracking_reason() {
+        let (ledger, repo_id) = ledger_with_repo();
         let matched = interest("label x");
         let involved = TrackedReason::Involved("mention".into());
-        let stored = |reason: &str| Tracking {
-            reason: Some(reason.to_string()),
-            after_merge: false,
-            untracked: false,
-        };
-        let merged = |stored, incoming| merge_tracking(stored, incoming).reason;
-
-        assert_eq!(merged(Tracking::default(), None), None);
-        assert_eq!(
-            merged(Tracking::default(), Some(&matched)).as_deref(),
-            Some("interest: label x")
-        );
-        assert_eq!(
-            merged(stored("involved: review_requested"), Some(&matched)).as_deref(),
-            Some("involved: review_requested")
-        );
-        assert_eq!(
-            merged(stored("interest: label x"), Some(&involved)).as_deref(),
-            Some("involved: mention")
-        );
-        assert_eq!(
-            merged(stored("involved: old"), None).as_deref(),
-            Some("involved: old")
-        );
-        // Whatever the incoming reason, a PR you untracked stays untracked.
-        let untracked = Tracking {
-            untracked: true,
-            ..stored("interest: label x")
-        };
-        assert_eq!(merged(untracked, Some(&matched)), None);
+        for (number, (initial, incoming, expected)) in [
+            (None, None, None),
+            (None, Some(matched.clone()), Some("interest: label x")),
+            (
+                Some(involved.clone()),
+                Some(matched.clone()),
+                Some("involved: mention"),
+            ),
+            (
+                Some(matched.clone()),
+                Some(involved.clone()),
+                Some("involved: mention"),
+            ),
+            (Some(involved.clone()), None, Some("involved: mention")),
+            (
+                Some(interest("old")),
+                Some(matched),
+                Some("interest: label x"),
+            ),
+            (
+                Some(TrackedReason::Involved("old".into())),
+                Some(involved),
+                Some("involved: mention"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let snapshot = pr(number as u64 + 1);
+            ledger.upsert_pr(repo_id, &snapshot, initial).unwrap();
+            ledger.upsert_pr(repo_id, &snapshot, incoming).unwrap();
+            assert_eq!(
+                ledger
+                    .show(repo_id, snapshot.number)
+                    .unwrap()
+                    .unwrap()
+                    .tracked_reason
+                    .as_deref(),
+                expected
+            );
+        }
     }
 
     #[test]
     fn only_a_rule_match_has_anything_to_say_about_post_merge_review() {
+        let (ledger, repo_id) = ledger_with_repo();
         let keeps = TrackedReason::Interest {
             rule: "path task-sdk/**".into(),
             after_merge: true,
         };
-        let kept = merge_tracking(Tracking::default(), Some(&keeps));
-        assert!(kept.after_merge);
-
-        // An involvement search evaluates no rules, so being asked to review a PR
-        // must not be what decides it stops mattering once it merges — even
-        // though the reason it displays becomes the stronger one.
         let involved = TrackedReason::Involved("review_requested".into());
-        let both = merge_tracking(kept.clone(), Some(&involved));
-        assert_eq!(both.reason.as_deref(), Some("involved: review_requested"));
-        assert!(both.after_merge);
-
-        assert!(
-            merge_tracking(kept, None).after_merge,
-            "and a sweep that says nothing leaves the stored answer alone"
-        );
-
-        // A rule that no longer asks for it is the one thing that takes it back.
         let lets_go = TrackedReason::Interest {
             rule: "path task-sdk/**".into(),
             after_merge: false,
         };
-        assert!(!merge_tracking(both, Some(&lets_go)).after_merge);
+        for (incoming, expected_reason, after_merge) in [
+            (Some(keeps), "interest: path task-sdk/**", true),
+            (Some(involved), "involved: review_requested", true),
+            (None, "involved: review_requested", true),
+            (Some(lets_go), "involved: review_requested", false),
+        ] {
+            ledger.upsert_pr(repo_id, &pr(1), incoming).unwrap();
+            let stored = ledger.show(repo_id, 1).unwrap().unwrap();
+            assert_eq!(stored.tracked_reason.as_deref(), Some(expected_reason));
+            assert_eq!(stored.after_merge, after_merge);
+        }
     }
 
     fn ts(s: &str) -> Timestamp {
@@ -2605,7 +2829,7 @@ mod tests {
 
     fn track(ledger: &Ledger, repo_id: RepoId, p: &PrSnapshot) {
         ledger
-            .upsert_pr(repo_id, p, Some(interest("label area:task-sdk")), now())
+            .upsert_pr(repo_id, p, Some(interest("label area:task-sdk")))
             .unwrap();
     }
 
@@ -2687,7 +2911,7 @@ mod tests {
         assert_eq!(
             outcome,
             Committed::Superseded {
-                stored: "2026-08-05T12:00:05Z".to_string()
+                stored: "2026-08-05T12:00:05Z".parse().unwrap()
             },
             "the older fetch must be told it was dropped, not silently ignored"
         );
@@ -2748,6 +2972,27 @@ mod tests {
         assert_eq!(shown.threads.len(), 1, "not duplicated");
         assert_eq!(shown.attention.len(), 1, "nor this");
         assert_eq!(shown.body.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn committing_detail_preserves_an_omitted_body_but_accepts_an_empty_one() {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        for (body, expected) in [
+            (None, None),
+            (Some("body"), Some("body")),
+            (None, Some("body")),
+            (Some(""), Some("")),
+        ] {
+            ledger
+                .commit_detail(repo_id, 1, &MyState::default(), &[], &[], &[], body, now())
+                .unwrap()
+                .expect_applied();
+            assert_eq!(
+                ledger.show(repo_id, 1).unwrap().unwrap().body.as_deref(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -3075,7 +3320,7 @@ mod tests {
         // A later sweep sees it again, advancing updated_at past the stamp.
         let mut back = pr(1);
         back.updated_at = ts("2026-08-11T09:00:00Z");
-        ledger.upsert_pr(repo_id, &back, None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &back, None).unwrap();
 
         assert_eq!(
             ledger
@@ -3109,14 +3354,12 @@ mod tests {
         );
 
         // And no column holds prerendered prose for it to disagree with.
-        let columns: Vec<String> = ledger
-            .conn
-            .prepare("SELECT * FROM attention")
+        let columns = diesel::sql_query("PRAGMA table_info(attention)")
+            .load::<TableColumn>(&mut *ledger.conn.borrow_mut())
             .unwrap()
-            .column_names()
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect();
+            .into_iter()
+            .map(|column| column.name)
+            .collect::<Vec<_>>();
         assert!(!columns.contains(&"detail".to_string()), "{columns:?}");
     }
 
@@ -3125,17 +3368,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::open(&dir.path().join("ledger.sqlite")).unwrap();
 
-        let mode: String = ledger
-            .conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        let mode = diesel::sql_query("PRAGMA journal_mode")
+            .get_result::<JournalMode>(&mut *ledger.conn.borrow_mut())
             .unwrap();
-        assert_eq!(mode, "wal");
+        assert_eq!(mode.journal_mode, "wal");
 
-        let timeout: i64 = ledger
-            .conn
-            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+        let timeout = diesel::sql_query("PRAGMA busy_timeout")
+            .get_result::<BusyTimeout>(&mut *ledger.conn.borrow_mut())
             .unwrap();
-        assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+        assert_eq!(timeout.timeout as u128, BUSY_TIMEOUT.as_millis());
+    }
+
+    #[test]
+    fn a_locked_database_is_reported_as_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let ledger = Ledger::open(&path).unwrap();
+        let repo_id = ledger.ensure_repo(&repo()).unwrap();
+        ledger
+            .conn
+            .borrow_mut()
+            .batch_execute("PRAGMA busy_timeout = 0")
+            .unwrap();
+        let mut locker = connection::establish(path.to_str().unwrap()).unwrap();
+        locker.batch_execute("BEGIN IMMEDIATE").unwrap();
+
+        let error = ledger.set_meta(repo_id, "cursor", "value").unwrap_err();
+
+        assert!(matches!(error, LedgerError::Busy { .. }), "{error:?}");
+        locker.batch_execute("ROLLBACK").unwrap();
     }
 
     #[test]
@@ -3361,7 +3622,6 @@ mod tests {
                     rule: "path task-sdk/**".into(),
                     after_merge: true,
                 }),
-                now(),
             )
             .unwrap();
 
@@ -3532,7 +3792,6 @@ mod tests {
                         rule: "path task-sdk/**".into(),
                         after_merge,
                     }),
-                    now(),
                 )
                 .unwrap();
             ledger
@@ -3681,7 +3940,7 @@ mod tests {
     #[test]
     fn track_sets_involved_manual_and_does_not_downgrade() {
         let (ledger, repo_id) = ledger_with_repo();
-        ledger.upsert_pr(repo_id, &pr(1), None, now()).unwrap();
+        ledger.upsert_pr(repo_id, &pr(1), None).unwrap();
         assert!(ledger.list_tracked(repo_id).unwrap().is_empty());
 
         assert!(ledger.track(repo_id, 1).unwrap());
@@ -3691,12 +3950,7 @@ mod tests {
 
         // A later sweep re-asserting interest must not clobber it.
         ledger
-            .upsert_pr(
-                repo_id,
-                &pr(1),
-                Some(interest("label area:task-sdk")),
-                now(),
-            )
+            .upsert_pr(repo_id, &pr(1), Some(interest("label area:task-sdk")))
             .unwrap();
         assert_eq!(
             ledger.list_tracked(repo_id).unwrap()[0].tracked_reason,
@@ -3739,12 +3993,7 @@ mod tests {
         // The rule that tracked it still matches, and the next sweep says so.
         // Without the stamp this is where the untrack would quietly undo itself.
         ledger
-            .upsert_pr(
-                repo_id,
-                &pr(1),
-                Some(interest("label area:task-sdk")),
-                now(),
-            )
+            .upsert_pr(repo_id, &pr(1), Some(interest("label area:task-sdk")))
             .unwrap();
         assert!(
             ledger.list_tracked(repo_id).unwrap().is_empty(),
@@ -3752,6 +4001,36 @@ mod tests {
         );
         let show = ledger.show(repo_id, 1).unwrap().unwrap();
         assert_eq!(show.tracked_reason, None);
+    }
+
+    #[test]
+    fn an_untracked_pr_keeps_its_post_merge_setting_when_a_rule_still_matches() {
+        let (ledger, repo_id) = ledger_with_repo();
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(1),
+                Some(TrackedReason::Interest {
+                    rule: "label area:task-sdk".into(),
+                    after_merge: true,
+                }),
+            )
+            .unwrap();
+        ledger.untrack(repo_id, 1, now()).unwrap();
+
+        ledger
+            .upsert_pr(
+                repo_id,
+                &pr(1),
+                Some(TrackedReason::Interest {
+                    rule: "label area:task-sdk".into(),
+                    after_merge: false,
+                }),
+            )
+            .unwrap();
+        ledger.track(repo_id, 1).unwrap();
+
+        assert!(ledger.list_tracked(repo_id).unwrap()[0].after_merge);
     }
 
     #[test]
@@ -3769,12 +4048,7 @@ mod tests {
         // And the stamp is gone with it, so a sweep may write a real reason
         // over the manual one again.
         ledger
-            .upsert_pr(
-                repo_id,
-                &pr(1),
-                Some(interest("label area:task-sdk")),
-                now(),
-            )
+            .upsert_pr(repo_id, &pr(1), Some(interest("label area:task-sdk")))
             .unwrap();
         assert_eq!(ledger.list_tracked(repo_id).unwrap().len(), 1);
     }

@@ -1421,7 +1421,6 @@ sensor = S3KeySensor(deferrable=True)
                         rule: "label area:async".into(),
                         after_merge: false,
                     }),
-                    now,
                 )
                 .expect("upsert");
             ledger
@@ -1456,7 +1455,6 @@ sensor = S3KeySensor(deferrable=True)
                     rule: "label x".into(),
                     after_merge: false,
                 }),
-                now,
             )
             .expect("upsert");
         ledger
@@ -1810,7 +1808,6 @@ sensor = S3KeySensor(deferrable=True)
                         rule: "label area:async".into(),
                         after_merge: false,
                     }),
-                    now,
                 )
                 .expect("upsert");
             ledger
@@ -2171,7 +2168,6 @@ sensor = S3KeySensor(deferrable=True)
                     rule: "label area:async".into(),
                     after_merge: false,
                 }),
-                now,
             )
             .expect("upsert");
         ledger
