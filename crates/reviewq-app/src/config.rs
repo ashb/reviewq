@@ -371,14 +371,18 @@ impl Marks {
 /// The glyphs that label a fact rather than a decision.
 ///
 /// Separate from [`Marks`], which says what *you* did to a PR; these say what
-/// the PR *is*. Configurable for the same reason: the default is a Nerd Font
-/// codepoint, and a terminal without a patched font draws a box. Set one to an
+/// the PR *is*. Some defaults are Nerd Font codepoints, and a terminal
+/// without a patched font draws a box. Set one to an
 /// empty string to drop the glyph and keep the value it labels.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Icons {
     /// Before the branch a PR would merge into.
     pub branch: String,
+    /// A checked GFM task-list item.
+    pub gfm_task_checked: String,
+    /// An unchecked GFM task-list item.
+    pub gfm_task_unchecked: String,
     /// Before a GFM alert's heading. `[output.icons.alert]` in TOML.
     pub alert: AlertIcons,
 }
@@ -388,6 +392,8 @@ impl Default for Icons {
         Self {
             // U+F419, Nerd Fonts' git-branch.
             branch: "\u{f419}".into(),
+            gfm_task_checked: "✅".into(),
+            gfm_task_unchecked: "☐".into(),
             alert: AlertIcons::default(),
         }
     }
@@ -937,6 +943,29 @@ mod tests {
         ))
         .expect("parses");
         assert_eq!(none.output.icons.branch, "", "dropping it is allowed");
+    }
+
+    #[test]
+    fn gfm_task_icons_can_be_overridden_independently() {
+        for (setting, checked, unchecked) in [
+            ("", "✅", "☐"),
+            ("gfm_task_checked = '[x]'", "[x]", "☐"),
+            ("gfm_task_unchecked = '[ ]'", "✅", "[ ]"),
+            ("gfm_task_checked = ''\ngfm_task_unchecked = ''", "", ""),
+        ] {
+            let config: Config =
+                toml::from_str(&minimal(&format!("[output.icons]\n{setting}"))).expect("parses");
+            assert_eq!(config.output.icons.gfm_task_checked, checked);
+            assert_eq!(config.output.icons.gfm_task_unchecked, unchecked);
+        }
+    }
+
+    #[test]
+    fn gfm_task_icons_reject_non_string_values() {
+        for key in ["gfm_task_checked", "gfm_task_unchecked"] {
+            let result = toml::from_str::<Config>(&minimal(&format!("[output.icons]\n{key} = 42")));
+            assert!(result.is_err(), "{key}");
+        }
     }
 
     #[test]

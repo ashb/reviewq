@@ -14,6 +14,7 @@ mod app;
 #[cfg(test)]
 mod docs;
 mod fixture;
+mod gfm_task_list;
 mod mouse;
 mod svg;
 mod ui;
@@ -37,6 +38,7 @@ use ratatui::backend::CrosstermBackend;
 use reviewq_app::config::Config;
 
 pub use ansi::markdown as markdown_to_ansi;
+pub use ansi::markdown_with_icons as markdown_to_ansi_with_icons;
 
 /// Draw one of the documentation's screens, as text a terminal can print.
 ///

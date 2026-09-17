@@ -21,8 +21,8 @@ reviewq  2 on the queue
 │                                           ││                                                     █
 │                                           ││ Adds a deferrable flag to S3KeySensor.              █
 │                                           ││                                                     █
-│                                           ││ - [x] Tests added                                   █
-│                                           ││ - [ ] Docs updated                                  █
+│                                           ││ - ✅ Tests added                                    █
+│                                           ││ - ☐  Docs updated                                   █
 │                                           ││                                                     █
 │                                           ││ ```python                                           █
 │                                           ││ sensor = S3KeySensor(deferrable=True)               █

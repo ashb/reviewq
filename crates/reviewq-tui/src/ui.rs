@@ -655,7 +655,11 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
     let pr = &show.pr;
     // Declared before `lines` so it outlives them: `tui_markdown` borrows from
     // the string it parses, and drop order is reverse of declaration.
-    let description = show.body.as_deref().map(strip_html_comments);
+    let description = show
+        .body
+        .as_deref()
+        .map(strip_html_comments)
+        .map(|body| crate::gfm_task_list::render_markers(&body, app.icons()));
     let mut lines = vec![
         Line::from(Span::styled(
             pr.title.clone(),
@@ -1650,6 +1654,7 @@ mod tests {
     use jiff::Timestamp;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::CellWidth as _;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use reviewq_core::model::{
         ActivityKind, ActivityPayload, ActivitySource, Attention, AttentionReason, MyState,
@@ -1829,8 +1834,8 @@ sensor = S3KeySensor(deferrable=True)
         let buffer = terminal.backend().buffer();
         (0..height)
             .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
+                crate::ansi::row_cells(buffer, y)
+                    .map(|(_, cell)| cell.symbol())
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -1847,14 +1852,16 @@ sensor = S3KeySensor(deferrable=True)
         render(app, width, height).join("\n")
     }
 
-    /// Every cell's background after a render, as a set — so a hole shows up as an
-    /// extra entry rather than having to be hunted for.
+    /// Every drawable cell's background after a render, as a set — so a hole shows
+    /// up as an extra entry rather than having to be hunted for. The second cell of
+    /// a wide glyph is terminal bookkeeping rather than a separately drawn cell.
     fn backgrounds(app: &mut App, width: u16, height: u16) -> std::collections::BTreeSet<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draw");
         let buffer = terminal.backend().buffer().clone();
         (0..height)
             .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|&(x, y)| x == 0 || buffer[(x - 1, y)].cell_width() == 1)
             .map(|(x, y)| format!("{:?}", buffer[(x, y)].bg))
             .collect()
     }
@@ -2650,8 +2657,26 @@ sensor = S3KeySensor(deferrable=True)
             .find(|line| line.contains("Adds a"))
             .expect("the prose line");
         assert!(!prose.contains('`'), "{prose}");
+        assert!(shown.contains("- ✅ Tests added"), "{shown}");
+        assert!(shown.contains("- ☐  Docs updated"), "{shown}");
+        assert!(!shown.contains("[x]"), "{shown}");
+        assert!(!shown.contains("[ ]"), "{shown}");
 
         insta::assert_snapshot!(shown);
+    }
+
+    #[test]
+    fn task_lists_use_configured_markers_with_aligned_text() {
+        let mut config = test_config();
+        let icons = &mut std::sync::Arc::make_mut(&mut config).output.icons;
+        icons.gfm_task_checked = "✓".into();
+        icons.gfm_task_unchecked = "界".into();
+        let mut app = App::with_ledger(Theme::default(), fixture(), config).expect("app");
+
+        let shown = screen(&mut app, 100, 30);
+
+        assert!(shown.contains("- ✓  Tests added"), "{shown}");
+        assert!(shown.contains("- 界 Docs updated"), "{shown}");
     }
 
     #[test]
