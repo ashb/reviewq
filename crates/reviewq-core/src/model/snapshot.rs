@@ -31,6 +31,9 @@ pub struct PrSnapshot {
     pub is_draft: bool,
     /// Open, merged or closed.
     pub state: PrState,
+    /// When the forge last changed the PR's lifecycle state, if known.
+    #[serde(default)]
+    pub state_changed_at: Option<Timestamp>,
     /// GitHub's `updatedAt`; drives whether a detail fetch is needed.
     pub updated_at: Timestamp,
     /// GitHub's `createdAt` — when the PR was opened on the forge.
@@ -71,6 +74,133 @@ pub enum PrState {
     Merged,
     /// Closed without merging.
     Closed,
+}
+
+/// Where an activity event originated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivitySource {
+    /// An action reviewq performed locally.
+    Local,
+    /// An action observed from the forge.
+    Forge,
+}
+
+/// How an event relates to the configured user, captured when it is ingested.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityRelation {
+    /// An action performed by the user.
+    Own,
+    /// An action or observation that directly concerns the user's attention.
+    Relevant,
+    /// Other activity retained for the full history of this PR.
+    #[default]
+    Context,
+}
+
+/// A meaningful action or lifecycle event concerning a pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    /// The reasons requiring the user's attention changed during an observation.
+    AttentionChanged,
+    /// `reviewq done` succeeded.
+    Done,
+    /// A snooze was set.
+    Snoozed,
+    /// A mute was set.
+    Muted,
+    /// A mute was cleared.
+    Unmuted,
+    /// A defer was set.
+    Deferred,
+    /// A defer was cleared.
+    Undeferred,
+    /// The PR was tracked.
+    Tracked,
+    /// The PR was untracked.
+    Untracked,
+    /// A review handoff command started.
+    ReviewStarted,
+    /// The user resolved for this forge submitted a review.
+    ReviewSubmitted,
+    /// The user resolved for this forge posted a comment.
+    Commented,
+    /// The user resolved for this forge posted in a review thread.
+    ReviewThreadCommented,
+    /// The pull request closed without merging.
+    PrClosed,
+    /// The pull request reopened.
+    PrReopened,
+    /// The pull request merged.
+    PrMerged,
+    /// A review thread was observed to become resolved.
+    ThreadResolved,
+    /// A review thread was observed to become unresolved again.
+    ThreadReopened,
+}
+
+/// The result a forge reports for a submitted review.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewResult {
+    /// The review approved the change.
+    Approved,
+    /// The review requested changes.
+    ChangesRequested,
+    /// The review only commented.
+    Commented,
+    /// A provider-specific review result reviewq does not interpret.
+    Other(String),
+}
+
+/// Kind-specific activity details.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPayload {
+    /// Attention evidence preserved at the time of an observed change.
+    AttentionChanged {
+        /// Reasons before the change.
+        before: Vec<super::Attention>,
+        /// Reasons after the change.
+        after: Vec<super::Attention>,
+    },
+    /// The event has no additional details.
+    None,
+    /// A snooze's expiry.
+    Snoozed {
+        /// When the snooze expires.
+        until: Timestamp,
+    },
+    /// A submitted review's result and the head it covered.
+    ReviewSubmitted {
+        /// The provider-neutral review result.
+        result: ReviewResult,
+        /// The reviewed commit, when the forge supplied one.
+        reviewed_sha: Option<String>,
+    },
+    /// A comment added to a review thread.
+    ReviewThreadCommented {
+        /// The provider's opaque thread identifier, when supplied.
+        thread_id: Option<String>,
+    },
+    /// A thread transition, with observation time when the provider has no event time.
+    ThreadStateChanged {
+        /// Provider identity of the thread.
+        thread_id: String,
+        /// Whether the thread is resolved.
+        resolved: bool,
+        /// The timestamp is an observation, not a provider event time.
+        observed: bool,
+    },
+    /// A pull request lifecycle transition.
+    StateChanged {
+        /// The previous state.
+        from: PrState,
+        /// The current state.
+        to: PrState,
+    },
 }
 
 impl PrState {
@@ -132,6 +262,15 @@ pub struct MyState {
     /// nothing else may ever assign it, or the next sync silently undoes the
     /// `done`.
     pub done_at: Option<Timestamp>,
+}
+
+impl MyState {
+    /// Whether the stored defer still applies to the highest-priority attention.
+    /// With no attention, nothing has invalidated the defer yet.
+    pub fn is_deferred(&self, attention_since: Option<Timestamp>) -> bool {
+        self.deferred_at
+            .is_some_and(|at| attention_since.is_none_or(|since| since <= at))
+    }
 }
 
 /// My last review verdict on a PR.
@@ -205,4 +344,34 @@ pub struct ThreadState {
     /// Timestamp of my most recent comment in this thread.
     #[serde(default)]
     pub my_last_comment_at: Option<Timestamp>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_results_preserve_known_and_provider_specific_values() {
+        for result in [
+            ReviewResult::Approved,
+            ReviewResult::ChangesRequested,
+            ReviewResult::Commented,
+            ReviewResult::Other("needs-security-signoff".into()),
+        ] {
+            let payload = ActivityPayload::ReviewSubmitted {
+                result: result.clone(),
+                reviewed_sha: Some("abc123".into()),
+            };
+            let encoded = serde_json::to_string(&payload).unwrap();
+            let decoded: ActivityPayload = serde_json::from_str(&encoded).unwrap();
+
+            assert_eq!(
+                decoded,
+                ActivityPayload::ReviewSubmitted {
+                    result,
+                    reviewed_sha: Some("abc123".into()),
+                }
+            );
+        }
+    }
 }

@@ -58,7 +58,7 @@ pub enum AttentionReason {
     },
 
     /// A thread I own was resolved by someone else without answering me. This
-    /// is a "go verify the fix" state, so only an explicit ack clears it.
+    /// is a "go verify the fix" state, cleared by a later review or explicit ack.
     ResolvedUnanswered {
         /// Login of whoever resolved it.
         by: String,
@@ -215,6 +215,19 @@ impl fmt::Display for AttentionReason {
 }
 
 impl Attention {
+    /// Whether two observations describe the same attention evidence.
+    /// PR update timestamps are only a fallback for reasons without event times.
+    pub fn same_evidence(&self, other: &Self) -> bool {
+        self.reason == other.reason
+            && (self.since == other.since
+                || matches!(
+                    self.reason,
+                    AttentionReason::NeedsFirstLook { .. }
+                        | AttentionReason::ReviewRequested { .. }
+                        | AttentionReason::ReReview { .. }
+                ))
+    }
+
     /// Queue sort key: priority band first, then oldest-first inside the band.
     pub fn sort_key(&self) -> (u8, Timestamp) {
         (self.reason.priority(), self.since)

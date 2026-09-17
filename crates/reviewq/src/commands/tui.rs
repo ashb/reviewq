@@ -21,7 +21,7 @@ use reviewq_app::config::{Config, Loaded, ThemeMode};
 use reviewq_app::review::URL_OPENER;
 use reviewq_app::sync::RepoSummary;
 use reviewq_ledger::RepoKey;
-use reviewq_tui::{Hooks, Message};
+use reviewq_tui::{Hooks, Message, ReviewOutcome};
 use tokio::runtime::Handle;
 
 use crate::colour::Output;
@@ -72,19 +72,24 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             }
             Ok(Some(event::read().context("reading a terminal event")?))
         }),
-        refresh: Box::new(move |number, tx: Sender<Message>| {
+        refresh: Box::new(move |repo, number, tx: Sender<Message>| {
             let config = Arc::clone(&for_refresh);
-            // `spawn_blocking` rather than `spawn`, because `sync_one`'s future is
+            let repo = repo.clone();
+            // `spawn_blocking` rather than `spawn`, because `sync_one_for`'s future is
             // not `Send`: it holds a ledger handle across the forge round trip,
             // and the ledger connection is `Send` but not `Sync`, so a reference to
             // one cannot cross threads. Driving the future on a single
             // blocking-pool thread sidesteps that — nothing `!Send` ever moves.
             tokio::task::spawn_blocking(move || {
-                let outcome =
-                    Handle::current().block_on(reviewq_app::sync::sync_one(&config, number));
+                let outcome = Handle::current()
+                    .block_on(reviewq_app::sync::sync_one_for(&config, &repo, number));
                 // A closed channel means the interface has already exited, so the
                 // result has nowhere to go and nothing is waiting for it.
-                let _ = tx.send(Message::Refreshed { number, outcome });
+                let _ = tx.send(Message::Refreshed {
+                    repo,
+                    number,
+                    outcome,
+                });
             });
         }),
         sync: Box::new(move |tx: Sender<Message>| {
@@ -118,10 +123,16 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
         fetch: Box::new(move |number| {
             Handle::current()
                 .block_on(reviewq_app::sync::track_one(&for_fetch, None, number))
-                .map(|_| ())
+                .map(|outcome| {
+                    if let Some(activity) = outcome.activity
+                        && let Some(error) = activity.error
+                    {
+                        tracing::warn!(number, %error, "automatic activity sync failed");
+                    }
+                })
         }),
-        peek: Box::new(move |number| {
-            Handle::current().block_on(reviewq_app::peek::peek_one(&for_peek, number))
+        peek: Box::new(move |repo, number| {
+            Handle::current().block_on(reviewq_app::peek::peek_one_for(&for_peek, repo, number))
         }),
         save_screen: Box::new(|picture| {
             // The working directory, because a screenshot is nearly always
@@ -136,28 +147,9 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
         }),
         open_url: Box::new(move |repo, number| {
             let url = pr_url(&for_open, repo, number)?;
-            // Never handed the terminal, unlike the review command: an opener
-            // returns straight away and its output (`xdg-open` has opinions about
-            // mime caches) would land on top of the queue. So its streams go
-            // nowhere and it is reaped off this thread — a browser that has to
-            // cold-start can take seconds, and waiting here would freeze the
-            // interface for them.
-            let mut command = std::process::Command::new(URL_OPENER);
-            command
-                .arg(&url)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("running {URL_OPENER}"))?;
-            tokio::task::spawn_blocking(move || {
-                // Reaped rather than left: an unwaited child stays a zombie for as
-                // long as the interface runs.
-                let _ = child.wait();
-            });
-            Ok(())
+            open_in_browser(&url)
         }),
+        open_permalink: Box::new(open_in_browser),
         copy_url: Box::new(move |repo, number| {
             let url = pr_url(&for_copy, repo, number)?;
             // OSC 52, through the terminal that is already ours — so this works
@@ -168,31 +160,21 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(&url))
                 .context("writing the clipboard escape sequence")
         }),
-        review: Box::new(move |number| {
-            let handoff = reviewq_app::review::handoff_for(&for_review, number)?;
+        review: Box::new(move |repo, number| {
+            let handoff = Handle::current().block_on(
+                reviewq_app::review::prepare_handoff_for_repo(&for_review, repo, number),
+            )?;
 
             // Keeps the alternate screen — see `reviewq_tui::lend_terminal`.
             reviewq_tui::lend_terminal();
 
-            let ran = handoff
-                .command()
-                .status()
-                .with_context(|| format!("running {:?}", handoff.argv[0]));
+            let ran = handoff.run(Timestamp::now());
 
             // Taken back whatever happened, so a review command that dies doesn't
             // leave the queue drawing onto a cooked terminal.
             reviewq_tui::reclaim_terminal();
-            let status = ran?;
-            if !status.success() {
-                bail!(
-                    "{:?} exited with {}",
-                    handoff.argv[0],
-                    status
-                        .code()
-                        .map_or_else(|| "a signal".to_string(), |code| code.to_string())
-                );
-            }
-            Ok(())
+            let outcome = ran?;
+            finish_review_handoff(&handoff.argv[0], number, outcome)
         }),
         mark_read: Box::new(move |number| {
             let config = Arc::clone(&for_mark_read);
@@ -213,6 +195,45 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
             });
         }),
     }
+}
+
+fn open_in_browser(url: &str) -> Result<()> {
+    // Never handed the terminal, unlike the review command: an opener returns
+    // straight away and its output would land on top of the queue.
+    let mut command = std::process::Command::new(URL_OPENER);
+    command
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("running {URL_OPENER}"))?;
+    tokio::task::spawn_blocking(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn finish_review_handoff(
+    program: &str,
+    number: u64,
+    outcome: reviewq_app::review::HandoffOutcome,
+) -> Result<ReviewOutcome> {
+    let history_warning = outcome.history_error.map(|error| {
+        tracing::warn!(number, %error, "review started, but its history was not recorded");
+        error.to_string()
+    });
+    if !outcome.status.success() {
+        bail!(
+            "{program:?} exited with {}",
+            outcome
+                .status
+                .code()
+                .map_or_else(|| "a signal".to_string(), |code| code.to_string())
+        );
+    }
+    Ok(ReviewOutcome { history_warning })
 }
 
 /// A sync's progress, reported to the interface rather than to a terminal it
@@ -260,4 +281,46 @@ fn file_stamp(at: Timestamp) -> String {
 fn pr_url(config: &Config, repo: &RepoKey, number: u64) -> Result<String> {
     let forge = config.forge_for(&repo.host)?;
     Ok(forge.web_url(&repo.owner, &repo.name, number))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use anyhow::anyhow;
+    use reviewq_app::review::HandoffOutcome;
+
+    use super::finish_review_handoff;
+
+    fn outcome(code: i32) -> HandoffOutcome {
+        HandoffOutcome {
+            status: Command::new("sh")
+                .args(["-c", &format!("exit {code}")])
+                .status()
+                .expect("child"),
+            history_error: Some(anyhow!("history is read-only")),
+        }
+    }
+
+    #[test]
+    fn a_successful_tui_handoff_returns_its_history_warning() {
+        let result = finish_review_handoff("wiff", 7, outcome(0)).expect("successful child");
+
+        assert_eq!(
+            result.history_warning.as_deref(),
+            Some("history is read-only")
+        );
+    }
+
+    #[test]
+    fn a_failed_tui_handoff_reports_the_child_before_its_history_warning() {
+        let error = finish_review_handoff("wiff", 7, outcome(23)).expect_err("failed child");
+
+        assert!(error.to_string().contains("wiff"), "{error:#}");
+        assert!(error.to_string().contains("23"), "{error:#}");
+        assert!(
+            !error.to_string().contains("history is read-only"),
+            "{error:#}"
+        );
+    }
 }

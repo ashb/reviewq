@@ -129,7 +129,7 @@
 <text x="302.4" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="319.2" y="301.5" fill="#9a9a9a" textLength="386.4" lengthAdjust="spacing" xml:space="preserve">Showing it changes nothing and stores nothing.</text>
 <text x="856.8" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
-<text x="1167.6" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">█</text>
+<text x="1167.6" y="301.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">║</text>
 <text x="0.0" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="302.4" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="319.2" y="319.5" fill="#9a9a9a" textLength="529.2" lengthAdjust="spacing" xml:space="preserve">Tracking it puts it on the queue, fetching it first if need be.</text>

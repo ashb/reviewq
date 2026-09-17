@@ -14,10 +14,10 @@ use ratatui::widgets::{
 };
 use reviewq_app::config::Marks;
 use reviewq_app::present::{self, Handled, Mark};
-use reviewq_core::model::{MyState, PrSnapshot, PrState, Verdict};
-use reviewq_ledger::{AttentionRow, Located, RepoKey};
+use reviewq_core::model::{ActivityKind, ActivitySource, MyState, PrSnapshot, PrState, Verdict};
+use reviewq_ledger::{ActivityEvent, AttentionRow, Located, RepoKey};
 
-use crate::app::{App, Focus, Listing, Overlay, Row, SNOOZE_PRESETS};
+use crate::app::{App, Focus, HistoryScope, Listing, Overlay, Row, SNOOZE_PRESETS, View};
 use crate::keys::{self, Action};
 use crate::theme::{Rgb, Theme, color};
 
@@ -73,6 +73,7 @@ const MARKS: &[(Mark, &str)] = &[
 
 /// Draw the whole screen: header, the queue beside the detail, footer.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.history_link_area = Rect::ZERO;
     // The background first, over everything. ratatui styles are patches — a span
     // that names only a foreground leaves the cell's background alone — so one
     // fill here reaches every cell that nothing else deliberately repaints.
@@ -93,7 +94,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // should shrink the detail pane, not squeeze the titles out of the queue.
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints(if app.view == View::History {
+            [Constraint::Percentage(58), Constraint::Percentage(42)]
+        } else {
+            [Constraint::Percentage(45), Constraint::Percentage(55)]
+        })
         .split(rows[1]);
 
     // Tell the app how tall the focused pane came out, so a paging key can move
@@ -102,8 +107,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.set_page(cols[0].height.saturating_sub(2) as usize);
 
     header(frame, rows[0], app);
-    let queue_inner = queue_pane(frame, cols[0], app);
-    let (lines, detail_inner) = detail_pane(frame, cols[1], app);
+    let (queue_inner, lines, detail_inner) = if app.view == View::History {
+        let left = history_pane(frame, cols[0], app);
+        let (lines, right) = if app.peek.is_some() {
+            detail_pane(frame, cols[1], app)
+        } else {
+            history_detail_pane(frame, cols[1], app)
+        };
+        (left, lines, right)
+    } else {
+        let left = queue_pane(frame, cols[0], app);
+        let (lines, right) = detail_pane(frame, cols[1], app);
+        (left, lines, right)
+    };
     // Now that the content has been laid out, its length is known — which is
     // what stops a scroll running off the end of a short description.
     app.set_detail_lines(lines);
@@ -124,10 +140,24 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
             // Named rather than all counted the same way: two of these are rows
             // the queue is deliberately not showing, and a bare count would read
             // as the queue being that long.
-            match app.listing {
-                Listing::Queue => format!("{} on the queue", app.queue.len()),
-                Listing::Waiting => format!("{} waiting on someone else", app.queue.len()),
-                Listing::Muted => format!("{} muted", app.queue.len()),
+            match (&app.view, &app.history.scope) {
+                (View::History, HistoryScope::All) => "History · all".to_string(),
+                (View::History, HistoryScope::Pr { repo, number, .. }) => {
+                    format!(
+                        "History · {}#{number} · {}",
+                        repo.slug(),
+                        if app.history.all_activity {
+                            "All"
+                        } else {
+                            "Relevant"
+                        }
+                    )
+                }
+                (View::PullRequests, _) => match app.listing {
+                    Listing::Queue => format!("{} on the queue", app.queue.len()),
+                    Listing::Waiting => format!("{} waiting on someone else", app.queue.len()),
+                    Listing::Muted => format!("{} muted", app.queue.len()),
+                },
             },
             Style::default().fg(color(if app.listing == Listing::Queue {
                 t.dim
@@ -145,11 +175,12 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
     // Work in flight outranks a note about work that finished: it's the thing
     // you're waiting on, and it says the interface hasn't forgotten your key.
     if !app.refreshing.is_empty() {
-        let numbers: Vec<String> = app
+        let mut numbers: Vec<String> = app
             .refreshing
             .iter()
-            .map(|number| format!("#{number}"))
+            .map(|(repo, number)| number_label(app.repo_count > 1, repo, *number))
             .collect();
+        numbers.sort();
         spans.push(Span::styled(
             format!("  ·  refreshing {}…", numbers.join(", ")),
             Style::default().fg(color(t.focus)),
@@ -161,6 +192,198 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn history_pane(frame: &mut Frame, area: Rect, app: &App) -> Rect {
+    let t = &app.theme;
+    let inner = panel(frame, area, "History", true, t);
+    if app.history.events.is_empty() {
+        let mut lines = vec![Line::from(Span::styled(
+            if app.history.unavailable {
+                "History unavailable."
+            } else {
+                "No retained activity yet."
+            },
+            Style::default().fg(color(if app.history.unavailable {
+                t.warn
+            } else {
+                t.dim
+            })),
+        ))];
+        if app.history.backfill_incomplete && !app.history.unavailable {
+            lines.push(Line::from(Span::styled(
+                "Activity history is incomplete.",
+                Style::default().fg(color(t.warn)),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        return inner;
+    }
+    let height = inner.height as usize;
+    let lines = app
+        .history
+        .events
+        .iter()
+        .enumerate()
+        .skip(app.history.scroll)
+        .take(height)
+        .map(|(index, event)| {
+            let selected = index == app.history.selected;
+            let identity = if matches!(app.history.scope, HistoryScope::All) && app.repo_count > 1 {
+                format!("{}#{}", event.repo.slug(), event.pr_number)
+            } else {
+                format!("#{}", event.pr_number)
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▸ " } else { "  " },
+                    Style::default().fg(color(t.focus)).bold(),
+                ),
+                Span::styled(
+                    format!("{}  ", activity_timestamp(event)),
+                    Style::default().fg(color(t.dim)),
+                ),
+                Span::styled(
+                    format!("{}  ", activity_icon(event)),
+                    Style::default().fg(color(t.key)),
+                ),
+                Span::styled(format!("{identity}  "), Style::default().fg(color(t.quiet))),
+                Span::styled(
+                    activity_text(event),
+                    Style::default()
+                        .fg(color(if selected { t.text } else { t.dim }))
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), inner);
+    inner
+}
+
+fn history_detail_pane(frame: &mut Frame, area: Rect, app: &mut App) -> (usize, Rect) {
+    let t = &app.theme;
+    let inner = panel(frame, area, "Detail", false, t);
+    let mut lines = Vec::new();
+    let mut link_rows = None;
+    if let Some(event) = app.history.events.get(app.history.selected) {
+        lines.push(section("Event metadata", t));
+        lines.push(history_fact("Action", &activity_text(event), t));
+        lines.push(history_fact("Occurred", &activity_timestamp(event), t));
+        lines.push(history_fact(
+            "Source",
+            match event.source {
+                ActivitySource::Local => "reviewq",
+                ActivitySource::Forge => "forge",
+            },
+            t,
+        ));
+        if let Some(actor) = event.actor.as_deref() {
+            lines.push(history_fact("Actor", actor, t));
+        }
+        if let Some(sha) = event.head_sha.as_deref() {
+            lines.push(history_fact("Head", present::short_sha(sha), t));
+        }
+        let link_start = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: true })
+            .line_count(inner.width);
+        let mut link = history_fact(
+            "Link",
+            if event.permalink.is_some() {
+                "event permalink"
+            } else {
+                "pull request"
+            },
+            t,
+        );
+        link.spans[1].style = Style::default()
+            .fg(color(t.focus))
+            .add_modifier(Modifier::UNDERLINED);
+        lines.push(link);
+        link_rows = Some((
+            link_start,
+            Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: true })
+                .line_count(inner.width),
+        ));
+        lines.push(Line::from(""));
+    } else if app.history.unavailable {
+        lines.push(Line::from(Span::styled(
+            "Retained event detail is unavailable.",
+            Style::default().fg(color(t.warn)),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(section("Current pull request", t));
+    match &app.history.detail {
+        Some(detail) => {
+            lines.push(history_fact("Title", &detail.pr.title, t));
+            let identity = app
+                .history
+                .events
+                .get(app.history.selected)
+                .map(|event| format!("{}#{}", event.repo.slug(), event.pr_number))
+                .or_else(|| match &app.history.scope {
+                    HistoryScope::Pr { repo, number, .. } => {
+                        Some(format!("{}#{number}", repo.slug()))
+                    }
+                    HistoryScope::All => None,
+                })
+                .unwrap_or_else(|| format!("#{}", detail.pr.number));
+            lines.push(history_fact("Pull request", &identity, t));
+            lines.push(history_fact(
+                "State",
+                present::state_text(detail.pr.state),
+                t,
+            ));
+            lines.push(history_fact(
+                "Tracking",
+                if detail.tracked_reason.is_some() {
+                    "tracked"
+                } else {
+                    "untracked"
+                },
+                t,
+            ));
+            if app.history.unavailable {
+                lines.push(Line::from(Span::styled(
+                    "Retained pull request detail remains available.",
+                    Style::default().fg(color(t.warn)),
+                )));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "Stored pull request detail unavailable.",
+            Style::default().fg(color(t.warn)),
+        ))),
+    }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+    let count = paragraph.line_count(inner.width);
+    let scroll = usize::from(app.detail_scroll).min(count.saturating_sub(inner.height as usize));
+    app.detail_scroll = scroll.try_into().unwrap_or(u16::MAX);
+    if let Some((start, end)) = link_rows {
+        let start = start.saturating_sub(scroll).min(inner.height as usize);
+        let end = end.saturating_sub(scroll).min(inner.height as usize);
+        app.history_link_area = Rect::new(
+            inner.x,
+            inner.y + start as u16,
+            inner.width,
+            (end - start) as u16,
+        );
+    }
+    frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), inner);
+    (count, inner)
+}
+
+fn history_fact(label: &str, value: &str, t: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {label:<13}"), Style::default().fg(color(t.dim))),
+        Span::styled(value.to_string(), Style::default().fg(color(t.text))),
+    ])
 }
 
 /// A bordered, titled, padded panel; returns the area left inside it.
@@ -617,6 +840,35 @@ fn detail_pane(frame: &mut Frame, area: Rect, app: &App) -> (usize, Rect) {
         );
     }
 
+    if app.peek.is_none() {
+        lines.push(Line::from(""));
+        lines.push(section("Activity", t));
+        for event in app.activity_preview.events.iter().take(5) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}  ", activity_timestamp(event)),
+                    Style::default().fg(color(t.dim)),
+                ),
+                Span::styled(activity_text(event), Style::default().fg(color(t.text))),
+            ]));
+        }
+        if app.activity_preview.unavailable {
+            lines.push(Line::from(Span::styled(
+                "  activity preview unavailable",
+                Style::default().fg(color(t.warn)),
+            )));
+        } else if app.activity_preview.backfill_incomplete {
+            lines.push(Line::from(Span::styled(
+                "  activity history incomplete",
+                Style::default().fg(color(t.warn)),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "  H  complete history",
+            Style::default().fg(color(t.dim)),
+        )));
+    }
+
     // The queue marks its own position with the highlighted row; the
     // description has nothing else to say how far into a long one you are, or
     // how long it runs — hence the scrollbar the queue doesn't get.
@@ -739,6 +991,38 @@ fn strip_html_comments(markdown: &str) -> String {
     out
 }
 
+/// A compact timestamp used by the detail preview and the full History view.
+pub(crate) fn activity_timestamp(event: &ActivityEvent) -> String {
+    present::stamp(event.occurred_at)
+}
+
+fn activity_icon(event: &ActivityEvent) -> &'static str {
+    match event.kind {
+        ActivityKind::Done => "✓",
+        ActivityKind::Snoozed => "◷",
+        ActivityKind::Muted => "●",
+        ActivityKind::Unmuted => "○",
+        ActivityKind::Deferred => "↓",
+        ActivityKind::Undeferred => "↑",
+        ActivityKind::Tracked => "+",
+        ActivityKind::Untracked => "−",
+        ActivityKind::ReviewStarted => "▶",
+        ActivityKind::ReviewSubmitted => "◆",
+        ActivityKind::Commented | ActivityKind::ReviewThreadCommented => "✎",
+        ActivityKind::ThreadResolved => "✓",
+        ActivityKind::ThreadReopened => "↻",
+        ActivityKind::AttentionChanged => "!",
+        ActivityKind::PrClosed => "×",
+        ActivityKind::PrReopened => "↺",
+        ActivityKind::PrMerged => "\u{eafe}",
+    }
+}
+
+/// Concise wording for an activity event, shared by every TUI history surface.
+pub(crate) fn activity_text(event: &ActivityEvent) -> String {
+    present::activity_text(event)
+}
+
 fn section(name: &str, t: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         name.to_string(),
@@ -753,18 +1037,31 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
     // While a PR is being shown the usual row would advertise keys that are
     // deliberately refused, so the footer lists what actually works instead.
     if app.peek.is_some() {
-        frame.render_widget(
-            Paragraph::new(keyed_hint(
-                &[
-                    ("Esc / Tab", "back to the queue"),
-                    ("jk", "scroll"),
-                    ("o", "open"),
-                    ("c / y", "copy URL"),
-                ],
-                t,
-            )),
-            area,
-        );
+        let back = if app.view == View::History {
+            "back to history"
+        } else {
+            "back to the queue"
+        };
+        let mut hints = vec![("Esc / Tab", back), ("jk", "scroll")];
+        if app.view == View::History && app.peek.as_ref().is_some_and(|peek| !peek.scratch) {
+            hints.push(("⏎", "review"));
+        }
+        hints.extend([("o", "open"), ("c / y", "copy URL")]);
+        frame.render_widget(Paragraph::new(keyed_hint(&hints, t)), area);
+        return;
+    }
+    if app.view == View::History {
+        let mut hints = vec![
+            ("jk", "move"),
+            ("H", "switch scope"),
+            ("⏎", "show PR"),
+            ("o", "open link"),
+            ("Esc", "back"),
+        ];
+        if matches!(app.history.scope, HistoryScope::Pr { .. }) {
+            hints.push(("a", "Relevant / All"));
+        }
+        frame.render_widget(Paragraph::new(keyed_hint(&hints, t)), area);
         return;
     }
     let mut spans = Vec::new();
@@ -858,7 +1155,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.overlay.clone() {
         Overlay::None => {}
         Overlay::Help { scroll } => {
-            let max = help_overlay(frame, area, scroll, app.marks(), t);
+            let max = help_overlay(frame, area, scroll, app, t);
             app.set_help_max_scroll(max);
         }
         Overlay::Launching { number } => modal(
@@ -1121,7 +1418,7 @@ fn modal(frame: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>
 /// leave a wide empty box on a big terminal. [`Clear`] blanks the cells beneath
 /// instead of painting a background colour, which keeps the overlay from having
 /// to guess the terminal's own — the same reason nothing else here fills.
-fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, marks: &Marks, t: &Theme) -> u16 {
+fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, app: &App, t: &Theme) -> u16 {
     let heading = |text: &str| {
         Line::from(Span::styled(
             text.to_string(),
@@ -1143,31 +1440,45 @@ fn help_overlay(frame: &mut Frame, screen: Rect, scroll: u16, marks: &Marks, t: 
     // is drawn by the row code, in the row colour — the difference between a
     // mark that stands and one the PR has outrun is a shade, and a legend that
     // spelled that out in prose would be describing what it could simply show.
-    let mut rows: Vec<Line> = vec![heading("Marks")];
-    for (mark, what) in MARKS {
-        rows.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<12}", marks.glyph(*mark)),
-                mark_style(*mark, t),
-            ),
-            Span::styled((*what).to_string(), Style::default().fg(color(t.text))),
-        ]));
+    let mut rows: Vec<Line> = Vec::new();
+    if app.view == View::PullRequests || app.peek.is_some() {
+        rows.push(heading("Marks"));
+        for (mark, what) in MARKS {
+            rows.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<12}", app.marks().glyph(*mark)),
+                    mark_style(*mark, t),
+                ),
+                Span::styled((*what).to_string(), Style::default().fg(color(t.text))),
+            ]));
+        }
     }
-
     let mut group = "";
     for binding in keys::described() {
+        let Some(what) = app.help_description(binding) else {
+            continue;
+        };
         if binding.group != group {
             rows.push(Line::from(""));
             rows.push(heading(binding.group));
             group = binding.group;
         }
-        rows.push(entry(binding.keys, binding.what));
+        rows.push(entry(binding.keys, what));
     }
 
     rows.push(Line::from(""));
     rows.push(heading("Mouse"));
-    for (gesture, what) in MOUSE_GESTURES {
-        rows.push(entry(gesture, what));
+    if app.peek.is_some() {
+        rows.push(entry("click list", "return to the list and select a row"));
+        rows.push(entry("wheel", "scroll the PR description"));
+    } else if app.view == View::History {
+        rows.push(entry("click row", "select an activity"));
+        rows.push(entry("click link", "open the event permalink"));
+        rows.push(entry("wheel", "scroll what is under the pointer"));
+    } else {
+        for (gesture, what) in MOUSE_GESTURES {
+            rows.push(entry(gesture, what));
+        }
     }
 
     let width = rows
@@ -1340,8 +1651,11 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use reviewq_core::model::{Attention, AttentionReason, MyState, PrSnapshot};
-    use reviewq_ledger::{Ledger, RepoId, TrackedReason};
+    use reviewq_core::model::{
+        ActivityKind, ActivityPayload, ActivitySource, Attention, AttentionReason, MyState,
+        PrSnapshot,
+    };
+    use reviewq_ledger::{Ledger, NewActivityEvent, TrackedReason};
 
     fn repo() -> RepoKey {
         RepoKey {
@@ -1367,6 +1681,7 @@ mod tests {
             state: PrState::Open,
             updated_at: ts("2026-08-10T09:00:00Z"),
             created_at: Some(ts("2026-07-30T14:20:00Z")),
+            state_changed_at: None,
             labels: vec!["area:async".into()],
             milestone: None,
             files: None,
@@ -1445,7 +1760,7 @@ sensor = S3KeySensor(deferrable=True)
 
     /// Store `pr` as the only thing on the queue: tracked, with one attention row,
     /// since the queue is built from attention rather than from tracking alone.
-    fn queue_only(ledger: &Ledger, repo_id: RepoId, pr: &PrSnapshot) {
+    fn queue_only(ledger: &Ledger, repo_id: reviewq_ledger::RepoId, pr: &PrSnapshot) {
         let now = ts("2026-08-10T12:00:00Z");
         ledger
             .upsert_pr(
@@ -1706,6 +2021,192 @@ sensor = S3KeySensor(deferrable=True)
         assert!(row_of("#70135") < row_of("#70201"));
 
         insta::assert_snapshot!(rows.join("\n"));
+    }
+
+    #[test]
+    fn the_detail_pane_shows_five_recent_activity_events() {
+        let mut app = crate::fixture::app_with_activity(Mode::Dark, true);
+        for _ in 0..app.queue.len() {
+            if app.current().is_some_and(|row| row.item.pr.number == 70135) {
+                break;
+            }
+            let _ = app.update(Action::Down).expect("move");
+        }
+        assert_eq!(app.current().map(|row| row.item.pr.number), Some(70135));
+
+        screen(&mut app, 100, 50);
+        app.focus = Focus::Detail;
+        app.detail_scroll = u16::MAX;
+        let shown = screen(&mut app, 100, 50);
+
+        assert!(shown.contains("Activity"), "{shown}");
+        assert!(shown.contains("activity history incomplete"), "{shown}");
+        assert!(shown.contains("H  complete history"), "{shown}");
+        assert!(shown.contains("merged (open → merged)"), "{shown}");
+        assert!(shown.contains("you requested changes at"), "{shown}");
+        assert!(shown.contains("abcdef1"), "{shown}");
+        assert!(!shown.contains("commented in review thread"), "{shown}");
+        assert!(!shown.contains("closed (open → closed)"), "{shown}");
+        insta::assert_snapshot!(shown);
+    }
+
+    #[test]
+    fn the_detail_pane_hides_the_incomplete_marker_after_backfill_completes() {
+        let mut app = crate::fixture::app_with_activity(Mode::Dark, false);
+        for _ in 0..app.queue.len() {
+            if app.current().is_some_and(|row| row.item.pr.number == 70135) {
+                break;
+            }
+            let _ = app.update(Action::Down).expect("move");
+        }
+
+        screen(&mut app, 100, 50);
+        app.focus = Focus::Detail;
+        app.detail_scroll = u16::MAX;
+        let shown = screen(&mut app, 100, 50);
+
+        assert!(shown.contains("Activity"), "{shown}");
+        assert!(!shown.contains("activity history incomplete"), "{shown}");
+    }
+
+    #[test]
+    fn the_history_view_shows_one_prs_activity() {
+        let mut app = crate::fixture::app_with_activity(Mode::Dark, false);
+        for _ in 0..app.queue.len() {
+            if app.current().is_some_and(|row| row.item.pr.number == 70135) {
+                break;
+            }
+            let _ = app.update(Action::Down).expect("move");
+        }
+        app.open_history_from_list().expect("history");
+
+        let shown = screen(&mut app, 120, 30);
+
+        assert!(shown.contains("History · apache/airflow#70135"), "{shown}");
+        assert!(shown.contains("merged (open → merged)"), "{shown}");
+        assert!(shown.contains("Event metadata"), "{shown}");
+        assert!(shown.contains("Current pull request"), "{shown}");
+        insta::assert_snapshot!(shown);
+    }
+
+    #[test]
+    fn the_global_history_view_shows_retained_activity() {
+        let mut app = crate::fixture::app_with_activity(Mode::Dark, false);
+        app.load_history(HistoryScope::All).expect("global history");
+
+        let rows = render(&mut app, 120, 30);
+        let history = queue_rows(&rows).join("\n");
+        let shown = rows.join("\n");
+
+        assert!(shown.contains("History · all"), "{shown}");
+        assert!(!history.contains("apache/airflow#"), "{history}");
+        assert!(history.contains("#70135"), "{history}");
+        assert!(
+            app.history
+                .events
+                .iter()
+                .any(|event| event.kind == ActivityKind::PrMerged),
+            "retained merged activity is loaded"
+        );
+        insta::assert_snapshot!(shown);
+    }
+
+    #[test]
+    fn global_history_names_repos_when_more_than_one_is_configured() {
+        let ledger = fixture();
+        let airflow_id = ledger.repos().expect("repos")[0].0;
+        let arrow = RepoKey {
+            host: "github.com".into(),
+            owner: "apache".into(),
+            name: "arrow".into(),
+        };
+        let arrow_id = ledger.ensure_repo(&arrow).expect("second repo");
+        ledger
+            .upsert_pr(arrow_id, &pr(70135, "Arrow duplicate number"), None)
+            .expect("stored PR");
+        for (repo_id, external_id, occurred_at) in [
+            (airflow_id, "airflow-70135", "2026-08-10T10:00:00Z"),
+            (arrow_id, "arrow-70135", "2026-08-10T11:00:00Z"),
+        ] {
+            ledger
+                .record_activity(
+                    repo_id,
+                    70135,
+                    &NewActivityEvent {
+                        relation: reviewq_core::model::ActivityRelation::Own,
+                        source: ActivitySource::Local,
+                        kind: ActivityKind::ReviewStarted,
+                        occurred_at: ts(occurred_at),
+                        recorded_at: ts(occurred_at),
+                        actor: None,
+                        head_sha: None,
+                        external_id: Some(external_id.into()),
+                        permalink: None,
+                        payload: ActivityPayload::None,
+                    },
+                )
+                .expect("activity");
+        }
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+        app.load_history(HistoryScope::All).expect("global history");
+
+        let shown = screen(&mut app, 120, 30);
+
+        assert!(shown.contains("apache/airflow#70135"), "{shown}");
+        assert!(shown.contains("apache/arrow#70135"), "{shown}");
+    }
+
+    #[test]
+    fn an_empty_history_explains_its_backfill_state() {
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+        app.open_history_from_list().expect("history");
+
+        let shown = screen(&mut app, 100, 20);
+
+        assert!(shown.contains("No retained activity yet."), "{shown}");
+        assert!(shown.contains("Activity history is incomplete."), "{shown}");
+        insta::assert_snapshot!(shown);
+    }
+
+    #[test]
+    fn an_empty_incomplete_preview_still_links_to_complete_history() {
+        let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
+
+        screen(&mut app, 100, 50);
+        app.focus = Focus::Detail;
+        app.detail_scroll = u16::MAX;
+        let shown = screen(&mut app, 100, 50);
+
+        assert!(shown.contains("Activity"), "{shown}");
+        assert!(shown.contains("activity history incomplete"), "{shown}");
+        assert!(shown.contains("H  complete history"), "{shown}");
+    }
+
+    #[test]
+    fn an_empty_complete_preview_still_links_to_complete_history() {
+        let ledger = fixture();
+        let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+        ledger
+            .commit_activity_page(
+                repo_id,
+                70135,
+                None,
+                &[],
+                None,
+                None,
+                ts("2026-08-10T12:00:00Z"),
+            )
+            .expect("backfill");
+        let mut app = App::with_ledger(Theme::default(), ledger, test_config()).expect("app");
+
+        screen(&mut app, 100, 50);
+        app.focus = Focus::Detail;
+        app.detail_scroll = u16::MAX;
+        let shown = screen(&mut app, 100, 50);
+
+        assert!(shown.contains("Activity"), "{shown}");
+        assert!(!shown.contains("activity history incomplete"), "{shown}");
+        assert!(shown.contains("H  complete history"), "{shown}");
     }
 
     #[test]
@@ -2313,8 +2814,8 @@ sensor = S3KeySensor(deferrable=True)
     fn refreshes_in_flight_are_named_and_outrank_a_finished_note() {
         let mut app = App::with_ledger(Theme::default(), fixture(), test_config()).expect("app");
         app.status = Some("an earlier result".to_string());
-        app.refreshing.insert(70135);
-        app.refreshing.insert(70201);
+        app.refreshing.insert((repo(), 70135));
+        app.refreshing.insert((repo(), 70201));
 
         let header = render(&mut app, 100, 20).first().expect("header").clone();
         // Both, so two concurrent refreshes are visibly two.
@@ -2326,6 +2827,71 @@ sensor = S3KeySensor(deferrable=True)
         app.refreshing.clear();
         let after = render(&mut app, 100, 20).first().expect("header").clone();
         assert!(after.contains("an earlier result"), "{after}");
+    }
+
+    #[test]
+    fn shown_pr_help_hides_writes_and_only_offers_review_from_history() {
+        for (from_history, scratch) in [(false, false), (true, false), (true, true)] {
+            let ledger = fixture();
+            let repo = repo();
+            let repo_id = ledger.ensure_repo(&repo).unwrap();
+            let show = ledger.show(repo_id, 70135).unwrap().unwrap();
+            let mut app = App::with_ledger(Theme::default(), ledger, test_config()).unwrap();
+            if from_history {
+                app.open_history_from_list().unwrap();
+            }
+            app.peek = Some(reviewq_app::peek::Peeked {
+                repo,
+                show,
+                scratch,
+            });
+            app.overlay = Overlay::Help { scroll: 0 };
+            let output = render(&mut app, 110, 100).join("\n");
+            assert!(output.contains("copy its URL"));
+            assert!(output.contains("sync every repo"));
+            assert!(output.contains("scroll the PR description"));
+            assert_eq!(
+                output.contains("hand off to your review command"),
+                from_history && !scratch
+            );
+            for unsupported in [
+                "snooze for a while",
+                "done — handled",
+                "untrack —",
+                "refresh from the forge",
+                "go to a PR by number",
+            ] {
+                assert!(!output.contains(unsupported), "{unsupported}\n{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn history_help_only_advertises_history_actions() {
+        let mut app = crate::fixture::app_with_activity(crate::theme::Mode::Dark, false);
+        app.open_history_from_list().unwrap();
+        app.overlay = Overlay::Help { scroll: 0 };
+        let output = render(&mut app, 110, 100).join("\n");
+        assert!(output.contains("show the selected PR"));
+        assert!(output.contains("show global history"));
+        assert!(output.contains("toggle Relevant / All activity"));
+        assert!(output.contains("quit, from wherever you are"));
+        for unsupported in [
+            "hand off to your review command",
+            "snooze for a while",
+            "refresh from the forge",
+            "sync every repo",
+            "copy its URL",
+            "switch pane",
+        ] {
+            assert!(!output.contains(unsupported), "{unsupported}\n{output}");
+        }
+        app.load_history(HistoryScope::All).unwrap();
+        app.overlay = Overlay::Help { scroll: 0 };
+        let output = render(&mut app, 110, 100).join("\n");
+        assert!(output.contains("show the selected PR's history"));
+        assert!(!output.contains("show global history"));
+        assert!(!output.contains("toggle Relevant / All activity"));
     }
 
     #[test]
@@ -2343,7 +2909,7 @@ sensor = S3KeySensor(deferrable=True)
         // starting to assert against a scrolled-off screen.
         let mut wanted = 1 + MARKS.len();
         let mut group = "";
-        for binding in keys::described() {
+        for binding in keys::described().filter(|binding| app.help_description(binding).is_some()) {
             if binding.group != group {
                 wanted += 2;
                 group = binding.group;
@@ -2357,12 +2923,12 @@ sensor = S3KeySensor(deferrable=True)
         // Every binding the table describes reaches the reference — derived from
         // the table rather than listed here, so a new key with no entry fails
         // instead of quietly missing from a snapshot somebody accepted.
-        for binding in keys::described() {
+        for binding in keys::described().filter(|binding| app.help_description(binding).is_some()) {
             if binding.what.is_empty() {
                 continue; // folded into the row above, by design
             }
             assert!(
-                screen.contains(binding.what),
+                screen.contains(app.help_description(binding).unwrap()),
                 "binding {:?} is missing from the reference:\n{screen}",
                 binding.what
             );

@@ -545,6 +545,7 @@ mod tests {
             state,
             updated_at: "2026-08-11T09:00:00Z".parse().expect("timestamp"),
             created_at: None,
+            state_changed_at: None,
             labels: vec![],
             milestone: None,
             files: None,

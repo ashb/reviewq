@@ -1,0 +1,24 @@
+---
+source: crates/reviewq-tui/src/ui.rs
+expression: shown
+---
+reviewq  History · apache/airflow#70135 · Relevant
+╭ History ───────────────────────────────────────────────╮╭ Detail ────────────────────────────────╮
+│ No retained activity yet.                              ││ Current pull request                   │
+│ Activity history is incomplete.                        ││ Title        Add deferrable mode to    │
+│                                                        ││ S3KeySensor                            │
+│                                                        ││ Pull request apache/airflow#70135      │
+│                                                        ││ State        open                      │
+│                                                        ││ Tracking     tracked                   │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+│                                                        ││                                        │
+╰────────────────────────────────────────────────────────╯╰────────────────────────────────────────╯
+  jk move   H switch scope   ⏎ show PR   o open link   Esc back   a Relevant / All

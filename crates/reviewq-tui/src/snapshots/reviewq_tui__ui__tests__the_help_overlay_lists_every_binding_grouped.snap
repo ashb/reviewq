@@ -28,6 +28,7 @@ reviewq  2 on the queue
 │                  │   ^L          show or hide the labels                     │rue)               │
 │                  │   W           show what waits on someone else, or go back │                   │
 │                  │   M           show what you have muted, or go back        │                   │
+│                  │   H           show activity history                       │                   │
 │                  │                                                           │                   │
 │                  │ Act on the PR                                             │                   │
 │                  │   ⏎           review it — hand off to your review command │                   │
@@ -45,7 +46,7 @@ reviewq  2 on the queue
 │                  │                                                           │                   │
 │                  │ Session                                                   │                   │
 │                  │   ? / h       keys                                        │                   │
-│                  │   Esc         back to the queue, or quit                  │                   │
+│                  │   Esc         quit                                        │                   │
 │                  │   q           quit, from wherever you are                 │                   │
 │                  │                                                           │                   │
 │                  │ Mouse                                                     │                   │

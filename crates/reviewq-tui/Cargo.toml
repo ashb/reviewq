@@ -20,6 +20,7 @@ tui-markdown.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+diesel.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 

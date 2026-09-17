@@ -75,11 +75,26 @@ pub struct ReviewRequest {
     pub team: Option<String>,
 }
 
+/// The retained event that established a thread's current resolution.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Resolution {
+    /// Provider identity of the resolved thread.
+    pub thread_id: String,
+    /// When the resolution was first observed.
+    pub at: Timestamp,
+}
+
 /// Signals classification needs that are not part of a PR's own activity: they
 /// come from config (the bot list, why the PR is tracked) or from a tier-2
 /// fetch (mentions, review requests, the commit count behind a re-review).
 #[derive(Debug, Clone, Default)]
 pub struct ClassifyCtx<'a> {
+    /// The authenticated user's login, for attributing observed actions.
+    pub viewer: Option<&'a str>,
+    /// Resolution events retained by the ledger.
+    pub resolutions: &'a [Resolution],
+    /// Submission time from the latest retained review acknowledgment.
+    pub reviewed_at: Option<Timestamp>,
     /// Logins whose comments never raise attention — a bot replying in my
     /// thread, or @mentioning me, is noise.
     pub bots: &'a [String],
@@ -172,7 +187,7 @@ pub fn classify(
     out.extend(my_pr);
     out.extend(mention);
     out.extend(thread_reply_attention(threads, mine, ctx));
-    out.extend(resolved_unanswered_attention(pr, threads, mine));
+    out.extend(resolved_unanswered_attention(threads, mine, ctx));
     out.extend(re_review_attention(pr, mine, ctx));
     out.extend(answered_after_review_attention(pr, mine, ctx));
     out.extend(review_requested_attention(pr, ctx));
@@ -291,34 +306,35 @@ fn thread_reply_attention(
     })
 }
 
-/// Threads I own that someone else resolved while I still held the last word —
-/// a "go verify the fix" state that only an explicit `reviewq done` clears
-/// (per the reason table, unlike `thread_reply` a reply elsewhere doesn't).
-fn resolved_unanswered_attention(
-    pr: &PrSnapshot,
+/// Resolved threads whose triggering event has not been acknowledged.
+pub fn resolved_unanswered_attention(
     threads: &[ThreadState],
     mine: &MyState,
+    ctx: &ClassifyCtx<'_>,
 ) -> Option<Attention> {
-    // No per-thread resolve time is stored, so the PR's updatedAt is the
-    // closest event stamp we have — and so also the closest we have to compare
-    // a `done` against.
-    if mine.done_at.is_some_and(|done| pr.updated_at <= done) {
-        return None;
-    }
-
-    let resolved: Vec<&ThreadState> = threads
+    let resolved: Vec<_> = threads
         .iter()
-        .filter(|t| t.i_own && t.is_resolved)
-        .filter(|t| !spoken_after_me(t))
+        .filter(|t| t.i_own && t.is_resolved && !spoken_after_me(t))
+        .filter_map(|t| {
+            ctx.resolutions
+                .iter()
+                .find(|event| event.thread_id == t.thread_id)
+                .map(|event| (t, event.at))
+        })
+        .filter(|(_, at)| {
+            mine.done_at.is_none_or(|done| done < *at)
+                && ctx.reviewed_at.is_none_or(|review| review < *at)
+        })
         .collect();
-
-    let by = resolved.iter().find_map(|t| t.resolved_by.clone())?;
+    let by = resolved
+        .iter()
+        .find_map(|(thread, _)| thread.resolved_by.clone())?;
     Some(Attention {
         reason: AttentionReason::ResolvedUnanswered {
             by,
             threads: resolved.len(),
         },
-        since: pr.updated_at,
+        since: resolved.iter().map(|(_, at)| *at).min()?,
     })
 }
 
@@ -589,6 +605,7 @@ mod tests {
             state: PrState::Open,
             updated_at: ts("2026-08-05T09:00:00Z"),
             created_at: None,
+            state_changed_at: None,
             labels: vec![],
             milestone: None,
             files: None,
@@ -855,7 +872,14 @@ mod tests {
             last_comment_at: Some(ts("2026-08-02T14:20:00Z")),
             my_last_comment_at: Some(ts("2026-08-02T14:20:00Z")),
         }];
-        let ctx = ClassifyCtx::default();
+        let resolutions = [Resolution {
+            thread_id: "T1".into(),
+            at: ts("2026-08-05T09:00:00Z"),
+        }];
+        let ctx = ClassifyCtx {
+            resolutions: &resolutions,
+            ..Default::default()
+        };
 
         let before = classify(&pr(), &MyState::default(), &threads, now(), &ctx);
         assert_eq!(before.len(), 1);

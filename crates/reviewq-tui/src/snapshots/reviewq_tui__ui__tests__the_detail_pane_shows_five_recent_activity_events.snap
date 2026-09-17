@@ -1,0 +1,54 @@
+---
+source: crates/reviewq-tui/src/ui.rs
+expression: shown
+---
+reviewq  9 on the queue
+╭ Queue ────────────────────────────────────╮╭ #70135 ─────────────────────────────────────────────╮
+│ ▸ ✓ #70135  @kaxil mentioned you  area:ta ││ takes milliseconds. On a fleet running a few        ║
+│   · #69757  @dstandish mentioned you [MER ││ hundred sensors that is a few hundred workers doing ║
+│     #70390  @o-nikolas mentioned you  are ││ nothing but sleeping, which is the single biggest   ║
+│   ✓ #70208  @potiuk replied in 2 threads  ││ reason KubernetesExecutor users ask for more worker ║
+│   ✓ #70061  @jedcunningham resolved your  ││ pods than the DAGs actually need.                   ║
+│   ✓ #69982  3 new commits since your revi ││                                                     ║
+│     #70311  review requested via @apache/ ││ >  Note                                            ║
+│     #70344  matches author FIRST_TIME_CON ││ > This mirrors the flag already on                  ║
+│   󰒲 #70102  matches label area:Executors- ││ S3KeysUnchangedSensor — same name, same default —   ║
+│                                           ││ so a docs reader does not have to learn two         ║
+│                                           ││ spellings of the same idea.                         ║
+│                                           ││                                                     ║
+│                                           ││ ## How it works                                     ║
+│                                           ││                                                     ║
+│                                           ││ poke() moves to a shared mixin so the sync and the  ║
+│                                           ││ deferred path call the same key-existence check:    ║
+│                                           ││                                                     ║
+│                                           ││ ```python                                           ║
+│                                           ││ class S3KeySensor(BaseSensorOperator):              ║
+│                                           ││     deferrable: bool = conf.getboolean("operators", ║
+│                                           ││ "default_deferrable")                               █
+│                                           ││ ```                                                 █
+│                                           ││                                                     █
+│                                           ││ The trigger already existed for S3KeySensorAsync;   █
+│                                           ││ this just makes it the trigger for the plain sensor █
+│                                           ││ too, gated on the new flag rather than a second     █
+│                                           ││ operator class.                                     █
+│                                           ││                                                     █
+│                                           ││ - [x] Trigger and sensor share one poke             █
+│                                           ││ implementation                                      █
+│                                           ││ - [x] Tests for both modes                          █
+│                                           ││ - [x] Backport label added — this lands on 3.1 as   █
+│                                           ││ well as main                                        █
+│                                           ││ - [ ] Docs updated — waiting on #70344              █
+│                                           ││                                                     █
+│                                           ││ Follow-up to the executor work in #69982.           █
+│                                           ││                                                     █
+│                                           ││ Activity                                            █
+│                                           ││   2026-08-12T08:00:00Z  merged (open → merged)      █
+│                                           ││   2026-08-12T07:00:00Z  you commented               █
+│                                           ││   2026-08-12T06:00:00Z  you requested changes at    █
+│                                           ││ abcdef1                                             █
+│                                           ││   2026-08-12T05:00:00Z  you started a review        █
+│                                           ││   2026-08-12T04:00:00Z  you marked done             █
+│                                           ││   activity history incomplete                       █
+│                                           ││   H  complete history                               █
+╰───────────────────────────────────────────╯╰─────────────────────────────────────────────────────╯
+jk scroll   ⏎ review   d done   z snooze   ? / h keys   Esc quit           W 2 waiting    M 1 muted

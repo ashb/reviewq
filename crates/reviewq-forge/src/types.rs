@@ -6,9 +6,10 @@
 
 use jiff::Timestamp;
 use reviewq_core::model::{
-    Mention, PrSnapshot, PrState, ReviewRequest, ReviewerVerdict, Said, ThreadState, Verdict,
+    ActivityKind, ActivityPayload, ActivityRelation, Mention, PrSnapshot, PrState, ReviewRequest,
+    ReviewerVerdict, Said, ThreadState, Verdict,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// GitHub search returns at most this many results however many match, so a
 /// window reporting more than this was silently truncated.
@@ -70,6 +71,86 @@ pub struct SweepPage {
     pub remaining: u32,
 }
 
+/// One provider-neutral observation made while reading pull-request activity.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ForgeActivity {
+    /// The observed action or lifecycle transition.
+    pub kind: ActivityKind,
+    /// How this event relates to the configured viewer.
+    #[serde(default)]
+    pub relation: ActivityRelation,
+    /// When the event occurred on the provider.
+    pub occurred_at: Timestamp,
+    /// The actor, when the provider supplies one.
+    pub actor: Option<String>,
+    /// The head SHA associated with the event, when the provider supplies one.
+    pub head_sha: Option<String>,
+    /// The provider's opaque stable event identity, when supplied.
+    pub external_id: Option<String>,
+    /// The provider's opaque permalink, when supplied.
+    pub permalink: Option<String>,
+    /// Details specific to this event kind.
+    pub payload: ActivityPayload,
+}
+
+/// One page of provider activity for a pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeActivityPage {
+    /// Pull-request actions and lifecycle transitions from all actors.
+    pub activities: Vec<ForgeActivity>,
+    /// The provider-owned checkpoint for the next page, when any.
+    pub next: Option<String>,
+    /// Budget consumed by the provider request, or `None` when this call only
+    /// drained events already held by the opaque cursor.
+    pub rate_limit: Option<ActivityRateLimit>,
+    /// Budget unit the next call will consume, or `None` when it can drain the
+    /// cursor without contacting the provider.
+    pub next_rate_limit: Option<RateLimitUnit>,
+}
+
+/// A provider budget unit. Providers may account for requests and computed
+/// query points in separate pools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitUnit {
+    /// A count of HTTP/API requests.
+    Requests,
+    /// A provider-computed query cost.
+    Points,
+}
+
+/// The budget charged by one activity-page call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityRateLimit {
+    /// Which independent provider budget was charged.
+    pub unit: RateLimitUnit,
+    /// How much the call cost in that unit.
+    pub cost: u32,
+    /// How much remained in that pool after the call.
+    pub remaining: u32,
+}
+
+impl ForgeActivityPage {
+    /// Reject a page that cannot be deduplicated safely.
+    pub fn validate(&self) -> crate::Result<()> {
+        for activity in &self.activities {
+            if matches!(
+                activity.kind,
+                ActivityKind::ReviewSubmitted
+                    | ActivityKind::Commented
+                    | ActivityKind::ReviewThreadCommented
+            ) && activity.external_id.is_none()
+            {
+                return Err(crate::ForgeError::Unreachable {
+                    doing: "validating forge activity: user-authored event has no external ID"
+                        .into(),
+                    source: "the forge response cannot be deduplicated".into(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One PR as a direct fetch returns it: the snapshot, and the colours its repo
 /// paints the labels it carries.
 #[derive(Debug, Clone)]
@@ -97,6 +178,8 @@ pub struct LabelColour {
 /// [`classify`]: reviewq_core::model::classify
 #[derive(Debug, Clone)]
 pub struct PrDetail {
+    /// Submitted reviews from all actors, captured with the attention inputs.
+    pub activities: Vec<ForgeActivity>,
     /// PR number.
     pub number: u64,
     /// Whether it is still open, and if not how it ended.
@@ -105,6 +188,8 @@ pub struct PrDetail {
     /// — so without it here, closing a PR on the forge left the ledger calling
     /// it open until a full sync came round.
     pub state: PrState,
+    /// The provider's authoritative timestamp for the latest known transition.
+    pub state_changed_at: Option<Timestamp>,
     /// Head SHA at fetch time; lets the caller detect a head that moved between
     /// the sweep and this fetch.
     pub head_sha: String,

@@ -103,7 +103,7 @@ A PR matched by multiple reasons has the priority of the lowest (i.e. highest pr
 | 1 | `my_pr` | *@potiuk approved your PR* | anything you do on the PR, or `done` |
 | 2 | `mention` | *@potiuk mentioned you* | anything you do on the PR, or `done` |
 | 3 | `thread_reply` | *@potiuk replied in 2 threads you own* | replying in that thread, or `done` |
-| 4 | `resolved_unanswered` | *@potiuk resolved your thread without replying* | `done`, and only `done` — it means *go check the fix* |
+| 4 | `resolved_unanswered` | *@potiuk resolved your thread without replying* | A later review on the forge, or `done` |
 | 5 | `re_review` | *3 new commits since your review of 5e14b22* | reviewing the new head, or `done` at it |
 | 6 | `answered_after_review` | *@potiuk answered your review* | anything you do on the PR, or `done` |
 | 7 | `review_requested` | *review requested via @airflow-committers* | reviewing the current head |
@@ -129,7 +129,7 @@ This command is worth running once after an upgrade and rarely or never otherwis
 
 Some states silence a PR before any of that is computed.
 A snooze suppresses everything for that time for a specified time preiod, explicit `@` mentions included.
-A closed-unmerged PR is removed from the ledger entirely.
+A closed-unmerged PR leaves the queue, while its stored detail and history remain in the ledger.
 A draft lets only a mention through.
 A *merged* PR is automatically removed from the attention queue, unless the project sets `include_merged` or the rule that matched sets `after_merge`, useful when combined with path selection rules to apply extra scrutiny to an area of the code, even if someone else merged it.
 
@@ -195,11 +195,122 @@ A non-exhaustive list of common commands. See `reviewq <command> --help` for ful
 | `track <N\|url>` | Track a PR a rule didn't match, fetching it if the ledger has never seen it |
 | `untrack <N>` | Stop watching it for good — off every list, and no rule takes it back |
 | `review <N>` | Hand off to your review command; does not imply `done` |
+| `history [N\|url] [--all] [--json]` | Personal activity, or all retained activity for one PR, newest-first |
+| `history clean --older-than <dur>` | Explicitly remove old events, with a dry-run and confirmation safeguards |
 | `tui` | The interactive queue; `?` lists the keys |
 | `doctor` | What is wrong, and where things live |
 | `help [topic]` | These pages, in the terminal — `reviewq help done`, `reviewq help config` |
 
 <!-- /help:commands -->
+
+<!-- help:history -->
+
+## Activity history
+
+History is a durable account of meaningful pull-request activity, independent
+of which PRs are currently in the Queue. Retained reviews and resolution events
+also let attention distinguish new work from resolutions already acknowledged.
+
+reviewq keeps successful local actions (`done`, snooze, mute, defer,
+track, and their opposites) and records when a configured review handoff was
+successfully started. From the forge it keeps reviews, issue comments, and
+review-thread comments by all actors, plus PR close, reopen, and merge
+transitions and observed thread resolutions and reopenings. Events are classified
+as your own actions, relevant to you, or surrounding context.
+A submitted review includes its result and the
+SHA that was reviewed.
+
+Changes to attention retain the previous and new reasons, so history can
+explain a mention, reply, review request, or new commits after the queue entry
+has cleared. These changes are marked as observations. Repeated syncs with the
+same evidence do not add entries.
+
+Matching a tracking rule does not make every action on the PR relevant.
+Global history and the default per-PR Relevant view show your own and relevant
+events. The per-PR All view also includes retained context from other actors.
+Ordinary navigation, refreshes, and sync invocations
+are omitted.
+Comment and review bodies and excerpts are never stored; forge events retain
+only the identifiers, result metadata, and links needed to identify and open
+them.
+
+### Reading history
+
+```sh
+reviewq history                   # all repositories
+reviewq history 123               # relevant activity for one PR
+reviewq history 123 --all         # all retained activity for that PR
+reviewq history https://github.com/owner/repo/pull/123
+reviewq history --json
+```
+
+The read commands print complete retained history newest-first. They follow
+every ledger page rather than applying a hidden result limit. Global history
+keeps events visible after a PR is untracked, closed, merged, or temporarily
+unavailable.
+
+### Syncing history
+
+Normal sync backfills older activity for tracked PRs. Once backfill completes,
+it refreshes history for PRs with attention, including PRs whose attention was
+just cleared by a detail refresh. Pending refreshes survive interruption even
+when the PR no longer has attention. Targeted `sync N` always refreshes that
+PR's history.
+
+Normal detail sync records your submitted reviews and observed thread
+resolutions and reopenings. A later review acknowledges earlier resolutions;
+an ordinary comment does not. Resolution times are observations, since GitHub's
+thread detail does not provide the time of the resolution itself.
+
+Backfill cannot reconstruct past attention decisions or thread transitions
+that reviewq never observed. All mode shows the available retained provider
+activity; provider coverage and explicit retention cleanup still limit what
+can be displayed.
+
+Incremental sync uses a saved coverage timestamp with a five-minute overlap.
+Only a complete traversal advances coverage, to the time that traversal started.
+An event recorded during detail sync cannot shorten the history fetch. Each fetched page
+and its continuation state commit together; interruption, a provider failure,
+or a low rate-limit budget resumes from that checkpoint on the next sync.
+Already stored events are deduplicated.
+
+The activity model is provider-neutral: each forge maps its own reviews,
+comments, lifecycle events, identifiers, and cursors into the same history
+without reviewq parsing provider-specific values.
+
+### Explicit cleanup
+
+History has no automatic retention and does not disappear merely because a PR
+is untracked, closed, or merged. Cleanup is an explicit age-based operation:
+
+```sh
+reviewq history clean --older-than 52w --dry-run
+reviewq history clean --older-than 52w
+reviewq history clean --older-than 52w --yes
+```
+
+Only individual events strictly older than the duration are selected, whatever
+state their PR is in. Events supporting current thread resolutions and the
+latest review acknowledgment are retained so cleanup cannot change attention.
+`--dry-run` reports exact event and PR counts without
+writing. An interactive cleanup shows the same counts and asks for confirmation;
+a non-interactive cleanup refuses to run unless `--yes` is supplied. There is
+no TUI cleanup key. A successful cleanup also advances a durable retention
+boundary, so later syncs do not restore events strictly older
+than that cutoff, except evidence required for attention. A dry-run does not advance the boundary.
+
+### History in the TUI
+
+`H` opens the selected PR's history from a PR list. Pressing `H` there switches
+to global history; pressing it in global history opens the selected event's PR
+history. Per-PR history starts in Relevant mode; `a` toggles Relevant / All.
+Global history always remains personal. In either history scope, `Enter` shows the selected PR inside reviewq,
+`o` opens the event permalink or falls back to the PR URL, and `Esc` restores
+the exact previous history scope and selection. After `Enter` has shown the PR,
+another `Enter` retains its normal meaning and starts the configured review
+handoff.
+
+<!-- /help:history -->
 
 <!-- help:keys -->
 
@@ -271,6 +382,13 @@ straight back rather than leaving it blank until the next sync.
 
 Both lists are counted in the footer beside the key that opens them, so a list
 with something on it says so without being opened.
+
+`H` opens activity history. From a PR list it starts with the selected PR, or
+with global history when the list is empty; further presses switch between
+per-PR and global scopes. In History, `Enter` shows the selected PR, `o` opens
+its event or PR link, and `Esc` returns to the exact list or history selection
+you came from. See `reviewq help history` for what is retained and how older
+forge activity is fetched.
 
 
 `Esc` is either "back", or if you are at the top level "quit". The status bar always shows it will do.

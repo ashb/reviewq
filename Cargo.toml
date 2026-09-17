@@ -38,6 +38,7 @@ etcetera = "0.11.0"
 diesel = { version = "2.3.5", features = ["sqlite", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
 diesel_migrations = "2.3.1"
 libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+futures = "0.3.33"
 globset = "0.4.20"
 insta = "1.48.0"
 jiff = { version = "0.2.35", features = ["serde"] }

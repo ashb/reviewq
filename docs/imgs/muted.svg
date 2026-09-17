@@ -78,14 +78,17 @@
 <text x="0.0" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="265.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="265.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="265.5" fill="#9a9a9a" textLength="67.2" lengthAdjust="spacing" xml:space="preserve" font-weight="bold">Activity</text>
 <text x="1167.6" y="265.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="283.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="283.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="283.5" fill="#d08770" textLength="243.6" lengthAdjust="spacing" xml:space="preserve">  activity history incomplete</text>
 <text x="1167.6" y="283.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="301.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="529.2" y="301.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
+<text x="546.0" y="301.5" fill="#9a9a9a" textLength="176.4" lengthAdjust="spacing" xml:space="preserve">  H  complete history</text>
 <text x="1167.6" y="301.5" fill="#606a74" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="0.0" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>
 <text x="520.8" y="319.5" fill="#96b5b4" textLength="8.4" lengthAdjust="spacing" xml:space="preserve">│</text>

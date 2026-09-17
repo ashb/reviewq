@@ -57,7 +57,7 @@ pub fn shot(name: &str, width: u16, mode: Mode, colour: bool) -> Option<String> 
 pub fn shots() -> impl Iterator<Item = &'static str> {
     fixture::SHOTS.iter().map(|shot| shot.name)
 }
-pub use app::{Channel, Hooks, Message, PrHook};
+pub use app::{Channel, Hooks, Message, PrHook, ReviewOutcome};
 pub use theme::{Mode, Theme};
 
 /// Run the interface until the user quits.

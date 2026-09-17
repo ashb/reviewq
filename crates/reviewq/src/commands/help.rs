@@ -58,6 +58,11 @@ const TOPICS: &[Topic] = &[
         aliases: &["list", "next", "show", "sync", "review", "doctor"],
     },
     Topic {
+        name: "history",
+        what: "what activity is retained, how it syncs, and explicit cleanup",
+        aliases: &["activity", "clean"],
+    },
+    Topic {
         name: "keys",
         what: "the interface: its keys, its lists, and what the marks mean",
         aliases: &["tui", "interface", "marks"],
@@ -247,7 +252,7 @@ fn print_page(title: &str, what: &str, page: &str, theme: ThemeMode, output: &im
         ThemeMode::Dark => reviewq_tui::Mode::Dark,
         ThemeMode::Light => reviewq_tui::Mode::Light,
     };
-    page_out(
+    super::page_out(
         output,
         &man_page(
             title,
@@ -454,107 +459,6 @@ enum Block {
     Shot(String),
 }
 
-/// Hand the finished page to a pager, or print it.
-///
-/// Whether it is worth paging at all is the pager's call, not this one's:
-/// `less -F` quits if the whole thing fits on a screen, which is how `git help`
-/// manages to page a long page and not a short one without measuring either.
-/// So `LESS` is defaulted to `FRX` when the environment has not set it — `F` for
-/// that, `R` so the colours survive, `X` so a page that did fit is still on
-/// screen after the pager exits.
-///
-/// Never for a pipe or a file: paging output nobody is watching would hang.
-fn page_out(output: &impl Output, text: &str) {
-    use std::io::Write as _;
-
-    if !output.stdout_is_terminal() {
-        output.write(crate::colour::plain(text));
-        return;
-    }
-
-    let Some(argv) = pager_argv(std::env::var_os("REVIEWQ_PAGER"), std::env::var_os("PAGER"))
-    else {
-        output.write(crate::colour::plain(text));
-        return;
-    };
-
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]).stdin(std::process::Stdio::piped());
-    for (name, value) in less_defaults(std::env::var_os("LESS"), std::env::var_os("LESSUTFCHARDEF"))
-    {
-        command.env(name, value);
-    }
-
-    // A pager that will not start is no reason to withhold the documentation.
-    let Ok(mut child) = command.spawn() else {
-        output.write(crate::colour::plain(text));
-        return;
-    };
-    if let Some(stdin) = child.stdin.as_mut() {
-        // `q` before the end closes the pipe, which is a reader who has read
-        // enough rather than a failure.
-        let _ = stdin.write_all(text.as_bytes());
-    }
-    drop(child.stdin.take());
-    let _ = child.wait();
-}
-
-/// What to put in the pager's environment, for the settings `less` needs and
-/// almost nobody has.
-///
-/// `LESS=R` is the colour, and nothing else. Not `F`, which quits when the page
-/// fits one screen, and not `X`, which leaves it in the scrollback: those make a
-/// short page print like output, and these pages are not output — they are man
-/// pages, and a man page opens in the pager however short it is. Half of one
-/// convention and half of the other would be the worst of both.
-///
-/// `LESSUTFCHARDEF` is the one that is not obvious. `less` decides for itself
-/// which codepoints are printable, and everything in a Private Use Area is not
-/// — so the mark for a deferred PR arrives as the literal text `<U+F04B2>`,
-/// which is a worse answer than the box a missing font would have drawn. The
-/// three ranges are the BMP's private area and the two supplementary planes
-/// where Nerd Fonts keeps the rest; `p` says each is an ordinary, single-width,
-/// printable character.
-///
-/// Neither is set when the environment already says something: a reader with
-/// opinions about their pager has them for a reason.
-fn less_defaults(
-    less: Option<std::ffi::OsString>,
-    chardef: Option<std::ffi::OsString>,
-) -> Vec<(&'static str, &'static str)> {
-    let mut out = Vec::new();
-    if less.is_none() {
-        out.push(("LESS", "R"));
-    }
-    if chardef.is_none() {
-        out.push((
-            "LESSUTFCHARDEF",
-            "E000-F8FF:p,F0000-FFFFD:p,100000-10FFFD:p",
-        ));
-    }
-    out
-}
-
-/// The pager to run, as a program and its arguments.
-///
-/// `REVIEWQ_PAGER` first, then `PAGER`, then `less` — the shape `git` uses, with
-/// its own variable ahead of the general one so a pager chosen for this tool
-/// does not have to be chosen for every tool. Split on whitespace, so `PAGER`
-/// may carry flags; empty, or the conventional `cat`-for-nothing spelling of
-/// `PAGER=`, means print it.
-fn pager_argv(
-    reviewq: Option<std::ffi::OsString>,
-    pager: Option<std::ffi::OsString>,
-) -> Option<Vec<String>> {
-    let chosen = reviewq
-        .or(pager)
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "less".to_string());
-
-    let argv: Vec<String> = chosen.split_whitespace().map(str::to_string).collect();
-    (!argv.is_empty()).then_some(argv)
-}
-
 /// The width to draw a screen at: the terminal's, up to the size the pictures
 /// are composed for, and never so narrow that the interface has no room to be
 /// itself.
@@ -579,6 +483,7 @@ fn width(output: &impl Output) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::colour::testing::FakeOutput;
 
     #[test]
     fn every_topic_names_a_section_the_readme_actually_has() {
@@ -615,6 +520,29 @@ mod tests {
                 .contains("[[project.interest]]")
         );
         assert!(section("keys").expect("keys").contains("`W`"));
+    }
+
+    #[test]
+    fn history_commands_route_to_the_rendered_history_page() {
+        for asked in ["history", "clean"] {
+            let output = FakeOutput::new(false);
+
+            run(
+                ThemeMode::Dark,
+                &HelpArgs {
+                    topic: Some(asked.to_string()),
+                },
+                &output,
+            )
+            .expect("history help");
+
+            let page = output.stdout.borrow();
+            assert!(page.starts_with("REVIEWQ-HISTORY(1)"), "{asked}: {page}");
+            assert!(
+                page.contains("reviewq history clean --older-than"),
+                "{asked}: {page}"
+            );
+        }
     }
 
     #[test]
@@ -779,57 +707,6 @@ mod tests {
             "{page}"
         );
         assert!(!page.contains("```"), "the fences are markup: {page}");
-    }
-
-    #[test]
-    fn the_pager_is_this_tools_first_then_the_general_one_then_less() {
-        use std::ffi::OsString;
-        let os = |s: &str| Some(OsString::from(s));
-
-        assert_eq!(pager_argv(None, None).expect("a default"), vec!["less"]);
-        assert_eq!(pager_argv(None, os("bat")).expect("PAGER"), vec!["bat"]);
-        assert_eq!(
-            pager_argv(os("less -S"), os("bat")).expect("ours wins"),
-            vec!["less", "-S"],
-            "and flags come with it"
-        );
-        // `PAGER=` is how a shell says "no pager"; honouring it means printing.
-        assert_eq!(pager_argv(None, os("")), None);
-        assert_eq!(pager_argv(os("   "), None), None);
-    }
-
-    #[test]
-    fn the_pager_is_told_that_a_private_use_glyph_is_printable() {
-        use std::ffi::OsString;
-
-        let defaults = less_defaults(None, None);
-        assert_eq!(defaults.len(), 2, "{defaults:?}");
-        assert_eq!(
-            defaults
-                .iter()
-                .find(|(name, _)| *name == "LESS")
-                .expect("the pager default")
-                .1,
-            "R",
-            "colour, and no `F`: a man page pages however short it is"
-        );
-        let chardef = defaults
-            .iter()
-            .find(|(name, _)| *name == "LESSUTFCHARDEF")
-            .expect("the charset default");
-        // U+F04B2 is the deferred mark, and it lives in this plane. Without the
-        // range, `less` prints the text `<U+F04B2>` in its place.
-        assert!(chardef.1.contains("F0000-FFFFD:p"), "{chardef:?}");
-
-        // A reader with their own settings keeps them, both of them separately.
-        assert_eq!(
-            less_defaults(Some(OsString::from("R")), None)
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>(),
-            vec!["LESSUTFCHARDEF"]
-        );
-        assert!(less_defaults(Some(OsString::from("R")), Some(OsString::from("x"))).is_empty());
     }
 
     #[test]

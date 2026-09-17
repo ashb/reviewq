@@ -16,8 +16,8 @@ reviewq  2 on the queue
 │                                           ││ Attention                                           █
 │                                           ││   p2  @kaxil mentioned you                          █
 │                                           ││                                                     █
-│                                           ││ Description                                         █
-│                                           ││ ## What this does                                   █
+│                                           ││ Description                                         ║
+│                                           ││ ## What this does                                   ║
 │                                           ││                                                     ║
 │                                           ││ Adds a deferrable flag to S3KeySensor.              ║
 │                                           ││                                                     ║
