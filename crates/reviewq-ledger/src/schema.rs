@@ -1,6 +1,52 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    activity_events (id) {
+        id -> BigInt,
+        repo_id -> BigInt,
+        pr_number -> BigInt,
+        source -> Text,
+        kind -> Text,
+        occurred_at -> Text,
+        recorded_at -> Text,
+        actor -> Nullable<Text>,
+        head_sha -> Nullable<Text>,
+        external_id -> Nullable<Text>,
+        permalink -> Nullable<Text>,
+        payload -> Text,
+        observed_transition -> Bool,
+        relation -> Text,
+    }
+}
+
+diesel::table! {
+    activity_retention (singleton) {
+        singleton -> BigInt,
+        cutoff -> Text,
+    }
+}
+
+diesel::table! {
+    activity_sync_state (repo_id, pr_number) {
+        repo_id -> BigInt,
+        pr_number -> BigInt,
+        cursor -> Nullable<Text>,
+        completed_at -> Nullable<Text>,
+        next_rate_limit -> Nullable<Text>,
+        incremental_cursor -> Nullable<Text>,
+        incremental_next_rate_limit -> Nullable<Text>,
+        requested_generation -> BigInt,
+        completed_generation -> BigInt,
+        incremental_generation -> Nullable<BigInt>,
+        incremental_revision -> BigInt,
+        incremental_stop_at -> Nullable<Text>,
+        covered_through -> Nullable<Text>,
+        backfill_started_at -> Nullable<Text>,
+        incremental_started_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     attention (repo_id, pr_number, reason) {
         repo_id -> BigInt,
         pr_number -> BigInt,
@@ -30,6 +76,7 @@ diesel::table! {
         muted -> Bool,
         deferred_at -> Nullable<Text>,
         done_at -> Nullable<Text>,
+        last_review_event_id -> Nullable<BigInt>,
     }
 }
 
@@ -56,6 +103,7 @@ diesel::table! {
         after_merge -> Bool,
         untracked_at -> Nullable<Text>,
         created_at -> Nullable<Text>,
+        state_changed_at -> Nullable<Text>,
     }
 }
 
@@ -97,13 +145,26 @@ diesel::table! {
         last_comment_author -> Nullable<Text>,
         last_comment_at -> Nullable<Text>,
         my_last_comment_at -> Nullable<Text>,
+        resolution_event_id -> Nullable<BigInt>,
     }
 }
 
 diesel::joinable!(labels -> repos (repo_id));
+diesel::joinable!(my_state -> activity_events (last_review_event_id));
 diesel::joinable!(prs -> repos (repo_id));
 diesel::joinable!(sync_meta -> repos (repo_id));
+diesel::joinable!(threads -> activity_events (resolution_event_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
-    attention, labels, my_state, prs, repos, reviewers, sync_meta, threads,
+    activity_events,
+    activity_retention,
+    activity_sync_state,
+    attention,
+    labels,
+    my_state,
+    prs,
+    repos,
+    reviewers,
+    sync_meta,
+    threads,
 );

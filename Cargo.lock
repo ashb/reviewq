@@ -2541,6 +2541,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "diesel",
  "jiff",
  "portable-pty",
  "reviewq-app",
@@ -2565,7 +2566,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "diesel",
  "etcetera",
+ "futures",
  "jiff",
  "reviewq-core",
  "reviewq-forge",
@@ -2626,6 +2629,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "diesel",
  "insta",
  "jiff",
  "ratatui",

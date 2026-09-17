@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 /// Parse a PR number, tolerating a leading `#` so a number copied straight out
 /// of `list`/`show` output pastes in unedited.
-fn pr_number(s: &str) -> Result<u64, String> {
+pub(crate) fn pr_number(s: &str) -> Result<u64, String> {
     s.strip_prefix('#')
         .unwrap_or(s)
         .parse()
@@ -131,6 +131,9 @@ pub enum Command {
     /// imply `done`.
     Review(NumberArgs),
 
+    /// Read or explicitly clean retained activity history.
+    History(HistoryArgs),
+
     /// Browse the queue interactively.
     Tui,
 
@@ -238,6 +241,45 @@ pub struct SnoozeArgs {
 
     /// How long to suppress it, e.g. `3d`, `12h`, `1w2d`.
     pub duration: String,
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct HistoryArgs {
+    /// Include other people's activity for the selected PR.
+    #[arg(long, requires = "target")]
+    pub all: bool,
+
+    /// A PR number or provider-owned pull-request URL. Omit for global history.
+    pub target: Option<String>,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(subcommand)]
+    pub operation: Option<HistoryOperation>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HistoryOperation {
+    /// Remove individual events strictly older than a duration.
+    Clean(HistoryCleanArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryCleanArgs {
+    /// Remove events strictly older than this duration, e.g. `52w`.
+    #[arg(long, value_name = "DURATION")]
+    pub older_than: String,
+
+    /// Report the exact selection without deleting it.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip interactive confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[cfg(test)]
@@ -363,5 +405,78 @@ mod tests {
             err.to_string()
                 .contains("doesn't look like a pull request URL")
         );
+    }
+
+    #[test]
+    fn all_history_requires_a_pull_request_target() {
+        assert!(Cli::try_parse_from(["reviewq", "history", "--all"]).is_err());
+        let parsed = Cli::try_parse_from(["reviewq", "history", "42", "--all"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::History(HistoryArgs { all: true, .. })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "reviewq",
+                "history",
+                "clean",
+                "--all",
+                "--older-than",
+                "52w"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn history_distinguishes_targets_from_operations() {
+        let read = Cli::try_parse_from(["reviewq", "history", "#42", "--json"])
+            .expect("history target parses");
+        assert!(matches!(
+            read.command,
+            Command::History(HistoryArgs {
+                all: false,
+                target: Some(target),
+                operation: None,
+                json: true,
+            }) if target == "#42"
+        ));
+
+        let former_backfill =
+            Cli::try_parse_from(["reviewq", "history", "backfill"]).expect("history target parses");
+        assert!(matches!(
+            former_backfill.command,
+            Command::History(HistoryArgs {
+                all: false,
+                target: Some(target),
+                operation: None,
+                json: false,
+            }) if target == "backfill"
+        ));
+
+        let clean = Cli::try_parse_from([
+            "reviewq",
+            "history",
+            "clean",
+            "--older-than",
+            "52w",
+            "--dry-run",
+        ])
+        .expect("cleanup parses");
+        assert!(matches!(
+            clean.command,
+            Command::History(HistoryArgs {
+                all: false,
+                target: None,
+                operation: Some(HistoryOperation::Clean(HistoryCleanArgs {
+                    older_than,
+                    dry_run: true,
+                    yes: false,
+                })),
+                json: false,
+            }) if older_than == "52w"
+        ));
+
+        assert!(Cli::try_parse_from(["reviewq", "history", "42", "backfill"]).is_err());
     }
 }

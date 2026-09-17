@@ -1,0 +1,49 @@
+[
+  {
+    "repository": {
+      "pullRequest": {
+        "url": "https://github.example/pull/17",
+        "reviews": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "review cursor 1", "hasPreviousPage": false },
+          "nodes": [
+            { "id": "review-commented", "author": { "login": "ashb" }, "state": "COMMENTED", "submittedAt": "2026-08-05T11:40:00Z", "commit": { "oid": "sha-commented" }, "url": "https://github.example/reviews/commented" },
+            { "id": "review-unknown", "author": { "login": "ashb" }, "state": "NEEDS_SECURITY_SIGNOFF", "submittedAt": "2026-08-05T11:30:00Z", "commit": { "oid": "sha-unknown" }, "url": "https://github.example/reviews/unknown" },
+            { "id": "review-changes", "author": { "login": "ashb" }, "state": "CHANGES_REQUESTED", "submittedAt": "2026-08-05T11:20:00Z", "commit": { "oid": "sha-changes" }, "url": "https://github.example/reviews/changes" },
+            { "id": "review-approved", "author": { "login": "ashb" }, "state": "APPROVED", "submittedAt": "2026-08-05T11:10:00Z", "commit": { "oid": "sha-approved" }, "url": "https://github.example/reviews/approved" },
+            { "id": "review-other-user", "body": "please @AshB take a look", "author": { "login": "someone-else" }, "state": "APPROVED", "submittedAt": "2026-08-05T11:00:00Z", "commit": { "oid": "sha-not-mine" }, "url": "https://github.example/reviews/not-mine" }
+          ]
+        },
+        "comments": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "comment cursor 1", "hasPreviousPage": false },
+          "nodes": [
+            { "id": "issue-comment-10", "author": { "login": "ashb" }, "createdAt": "2026-08-05T10:00:00Z", "url": "https://github.example/comments/10" },
+            { "id": "issue-comment-other-user", "body": "example `@ashb`", "author": { "login": "someone-else" }, "createdAt": "2026-08-05T09:30:00Z", "url": "https://github.example/comments/not-mine" },
+            { "id": "issue-comment-8", "author": { "login": "ashb" }, "createdAt": "2026-08-05T08:00:00Z", "url": "https://github.example/comments/8" }
+          ]
+        },
+        "timelineItems": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "timeline cursor 1", "hasPreviousPage": true, "startCursor": "timeline cursor 1" },
+          "nodes": [
+            { "__typename": "ClosedEvent", "id": "closed-event-9", "actor": { "login": "closer" }, "createdAt": "2026-08-05T09:00:00Z" }
+          ]
+        }
+      }
+    },
+    "rateLimit": { "limit": 5000, "cost": 8, "remaining": 4992, "resetAt": "2026-08-11T13:00:00Z" }
+  },
+  {
+    "repository": {
+      "pullRequest": {
+        "url": "https://github.example/pull/17",
+        "timelineItems": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "timeline cursor 2", "hasPreviousPage": false },
+          "nodes": [
+            { "__typename": "ReopenedEvent", "id": "reopened-event-7", "actor": { "login": "reopener" }, "createdAt": "2026-08-05T07:00:00Z" },
+            { "__typename": "MergedEvent", "id": "merged-event-6", "actor": { "login": "merger" }, "createdAt": "2026-08-05T06:00:00Z" }
+          ]
+        }
+      }
+    },
+    "rateLimit": { "limit": 5000, "cost": 4, "remaining": 4988, "resetAt": "2026-08-11T13:00:00Z" }
+  }
+]

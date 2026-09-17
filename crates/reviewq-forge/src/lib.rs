@@ -15,7 +15,10 @@ pub mod github;
 pub use host::{
     DEFAULT_HOST, ForgeHost, ForgeTable, Token, TokenSource, resolve_host, resolve_token,
 };
-pub use types::{FetchedPr, LabelColour, PrDetail, RateLimit, SEARCH_CAP, SweepPage, Viewer};
+pub use types::{
+    ActivityRateLimit, FetchedPr, ForgeActivity, ForgeActivityPage, LabelColour, PrDetail,
+    RateLimit, RateLimitUnit, SEARCH_CAP, SweepPage, Viewer,
+};
 
 use async_trait::async_trait;
 
@@ -53,7 +56,7 @@ pub enum ForgeError {
     NoAdapter(String),
 
     /// The request could not be made or its answer not understood.
-    #[error("{doing}")]
+    #[error("{doing}: {source}")]
     Unreachable {
         /// What was being attempted.
         doing: String,
@@ -65,6 +68,24 @@ pub enum ForgeError {
 
 /// Every fallible forge operation fails with a [`ForgeError`].
 pub type Result<T> = std::result::Result<T, ForgeError>;
+
+#[cfg(test)]
+mod tests {
+    use super::ForgeError;
+
+    #[test]
+    fn unreachable_errors_display_the_underlying_cause() {
+        let error = ForgeError::Unreachable {
+            doing: "reading forge activity".into(),
+            source: "response field `rateLimit` was missing".into(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "reading forge activity: response field `rateLimit` was missing"
+        );
+    }
+}
 
 /// One forge's operations. Each is roughly a single logical request; the
 /// implementation handles pagination and wire formats.
@@ -117,6 +138,28 @@ pub trait Forge: Send + Sync {
         number: u64,
         login: &str,
     ) -> Result<Option<PrDetail>>;
+
+    /// The provider budget pool consumed by a fresh activity traversal's first
+    /// request. Resumed traversals use [`ForgeActivityPage::next_rate_limit`]
+    /// from their saved checkpoint instead.
+    fn initial_activity_rate_limit(&self) -> RateLimitUnit;
+
+    /// One page of activity from all actors and PR lifecycle transitions.
+    /// `cursor` is a provider-owned opaque checkpoint returned by the previous
+    /// call, or `None` for the first page.
+    ///
+    /// The activities emitted by successive pages must concatenate into one
+    /// globally newest-first sequence. Incremental ingestion relies on that
+    /// guarantee to stop at the first retained provider event without skipping
+    /// an older unseen event.
+    async fn fetch_pr_activity(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+        actor: &str,
+        cursor: Option<&str>,
+    ) -> Result<ForgeActivityPage>;
 
     /// Every label the repo defines, with its colour.
     ///

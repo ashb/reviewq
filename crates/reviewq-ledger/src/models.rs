@@ -36,6 +36,7 @@ pub(super) struct Pr {
     pub(super) files_truncated: bool,
     pub(super) base_ref: String,
     pub(super) created_at: Option<DbTimestamp>,
+    pub(super) state_changed_at: Option<DbTimestamp>,
 }
 
 impl TryFrom<&PrSnapshot> for Pr {
@@ -64,6 +65,7 @@ impl TryFrom<&PrSnapshot> for Pr {
             files_truncated: pr.files_truncated,
             base_ref: pr.base_ref.clone(),
             created_at: pr.created_at.map(DbTimestamp::from),
+            state_changed_at: pr.state_changed_at.map(DbTimestamp::from),
         })
     }
 }
@@ -90,7 +92,6 @@ pub(super) struct PrSummary<'a> {
     pub(super) author_association: &'a str,
     pub(super) head_sha: &'a str,
     pub(super) is_draft: bool,
-    pub(super) state: &'a DbPrState,
     pub(super) updated_at: &'a DbTimestamp,
     pub(super) labels: &'a str,
     #[diesel(treat_none_as_null = true)]
@@ -158,6 +159,7 @@ pub(super) struct ThreadRecord {
     pub(super) last_comment_author: Option<String>,
     pub(super) last_comment_at: Option<DbTimestamp>,
     pub(super) my_last_comment_at: Option<DbTimestamp>,
+    pub(super) resolution_event_id: Option<crate::ActivityEventId>,
 }
 
 #[derive(Insertable, Queryable, Selectable)]

@@ -25,9 +25,13 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+#[cfg(test)]
+use reviewq_core::model::{ActivityKind, ActivityPayload, ActivitySource, ReviewResult};
 use reviewq_core::model::{
     Attention, AttentionReason, MyState, PrSnapshot, PrState, ReviewerVerdict, ThreadState, Verdict,
 };
+#[cfg(test)]
+use reviewq_ledger::NewActivityEvent;
 use reviewq_ledger::{Ledger, RepoKey, TrackedReason};
 
 use crate::app::{App, Overlay, Unqueued, fixture_config};
@@ -494,8 +498,40 @@ fn reviewer(login: &str, verdict: Verdict, at: &str) -> ReviewerVerdict {
     }
 }
 
+#[cfg(test)]
+fn activity(kind: ActivityKind, occurred_at: &str, payload: ActivityPayload) -> NewActivityEvent {
+    NewActivityEvent {
+        relation: reviewq_core::model::ActivityRelation::Own,
+        source: if matches!(
+            kind,
+            ActivityKind::ReviewSubmitted
+                | ActivityKind::Commented
+                | ActivityKind::ReviewThreadCommented
+                | ActivityKind::PrClosed
+                | ActivityKind::PrReopened
+                | ActivityKind::PrMerged
+        ) {
+            ActivitySource::Forge
+        } else {
+            ActivitySource::Local
+        },
+        kind,
+        occurred_at: ts(occurred_at),
+        recorded_at: now(),
+        actor: Some("ashb".into()),
+        head_sha: None,
+        external_id: None,
+        permalink: None,
+        payload,
+    }
+}
+
 /// A ledger holding [`fixtures`].
 fn ledger() -> Ledger {
+    seeded_ledger(true)
+}
+
+fn seeded_ledger(record_deferred_activity: bool) -> Ledger {
     let ledger = Ledger::open_in_memory().expect("ledger");
     let repo_id = ledger.ensure_repo(&repo()).expect("repo");
     let palette: Vec<(String, String)> = PALETTE
@@ -517,6 +553,7 @@ fn ledger() -> Ledger {
             state: f.state,
             updated_at: ts(f.since),
             created_at: Some(ts(f.opened)),
+            state_changed_at: None,
             labels: f.labels.iter().map(|l| (*l).to_string()).collect(),
             milestone: None,
             files: None,
@@ -552,18 +589,107 @@ fn ledger() -> Ledger {
             ledger.set_done(repo_id, f.number, sha, at).expect("done");
         }
         if f.deferred {
-            reviewq_app::actions::set_deferred(&ledger, repo_id, f.number, true).expect("defer");
+            if record_deferred_activity {
+                reviewq_app::actions::set_deferred(&ledger, repo_id, f.number, true)
+                    .expect("defer");
+            } else {
+                ledger
+                    .set_deferred_at(repo_id, f.number, f.mine.deferred_at)
+                    .expect("defer");
+            }
         }
         if f.muted {
-            reviewq_app::actions::set_muted(&ledger, repo_id, f.number, true).expect("mute");
+            ledger.set_muted(repo_id, f.number, true).expect("mute");
         }
     }
+    ledger
+}
+
+/// The regular fixture plus retained activity for detail-history snapshots.
+#[cfg(test)]
+fn ledger_with_activity(incomplete: bool) -> Ledger {
+    let ledger = seeded_ledger(false);
+    let repo_id = ledger.ensure_repo(&repo()).expect("repo");
+    let events = [
+        activity(
+            ActivityKind::PrClosed,
+            "2026-08-12T02:00:00Z",
+            ActivityPayload::StateChanged {
+                from: PrState::Open,
+                to: PrState::Closed,
+            },
+        ),
+        activity(
+            ActivityKind::ReviewThreadCommented,
+            "2026-08-12T03:00:00Z",
+            ActivityPayload::ReviewThreadCommented {
+                thread_id: Some("thread-7".into()),
+            },
+        ),
+        activity(
+            ActivityKind::Done,
+            "2026-08-12T04:00:00Z",
+            ActivityPayload::None,
+        ),
+        activity(
+            ActivityKind::ReviewStarted,
+            "2026-08-12T05:00:00Z",
+            ActivityPayload::None,
+        ),
+        activity(
+            ActivityKind::ReviewSubmitted,
+            "2026-08-12T06:00:00Z",
+            ActivityPayload::ReviewSubmitted {
+                result: ReviewResult::ChangesRequested,
+                reviewed_sha: Some("abcdef123456".into()),
+            },
+        ),
+        activity(
+            ActivityKind::Commented,
+            "2026-08-12T07:00:00Z",
+            ActivityPayload::None,
+        ),
+        activity(
+            ActivityKind::PrMerged,
+            "2026-08-12T08:00:00Z",
+            ActivityPayload::StateChanged {
+                from: PrState::Open,
+                to: PrState::Merged,
+            },
+        ),
+    ];
+    for event in &events {
+        ledger
+            .record_activity(repo_id, 70135, event)
+            .expect("activity");
+    }
+    ledger
+        .commit_activity_page(
+            repo_id,
+            70135,
+            None,
+            &[],
+            incomplete.then_some("next-page"),
+            None,
+            now(),
+        )
+        .expect("backfill progress");
     ledger
 }
 
 /// An interface over the fixture, ready to be drawn.
 pub(crate) fn app(mode: Mode) -> App {
     App::with_ledger(Theme::new(mode), ledger(), fixture_config()).expect("app")
+}
+
+#[cfg(test)]
+pub(crate) fn app_with_activity(mode: Mode, incomplete: bool) -> App {
+    App::with_ledger(
+        Theme::new(mode),
+        ledger_with_activity(incomplete),
+        fixture_config(),
+    )
+    .expect("app")
 }
 
 /// One picture: what it is called, and what the interface is doing in it.
@@ -653,6 +779,7 @@ fn peeked() -> reviewq_app::peek::Peeked {
                 state: PrState::Merged,
                 updated_at: ts("2026-08-04T15:30:00Z"),
                 created_at: Some(ts("2026-07-16T08:40:00Z")),
+                state_changed_at: None,
                 labels: vec![],
                 milestone: None,
                 files: None,

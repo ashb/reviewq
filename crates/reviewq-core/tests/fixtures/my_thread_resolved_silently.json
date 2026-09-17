@@ -1,5 +1,5 @@
 {
-  "description": "Someone resolved my thread without replying: resolved-unanswered, which only an explicit ack clears.",
+  "description": "Someone resolved my thread without replying: resolved-unanswered, awaiting a review or explicit acknowledgment.",
   "now": "2026-08-05T12:00:00Z",
   "pr": {
     "number": 44955,
@@ -19,6 +19,9 @@
     "last_reviewed_sha": "aabbccddeeff00112233445566778899aabbccdd",
     "last_verdict": "CHANGES_REQUESTED",
     "last_action_at": "2026-08-02T14:20:00Z"
+  },
+  "ctx": {
+    "resolutions": [{"thread_id": "PRRT_kwDOABCDEF4AgHiJkL", "at": "2026-08-05T07:05:00Z"}]
   },
   "threads": [
     {
