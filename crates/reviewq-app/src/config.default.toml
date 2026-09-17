@@ -175,6 +175,11 @@ theme = "dark"
 # draw, or with "" to show the branch name on its own.
 #   [output.icons]
 #   branch = "->"
+#   gfm_task_checked = "✅"
+#   gfm_task_unchecked = "☐"
+# Task-list markers are padded to the wider marker's terminal-cell width so
+# their text aligns. Use alternatives such as "[x]" and "[ ]" if your font
+# displays the defaults at different widths.
 
 # The glyphs before a GFM alert's heading in a PR description — `> [!NOTE]`
 # and its four siblings. Each defaults to a Nerd Font codepoint, which a

@@ -77,8 +77,8 @@ mod tests {
             let (buffer, _) = draw(shot, WIDTH, Mode::Dark);
             println!("\n=== {} ===", shot.name);
             for y in 0..shot.height {
-                let row: String = (0..WIDTH)
-                    .map(|x| buffer[(x, y)].symbol())
+                let row: String = crate::ansi::row_cells(&buffer, y)
+                    .map(|(_, cell)| cell.symbol())
                     .collect::<String>()
                     .trim_end()
                     .to_string();

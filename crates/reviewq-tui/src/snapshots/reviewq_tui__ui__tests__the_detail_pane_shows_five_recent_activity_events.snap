@@ -1,5 +1,6 @@
 ---
 source: crates/reviewq-tui/src/ui.rs
+assertion_line: 2057
 expression: shown
 ---
 reviewq  9 on the queue
@@ -32,12 +33,12 @@ reviewq  9 on the queue
 │                                           ││ too, gated on the new flag rather than a second     █
 │                                           ││ operator class.                                     █
 │                                           ││                                                     █
-│                                           ││ - [x] Trigger and sensor share one poke             █
+│                                           ││ - ✅ Trigger and sensor share one poke              █
 │                                           ││ implementation                                      █
-│                                           ││ - [x] Tests for both modes                          █
-│                                           ││ - [x] Backport label added — this lands on 3.1 as   █
+│                                           ││ - ✅ Tests for both modes                           █
+│                                           ││ - ✅ Backport label added — this lands on 3.1 as    █
 │                                           ││ well as main                                        █
-│                                           ││ - [ ] Docs updated — waiting on #70344              █
+│                                           ││ - ☐  Docs updated — waiting on #70344               █
 │                                           ││                                                     █
 │                                           ││ Follow-up to the executor work in #69982.           █
 │                                           ││                                                     █

@@ -13,7 +13,7 @@
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use reviewq_app::config::ThemeMode;
+use reviewq_app::config::{Output as OutputConfig, ThemeMode};
 
 use crate::cli::HelpArgs;
 use crate::colour::Output;
@@ -74,13 +74,13 @@ const TOPICS: &[Topic] = &[
     },
 ];
 
-pub fn run(theme: ThemeMode, args: &HelpArgs, output: &impl Output) -> Result<ExitCode> {
+pub fn run(config: &OutputConfig, args: &HelpArgs, output: &impl Output) -> Result<ExitCode> {
     let Some(asked) = args.topic.as_deref() else {
         print_page(
             "reviewq",
             "a deterministic pull-request review queue",
             &index(),
-            theme,
+            config,
             output,
         );
         return Ok(ExitCode::SUCCESS);
@@ -106,7 +106,7 @@ pub fn run(theme: ThemeMode, args: &HelpArgs, output: &impl Output) -> Result<Ex
         &format!("reviewq-{}", topic.name),
         topic.what,
         &page,
-        theme,
+        config,
         output,
     );
     Ok(ExitCode::SUCCESS)
@@ -247,18 +247,14 @@ fn shot_name(line: &str) -> Option<&str> {
 /// Colour only for a terminal: piped into `less` without `-R`, or into a file,
 /// escapes are noise. `NO_COLOR` is honoured for the same reason it is
 /// everywhere else — see <https://no-color.org>.
-fn print_page(title: &str, what: &str, page: &str, theme: ThemeMode, output: &impl Output) {
-    let mode = match theme {
-        ThemeMode::Dark => reviewq_tui::Mode::Dark,
-        ThemeMode::Light => reviewq_tui::Mode::Light,
-    };
+fn print_page(title: &str, what: &str, page: &str, config: &OutputConfig, output: &impl Output) {
     super::page_out(
         output,
         &man_page(
             title,
             what,
             page,
-            mode,
+            config,
             width(output),
             shot_width(output),
             output.colour_enabled(),
@@ -276,11 +272,15 @@ fn man_page(
     title: &str,
     what: &str,
     page: &str,
-    mode: reviewq_tui::Mode,
+    config: &OutputConfig,
     width: u16,
     shot_width: u16,
     colour: bool,
 ) -> String {
+    let mode = match config.theme {
+        ThemeMode::Dark => reviewq_tui::Mode::Dark,
+        ThemeMode::Light => reviewq_tui::Mode::Light,
+    };
     // roff's own measure: the body at seven columns, every heading out at the
     // margin. A page's own headings are sections here, not `.SS` subsections —
     // the three-column indent belongs to a definition list, and using it for a
@@ -293,11 +293,12 @@ fn man_page(
     const SCREEN: &str = "          ";
 
     let render = |md: &str, indent: &str| {
-        let body = reviewq_tui::markdown_to_ansi(
+        let body = reviewq_tui::markdown_to_ansi_with_icons(
             md,
             mode,
             width.saturating_sub(indent.len() as u16).max(20),
             colour,
+            &config.icons,
         );
         body.lines()
             .map(|line| match line.is_empty() {
@@ -528,7 +529,7 @@ mod tests {
             let output = FakeOutput::new(false);
 
             run(
-                ThemeMode::Dark,
+                &OutputConfig::default(),
                 &HelpArgs {
                     topic: Some(asked.to_string()),
                 },
@@ -638,11 +639,31 @@ mod tests {
             &format!("reviewq-{}", found.name),
             found.what,
             &section(found.name).expect("a page"),
-            reviewq_tui::Mode::Dark,
+            &OutputConfig::default(),
             80,
             100,
             false,
         )
+    }
+
+    #[test]
+    fn help_uses_configured_task_markers() {
+        let mut config = OutputConfig::default();
+        config.icons.gfm_task_checked = "YES".into();
+        config.icons.gfm_task_unchecked = "NO".into();
+
+        let page = man_page(
+            "tasks",
+            "tasks",
+            "- [x] Done\n- [ ] Todo\n",
+            &config,
+            80,
+            100,
+            false,
+        );
+
+        assert!(page.contains("- YES Done"), "{page}");
+        assert!(page.contains("- NO  Todo"), "{page}");
     }
 
     #[test]

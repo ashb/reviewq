@@ -112,11 +112,11 @@ pub async fn dispatch(cli: Cli, output: &impl Output) -> Result<ExitCode> {
     // Before the config, and deliberately: the documentation is most wanted by
     // somebody whose config does not work, and a help page that refused to
     // print until the config parsed would be missing exactly then. It reads the
-    // config only for the palette, so not having one costs a colour scheme.
+    // config only for presentation; missing settings use their defaults.
     if let Command::Help(args) = &cli.command {
-        let theme = config::load(cli.config.as_deref())
-            .map_or(Default::default(), |loaded| loaded.config.output.theme);
-        return help::run(theme, args, output);
+        let presentation = config::load(cli.config.as_deref())
+            .map_or(Default::default(), |loaded| loaded.config.output);
+        return help::run(&presentation, args, output);
     }
 
     let loaded = config::load(cli.config.as_deref())?;

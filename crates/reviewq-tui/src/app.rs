@@ -3902,8 +3902,8 @@ mod loop_tests {
         let area = buffer.area();
         (0..area.height)
             .map(|y| {
-                (0..area.width)
-                    .map(|x| buffer[(x, y)].symbol())
+                crate::ansi::row_cells(buffer, y)
+                    .map(|(_, cell)| cell.symbol())
                     .collect::<String>()
                     .trim_end()
                     .to_string()

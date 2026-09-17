@@ -16,7 +16,7 @@
 //! needed is a handful of sequences, and the caller may be writing to a pipe, a
 //! file, or a string in a test rather than to a terminal at all.
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell, CellWidth as _};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
@@ -32,8 +32,26 @@ use crate::theme::{Mode, Rgb, Theme};
 /// the tables, the bullets and the wrapping are in the characters, not in the
 /// styling.
 pub fn markdown(md: &str, mode: Mode, width: u16, colour: bool) -> String {
+    markdown_with_icons(
+        md,
+        mode,
+        width,
+        colour,
+        &reviewq_app::config::Icons::default(),
+    )
+}
+
+/// Render Markdown with the configured glyphs for GFM task lists.
+pub fn markdown_with_icons(
+    md: &str,
+    mode: Mode,
+    width: u16,
+    colour: bool,
+    icons: &reviewq_app::config::Icons,
+) -> String {
     let theme = Theme::new(mode);
-    let md = reflow_wide_tables(md, width.max(20));
+    let md = crate::gfm_task_list::render_markers(md, icons);
+    let md = reflow_wide_tables(&md, width.max(20));
     let lines: Vec<Line<'_>> = tui_markdown::from_str(&md)
         .lines
         .into_iter()
@@ -325,6 +343,19 @@ pub(crate) fn buffer(buffer: &Buffer, theme: &Theme, colour: bool) -> String {
     out
 }
 
+pub(crate) fn row_cells(buffer: &Buffer, row: u16) -> impl Iterator<Item = (u16, &Cell)> {
+    let mut col = 0;
+    std::iter::from_fn(move || {
+        if col >= buffer.area.width {
+            return None;
+        }
+        let cell = &buffer[(col, row)];
+        let current = col;
+        col += cell.cell_width().max(1);
+        Some((current, cell))
+    })
+}
+
 /// One row of the buffer, its trailing blank cells dropped — a terminal has no
 /// use for a line padded to the full width, and a reader copying the output has
 /// less.
@@ -336,8 +367,7 @@ fn push_row(out: &mut String, buffer: &Buffer, row: u16, theme: &Theme, colour: 
         .map_or(0, |col| col + 1);
 
     let mut open: Option<Style> = None;
-    for col in 0..last {
-        let cell = &buffer[(col, row)];
+    for (_, cell) in row_cells(buffer, row).take_while(|(col, _)| *col < last) {
         let style = Style {
             fg: match cell.fg {
                 Color::Rgb(r, g, b) => Rgb { r, g, b },
@@ -503,6 +533,50 @@ mod tests {
         // a run of spaces.
         let rendered = markdown("Short.\n", Mode::Dark, 60, false);
         assert_eq!(rendered, "Short.\n");
+    }
+
+    #[test]
+    fn wide_glyphs_preserve_spacing_in_plain_and_coloured_output() {
+        for input in ["✅done", "✅ done", "✅  done", "✅☐界done", "done✅"] {
+            for colour in [false, true] {
+                let rendered = markdown(input, Mode::Dark, 60, colour);
+                assert_eq!(strip_escapes(&rendered), format!("{input}\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn configured_task_markers_align_the_item_text() {
+        for (checked, unchecked, expected) in [
+            ("✅", "☐", "- ✅ Done\n- ☐  Todo\n"),
+            ("✓", "界", "- ✓  Done\n- 界 Todo\n"),
+            ("[x]", "[ ]", "- [x] Done\n- [ ] Todo\n"),
+            ("", "", "- Done\n- Todo\n"),
+        ] {
+            let icons = reviewq_app::config::Icons {
+                gfm_task_checked: checked.into(),
+                gfm_task_unchecked: unchecked.into(),
+                ..Default::default()
+            };
+            for colour in [false, true] {
+                let rendered =
+                    markdown_with_icons("- [x] Done\n- [ ] Todo\n", Mode::Dark, 60, colour, &icons);
+                assert_eq!(strip_escapes(&rendered), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn github_task_lists_render_as_status_glyphs() {
+        let input = "- [ ] Waiting\n- [x] Done lower\n- [X] Done upper\n- [x]ylophone\n\n```text\n- [x] literal\n```\n";
+
+        let rendered = markdown(input, Mode::Dark, 60, false);
+
+        assert!(rendered.contains("- ☐  Waiting"), "{rendered:?}");
+        assert!(rendered.contains("- ✅ Done lower"), "{rendered:?}");
+        assert!(rendered.contains("- ✅ Done upper"), "{rendered:?}");
+        assert!(rendered.contains("- [x]ylophone"), "{rendered:?}");
+        assert!(rendered.contains("- [x] literal"), "{rendered:?}");
     }
 
     #[test]
