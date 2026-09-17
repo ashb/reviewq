@@ -14,6 +14,7 @@ mod app;
 #[cfg(test)]
 mod docs;
 mod fixture;
+mod mouse;
 mod svg;
 mod ui;
 

@@ -22,14 +22,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::mouse::{self, Action as MouseAction, ListRegion, WHEEL_ROWS};
 use anyhow::{Context, Result};
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEvent};
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use reviewq_app::config::Config;
 use reviewq_app::peek::Peeked;
 use reviewq_app::sync::{Refreshed, RepoSummary};
@@ -126,13 +125,6 @@ fn forbid_in_tests(what: &str) {
     #[cfg(test)]
     panic!("a test reached {what}");
 }
-
-/// Rows the wheel scrolls the detail pane per notch.
-///
-/// More than one, because a PR description is long and a terminal sends one event
-/// per notch. The queue moves a single row instead: each step there reloads the
-/// selected PR's detail, so three at a time would read two of them for nothing.
-const WHEEL_ROWS: isize = 3;
 
 use crate::keys::{self, Action};
 use crate::svg;
@@ -1363,84 +1355,58 @@ impl App {
         // the one overlay that can outgrow the screen, and a panel you can scroll
         // with the keys should scroll with the wheel wherever the pointer is.
         if let Overlay::Help { scroll } = self.overlay {
-            let rows = match mouse.kind {
-                MouseEventKind::ScrollUp => -WHEEL_ROWS,
-                MouseEventKind::ScrollDown => WHEEL_ROWS,
-                _ => return Ok(()),
-            };
-            self.overlay = Overlay::Help {
-                scroll: self.scrolled_help(scroll, rows),
-            };
+            if let Some(rows) = mouse::wheel_rows(mouse) {
+                self.overlay = Overlay::Help {
+                    scroll: self.scrolled_help(scroll, rows),
+                };
+            }
             return Ok(());
         }
         if !matches!(self.overlay, Overlay::None) {
             return Ok(());
         }
-        let at = Position::new(mouse.column, mouse.row);
-        let pane = if self.queue_area.contains(at) {
-            Focus::Queue
-        } else if self.detail_area.contains(at) {
-            Focus::Detail
-        } else {
-            return Ok(());
+        let list = ListRegion {
+            area: self.queue_area,
+            offset: self.queue_scroll,
+            len: self.queue.len(),
         };
-
-        // A peeked PR owns the screen the way the keyboard sees it, so the wheel
-        // scrolls what is being read wherever the pointer is. A click on the
-        // queue is the other thing somebody does to leave: those rows are drawn
-        // and clickable, and pointing at one is not ambiguous — it says put this
-        // away and take me to that. Ignoring it, as this did, leaves a reader
-        // clicking a row that never lights up.
-        if self.peek.is_some() {
-            return match mouse.kind {
-                MouseEventKind::ScrollUp => self.scroll_peek(-WHEEL_ROWS),
-                MouseEventKind::ScrollDown => self.scroll_peek(WHEEL_ROWS),
-                MouseEventKind::Down(MouseButton::Left) if pane == Focus::Queue => {
+        match mouse::action(mouse, list, self.detail_area) {
+            Some(MouseAction::Select(index)) => {
+                if self.peek.is_some() {
                     self.stop_peeking();
-                    self.select_row_at(mouse.row)
                 }
-                _ => Ok(()),
-            };
-        }
-
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.focus = pane;
-                if pane == Focus::Queue {
-                    self.select_row_at(mouse.row)?;
+                self.focus = Focus::Queue;
+                self.move_to(index)
+            }
+            Some(MouseAction::FocusList) => {
+                if self.peek.is_some() {
+                    self.stop_peeking();
+                }
+                self.focus = Focus::Queue;
+                Ok(())
+            }
+            Some(MouseAction::FocusDetail) => {
+                if self.peek.is_none() {
+                    self.focus = Focus::Detail;
                 }
                 Ok(())
             }
-            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                self.focus = pane;
-                let rows = match pane {
-                    Focus::Queue => 1,
-                    Focus::Detail => WHEEL_ROWS,
-                };
-                self.scroll(if mouse.kind == MouseEventKind::ScrollUp {
-                    -rows
-                } else {
-                    rows
-                })
+            Some(MouseAction::ScrollList(rows)) => {
+                if self.peek.is_some() {
+                    return self.scroll_peek(rows * WHEEL_ROWS);
+                }
+                self.focus = Focus::Queue;
+                self.move_by(rows)
             }
-            // Drags, releases, middle and right buttons: nothing here wants them.
-            _ => Ok(()),
+            Some(MouseAction::ScrollDetail(rows)) => {
+                if self.peek.is_some() {
+                    return self.scroll_peek(rows);
+                }
+                self.focus = Focus::Detail;
+                self.scroll_detail(rows)
+            }
+            None => Ok(()),
         }
-    }
-
-    /// Select the queue row drawn at screen row `row`.
-    ///
-    /// Screen rows map one-to-one onto queue entries — the list is a line per PR,
-    /// never wrapped — so the entry is the window's first plus how far down the
-    /// pane the click landed. Below the last PR is empty space, and a click there
-    /// is ignored rather than jumping to the end of the queue.
-    fn select_row_at(&mut self, row: u16) -> Result<()> {
-        let offset = row.saturating_sub(self.queue_area.y) as usize;
-        let index = self.queue_scroll.saturating_add(offset);
-        if index >= self.queue.len() {
-            return Ok(());
-        }
-        self.move_to(index)
     }
 
     /// Handle a key while an overlay owns the keyboard.
@@ -2632,6 +2598,7 @@ mod loop_tests {
     use super::*;
     use anyhow::bail;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::backend::TestBackend;
     use reviewq_core::model::MyState;
     use std::collections::VecDeque;
