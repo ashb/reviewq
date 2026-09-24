@@ -1751,6 +1751,7 @@ sensor = S3KeySensor(deferrable=True)
                     &[],
                     &[],
                     &[Attention {
+                        priority: false,
                         reason,
                         since: ts(since),
                     }],
@@ -1785,6 +1786,7 @@ sensor = S3KeySensor(deferrable=True)
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason: AttentionReason::Mention { by: "kaxil".into() },
                     since: ts("2026-08-10T09:00:00Z"),
                 }],
@@ -2326,6 +2328,7 @@ sensor = S3KeySensor(deferrable=True)
                     &[],
                     &[],
                     &[Attention {
+                        priority: false,
                         reason: AttentionReason::Mention { by: "kaxil".into() },
                         since: now,
                     }],
@@ -2447,6 +2450,7 @@ sensor = S3KeySensor(deferrable=True)
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason: AttentionReason::Mention {
                         by: "potiuk".into(),
                     },
@@ -2704,6 +2708,7 @@ sensor = S3KeySensor(deferrable=True)
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason: AttentionReason::Mention { by: "kaxil".into() },
                     since: ts("2026-08-10T09:00:00Z"),
                 }],

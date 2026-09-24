@@ -11,6 +11,8 @@ mod db_types;
 mod detail_activity;
 mod migrations;
 mod models;
+mod priority;
+pub use priority::TeamMembership;
 mod schema;
 
 use std::{cell::RefCell, collections::BTreeMap};
@@ -432,26 +434,8 @@ pub struct TrackedPr {
     pub my_state: MyState,
 }
 
-/// One stored attention reason, as read back from the `attention` table.
-///
-/// Carries the reason itself rather than a rendering of it: how a reason reads
-/// is the frontend's business, so a caller wanting text calls `to_string()` on
-/// [`reason`](Self::reason). That's also why a change to the wording in
-/// `reviewq-core` applies to already-stored rows — nothing prerendered is kept.
-#[derive(Debug, Clone)]
-pub struct AttentionRow {
-    /// The reason that fired, with its evidence.
-    pub reason: AttentionReason,
-    /// When the triggering event happened.
-    pub since: Timestamp,
-}
-
-impl AttentionRow {
-    /// Queue priority; 1 is most urgent.
-    pub fn priority(&self) -> u8 {
-        self.reason.priority()
-    }
-}
+/// One stored attention reason and its effective priority.
+pub type AttentionRow = Attention;
 
 /// Which tracked PRs a detail pass should fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,9 +466,8 @@ pub struct QueueItem {
     /// because a list wants to show what I have already done to each PR — and
     /// answering that one row at a time is what made it invisible.
     pub my_state: MyState,
-    /// `reviewq defer` was called and nothing has happened since (`top.since`
-    /// predates it): sorted after every non-deferred item regardless of
-    /// priority, but still shown rather than hidden.
+    /// No attention is newer than the last `reviewq defer`: sorted after
+    /// non-deferred items regardless of priority, but still shown.
     pub deferred: bool,
 }
 
@@ -1391,8 +1374,10 @@ impl Ledger {
                 .map(my_state_from_stored)
                 .transpose()?
                 .unwrap_or_default();
+            let deferred = my_state.is_deferred(Some(attention.since));
             match items.iter_mut().find(|i| i.pr.number == pr.number) {
                 Some(existing) => {
+                    existing.deferred &= deferred;
                     if attention_is_more_urgent(&attention, &existing.top) {
                         existing.top = attention;
                     }
@@ -1402,14 +1387,9 @@ impl Ledger {
                     tracked_reason,
                     top: attention,
                     my_state,
-                    deferred: false,
+                    deferred,
                 }),
             }
-        }
-        // A defer only survives if nothing has happened since: the top reason's
-        // `since` must not be newer than the moment it was deferred.
-        for item in &mut items {
-            item.deferred = item.my_state.is_deferred(Some(item.top.since));
         }
         items.sort_by(|a, b| {
             (a.deferred, a.top.priority(), a.top.since, a.pr.number).cmp(&(
@@ -1962,6 +1942,7 @@ fn attention_from_stored(row: AttentionRecord) -> Result<AttentionRow> {
     let reason: AttentionReason =
         serde_json::from_str(&row.payload).map_err(|source| corrupt("attention reason", source))?;
     Ok(AttentionRow {
+        priority: row.priority,
         reason,
         since: row.since.into_timestamp(),
     })
@@ -2116,6 +2097,7 @@ fn replace_attention(
                     pr_number: number as i64,
                     reason: attention.reason.discriminant().to_owned(),
                     since: DbTimestamp::from(attention.since),
+                    priority: attention.priority,
                     payload: serde_json::to_string(&attention.reason)
                         .encoding("an attention reason")?,
                 })
@@ -2132,7 +2114,7 @@ fn replace_attention(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reviewq_core::model::ActivityKind;
+    use reviewq_core::model::{ActivityKind, ActivityPayload, ActivityRelation, ActivitySource};
 
     #[derive(QueryableByName)]
     struct UserVersion {
@@ -3049,6 +3031,7 @@ mod tests {
 
     fn attn(reason: AttentionReason, since: &str) -> Attention {
         Attention {
+            priority: false,
             reason,
             since: ts(since),
         }
@@ -4170,7 +4153,10 @@ mod tests {
                 &[
                     mention("potiuk", "2026-08-05T09:00:00Z"),
                     attn(
-                        AttentionReason::ReviewRequested { team: None },
+                        AttentionReason::ReviewRequested {
+                            team: None,
+                            requested_by: None,
+                        },
                         "2026-08-05T09:00:00Z",
                     ),
                 ],
@@ -4453,5 +4439,97 @@ mod tests {
             .unwrap()
             .expect_applied();
         assert!(!ledger.queue(repo_id).unwrap()[0].deferred);
+    }
+
+    fn deferred_request_with_new_mention() -> (Ledger, RepoId) {
+        let (ledger, repo_id) = ledger_with_repo();
+        track(&ledger, repo_id, &pr(1));
+        ledger
+            .commit_detail(
+                repo_id,
+                1,
+                &MyState::default(),
+                &[],
+                &[],
+                &[
+                    attn(
+                        AttentionReason::ReviewRequested {
+                            team: None,
+                            requested_by: Some("potiuk".into()),
+                        },
+                        "2026-08-05T09:00:00Z",
+                    ),
+                    mention("kaxil", "2026-08-05T11:00:00Z"),
+                ],
+                None,
+                now(),
+            )
+            .unwrap()
+            .expect_applied();
+        ledger
+            .set_deferred_at(repo_id, 1, Some(ts("2026-08-05T10:00:00Z")))
+            .unwrap();
+        (ledger, repo_id)
+    }
+
+    #[test]
+    fn priority_reranking_does_not_revive_a_defer_cleared_by_new_attention() {
+        let (ledger, repo_id) = deferred_request_with_new_mention();
+        assert!(!ledger.queue(repo_id).unwrap()[0].deferred);
+
+        ledger
+            .rank_attention(repo_id, &[], &["potiuk".into()])
+            .unwrap();
+
+        let queue = ledger.queue(repo_id).unwrap();
+        assert_eq!(queue[0].top.reason.discriminant(), "review_requested");
+        assert!(!queue[0].deferred);
+    }
+
+    #[test]
+    fn defer_can_be_recorded_again_after_new_attention_under_an_older_priority_reason() {
+        let (ledger, repo_id) = deferred_request_with_new_mention();
+        ledger
+            .rank_attention(repo_id, &[], &["potiuk".into()])
+            .unwrap();
+        let event = NewActivityEvent {
+            relation: ActivityRelation::Own,
+            source: ActivitySource::Local,
+            kind: ActivityKind::Deferred,
+            occurred_at: now(),
+            recorded_at: now(),
+            actor: None,
+            head_sha: None,
+            external_id: None,
+            permalink: None,
+            payload: ActivityPayload::None,
+        };
+
+        assert!(
+            ledger
+                .record_deferred_action(repo_id, 1, Some(now()), &event)
+                .unwrap()
+        );
+        assert!(ledger.queue(repo_id).unwrap()[0].deferred);
+        assert_eq!(
+            ledger.my_state(repo_id, 1).unwrap().deferred_at,
+            Some(now())
+        );
+        assert!(
+            !ledger
+                .record_deferred_action(repo_id, 1, Some(now()), &event)
+                .unwrap()
+        );
+        let events = ledger
+            .activity_page(ActivityScope::PrAll { repo_id, number: 1 }, None, 100)
+            .unwrap();
+        assert_eq!(
+            events
+                .events
+                .iter()
+                .filter(|event| event.kind == ActivityKind::Deferred)
+                .count(),
+            1
+        );
     }
 }

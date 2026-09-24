@@ -51,6 +51,12 @@ struct ScenarioCtx {
     #[serde(default)]
     review_request: Option<ReviewRequest>,
     #[serde(default)]
+    inferred_review_request: bool,
+    #[serde(default)]
+    priority_review_requesters: Vec<String>,
+    #[serde(default)]
+    priority_authors: Vec<String>,
+    #[serde(default)]
     said: Vec<Said>,
     #[serde(default)]
     mine: bool,
@@ -84,6 +90,9 @@ impl Scenario {
             interest: self.ctx.interest.as_deref(),
             mentions: &self.ctx.mentions,
             review_request: self.ctx.review_request.clone(),
+            inferred_review_request: self.ctx.inferred_review_request,
+            priority_review_requesters: &self.ctx.priority_review_requesters,
+            priority_authors: &self.ctx.priority_authors,
             said: &self.ctx.said,
             mine: self.ctx.mine,
             heard_bots: &self.ctx.heard_bots,
@@ -101,14 +110,7 @@ impl Scenario {
         }
         attention
             .iter()
-            .map(|a| {
-                format!(
-                    "[p{}] {} (since {})",
-                    a.reason.priority(),
-                    a.reason,
-                    a.since
-                )
-            })
+            .map(|a| format!("[p{}] {} (since {})", a.priority(), a.reason, a.since))
             .collect::<Vec<_>>()
             .join("\n")
     }

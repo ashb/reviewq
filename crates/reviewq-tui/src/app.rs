@@ -2488,9 +2488,11 @@ impl App {
             return Ok(());
         };
         let deferred = self.current().is_some_and(|row| {
-            row.item
-                .my_state
-                .is_deferred(row.item.top.as_ref().map(|top| top.since))
+            if row.item.top.is_some() {
+                row.item.deferred
+            } else {
+                row.item.my_state.is_deferred(None)
+            }
         });
         reviewq_app::actions::set_deferred(&self.ledger, repo_id, number, !deferred)?;
         self.status = Some(if deferred {
@@ -2921,6 +2923,7 @@ pub(super) mod tests {
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
                     since: ts("2026-08-11T08:00:00Z"),
                 }],
@@ -2954,6 +2957,7 @@ pub(super) mod tests {
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
                     since: ts("2026-08-11T08:00:00Z"),
                 }],
@@ -3018,6 +3022,7 @@ pub(super) mod tests {
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason: AttentionReason::Mention { by: "kaxil".into() },
                     since: ts("2026-08-11T09:00:00Z"),
                 }],
@@ -3388,6 +3393,7 @@ mod scroll_tests {
                     &[],
                     &[],
                     &[Attention {
+                        priority: false,
                         reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
                         // Older sorts first, so the numbering and the order agree.
                         since: Timestamp::from_second(number as i64).expect("since"),
@@ -3537,7 +3543,9 @@ mod loop_tests {
     use crossterm::event::{MouseButton, MouseEventKind};
     use diesel::{Connection as _, RunQueryDsl as _, connection::SimpleConnection as _};
     use ratatui::backend::TestBackend;
-    use reviewq_core::model::{ActivityKind, ActivityPayload, ActivitySource, MyState};
+    use reviewq_core::model::{
+        ActivityKind, ActivityPayload, ActivitySource, Attention, AttentionReason, MyState,
+    };
     use reviewq_ledger::{NewActivityEvent, TrackedReason};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -4192,6 +4200,108 @@ mod loop_tests {
             app.ledger.activity_preview(repo_id, number, 1).unwrap()[0].kind,
             ActivityKind::Deferred
         );
+    }
+
+    #[test]
+    fn f_renews_defer_when_new_attention_is_below_an_older_priority_reason() {
+        let mut app = app();
+        let row = app.current().unwrap();
+        let (repo_id, number) = (row.repo_id, row.item.pr.number);
+        app.ledger
+            .commit_detail(
+                repo_id,
+                number,
+                &MyState::default(),
+                &[],
+                &[],
+                &[
+                    Attention {
+                        priority: false,
+                        reason: AttentionReason::ReviewRequested {
+                            team: None,
+                            requested_by: Some("potiuk".into()),
+                        },
+                        since: ts("2026-08-11T08:00:00Z"),
+                    },
+                    Attention {
+                        priority: false,
+                        reason: AttentionReason::Mention { by: "kaxil".into() },
+                        since: ts("2026-08-11T10:00:00Z"),
+                    },
+                ],
+                None,
+                ts("2026-08-11T13:00:00Z"),
+            )
+            .unwrap()
+            .expect_applied();
+        app.ledger
+            .set_deferred_at(repo_id, number, Some(ts("2026-08-11T09:00:00Z")))
+            .unwrap();
+        app.ledger
+            .rank_attention(repo_id, &[], &["potiuk".into()])
+            .unwrap();
+        app.reload().unwrap();
+        assert!(!app.current().unwrap().item.deferred);
+        assert_eq!(
+            app.current()
+                .unwrap()
+                .item
+                .top
+                .as_ref()
+                .unwrap()
+                .reason
+                .discriminant(),
+            "review_requested"
+        );
+
+        app.toggle_defer().unwrap();
+
+        assert!(app.current().unwrap().item.deferred);
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .contains("deferred to the bottom")
+        );
+        assert_eq!(
+            app.ledger.activity_preview(repo_id, number, 1).unwrap()[0].kind,
+            ActivityKind::Deferred
+        );
+        app.toggle_defer().unwrap();
+        assert!(!app.current().unwrap().item.deferred);
+        assert_eq!(
+            app.ledger.activity_preview(repo_id, number, 1).unwrap()[0].kind,
+            ActivityKind::Undeferred
+        );
+    }
+
+    #[test]
+    fn f_toggles_a_defer_on_a_waiting_pr_without_attention() {
+        let mut app = app();
+        let row = app.current().unwrap();
+        let (repo_id, number) = (row.repo_id, row.item.pr.number);
+        app.ledger.clear_attention(repo_id, number).unwrap();
+        app.toggle_listing(Listing::Waiting).unwrap();
+        assert!(app.current().unwrap().item.top.is_none());
+
+        app.toggle_defer().unwrap();
+        assert!(
+            app.ledger
+                .my_state(repo_id, number)
+                .unwrap()
+                .deferred_at
+                .is_some()
+        );
+        app.toggle_defer().unwrap();
+
+        assert!(
+            app.ledger
+                .my_state(repo_id, number)
+                .unwrap()
+                .deferred_at
+                .is_none()
+        );
+        assert!(app.status.as_ref().unwrap().contains("undeferred"));
     }
 
     #[test]
@@ -6162,6 +6272,7 @@ mod loop_tests {
                 &[],
                 &[],
                 &[reviewq_core::model::Attention {
+                    priority: false,
                     reason: reviewq_core::model::AttentionReason::Mention {
                         by: "priority-bot".into(),
                     },

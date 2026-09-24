@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 /// highest-priority one.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Attention {
+    /// Whether a configured author or requester boosts this attention.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub priority: bool,
     /// The rule that fired, with its evidence.
     pub reason: AttentionReason,
     /// When the triggering event happened. Older is more urgent within a
@@ -92,6 +95,9 @@ pub enum AttentionReason {
     ReviewRequested {
         /// Team slug, if the request was to a team rather than to me directly.
         team: Option<String>,
+        /// Login of whoever requested the review, when GitHub supplied one.
+        #[serde(default)]
+        requested_by: Option<String>,
     },
 
     /// Matches an interest rule and I have never acted on it.
@@ -204,10 +210,20 @@ impl fmt::Display for AttentionReason {
 
             // "you were asked to review" spent 24 characters saying what the
             // queue is for. Whose queue this is never needs restating.
-            Self::ReviewRequested { team: None } => write!(f, "review requested"),
-            Self::ReviewRequested { team: Some(team) } => {
-                write!(f, "review requested via @{team}")
-            }
+            Self::ReviewRequested {
+                requested_by: Some(by),
+                team: None,
+                ..
+            } => write!(f, "review requested by @{by}"),
+            Self::ReviewRequested {
+                requested_by: Some(by),
+                team: Some(team),
+                ..
+            } => write!(f, "review requested by @{by} via @{team}"),
+            Self::ReviewRequested { team: None, .. } => write!(f, "review requested"),
+            Self::ReviewRequested {
+                team: Some(team), ..
+            } => write!(f, "review requested via @{team}"),
 
             Self::NeedsFirstLook { rule } => write!(f, "matches {rule}"),
         }
@@ -215,6 +231,24 @@ impl fmt::Display for AttentionReason {
 }
 
 impl Attention {
+    /// Effective queue band, including a non-stacking identity boost.
+    pub fn priority(&self) -> u8 {
+        if self.priority {
+            self.reason.priority().min(2)
+        } else {
+            self.reason.priority()
+        }
+    }
+
+    /// Recompute identity priority without changing the attention evidence.
+    pub fn rank(&mut self, author: &str, authors: &[String], requesters: &[String]) {
+        self.priority = authors
+            .iter()
+            .any(|login| login.eq_ignore_ascii_case(author))
+            || matches!(&self.reason, AttentionReason::ReviewRequested { requested_by: Some(by), .. }
+                if requesters.iter().any(|login| login.eq_ignore_ascii_case(by)));
+    }
+
     /// Whether two observations describe the same attention evidence.
     /// PR update timestamps are only a fallback for reasons without event times.
     pub fn same_evidence(&self, other: &Self) -> bool {
@@ -230,7 +264,7 @@ impl Attention {
 
     /// Queue sort key: priority band first, then oldest-first inside the band.
     pub fn sort_key(&self) -> (u8, Timestamp) {
-        (self.reason.priority(), self.since)
+        (self.priority(), self.since)
     }
 }
 
@@ -285,7 +319,10 @@ mod tests {
                 by: "a".into(),
                 author: true,
             },
-            AttentionReason::ReviewRequested { team: None },
+            AttentionReason::ReviewRequested {
+                team: None,
+                requested_by: None,
+            },
             AttentionReason::NeedsFirstLook { rule: "a".into() },
         ]
     }
@@ -311,6 +348,21 @@ mod tests {
     }
 
     #[test]
+    fn an_old_review_request_defaults_to_normal_priority_without_an_actor() {
+        let reason: AttentionReason =
+            serde_json::from_str(r#"{"reason":"review_requested","team":null}"#).unwrap();
+
+        assert_eq!(reason.priority(), 7);
+        assert!(matches!(
+            reason,
+            AttentionReason::ReviewRequested {
+                requested_by: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn discriminants_are_unique() {
         let all = every_variant();
 
@@ -330,10 +382,12 @@ mod tests {
     #[test]
     fn priority_beats_staleness_in_the_sort() {
         let old_low = Attention {
+            priority: false,
             reason: AttentionReason::NeedsFirstLook { rule: "x".into() },
             since: "2026-01-01T00:00:00Z".parse().unwrap(),
         };
         let new_high = Attention {
+            priority: false,
             reason: AttentionReason::Mention { by: "a".into() },
             since: "2026-08-01T00:00:00Z".parse().unwrap(),
         };
@@ -343,10 +397,12 @@ mod tests {
     #[test]
     fn staleness_orders_within_a_priority_band() {
         let older = Attention {
+            priority: false,
             reason: AttentionReason::Mention { by: "a".into() },
             since: "2026-01-01T00:00:00Z".parse().unwrap(),
         };
         let newer = Attention {
+            priority: false,
             reason: AttentionReason::Mention { by: "b".into() },
             since: "2026-08-01T00:00:00Z".parse().unwrap(),
         };

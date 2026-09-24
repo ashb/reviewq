@@ -373,6 +373,8 @@ mod tests {
     /// The repo the test configs below name.
     fn repo(checkout: Option<&Path>) -> RepoRef {
         RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),
@@ -442,6 +444,8 @@ mod tests {
 
     fn named_repo(owner: &str, name: &str) -> RepoRef {
         RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: owner.into(),
             name: name.into(),
             host: "github.com".into(),

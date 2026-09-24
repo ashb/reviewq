@@ -307,6 +307,7 @@ mod tests {
                 &[],
                 &[],
                 &[Attention {
+                    priority: false,
                     reason,
                     since: ts("2026-08-11T09:00:00Z"),
                 }],
@@ -367,7 +368,10 @@ mod tests {
     fn done_leaves_a_review_request_asking() {
         // Only reviewing, or the request being withdrawn, clears this one — so a
         // `done` on it must not make the PR look handled.
-        let (ledger, repo_id, number) = queued(AttentionReason::ReviewRequested { team: None });
+        let (ledger, repo_id, number) = queued(AttentionReason::ReviewRequested {
+            team: None,
+            requested_by: None,
+        });
 
         done(&ledger, repo_id, number, "abc1234").unwrap();
 
@@ -598,6 +602,8 @@ mod tests {
         // have to arrive with the fetch or not at all.
         let (ledger, repo_id, _) = queued(mention());
         let repo = RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),
@@ -623,6 +629,8 @@ mod tests {
     async fn tracking_an_already_tracked_pr_records_no_event() {
         let (ledger, repo_id, number) = queued(mention());
         let repo = RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),

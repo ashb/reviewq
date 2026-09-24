@@ -658,6 +658,8 @@ mod tests {
     #[test]
     fn a_repo_with_no_checkout_is_counted_as_a_problem() {
         let repo = config::RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),
@@ -679,6 +681,8 @@ mod tests {
         // The default hands the PR to a browser, which has no use for a working
         // tree — so a fresh install can reach a clean bill of health.
         let repo = config::RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),
@@ -700,6 +704,8 @@ mod tests {
     fn a_repo_with_a_checkout_that_is_there_reports_the_path_and_is_no_problem() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = config::RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),
@@ -717,6 +723,8 @@ mod tests {
     #[test]
     fn a_checkout_that_has_moved_is_a_problem_here_rather_than_at_load() {
         let repo = config::RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),

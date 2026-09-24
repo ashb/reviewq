@@ -25,6 +25,7 @@ pub mod identity;
 pub mod paths;
 pub mod peek;
 pub mod present;
+mod priority;
 pub mod resolve;
 pub mod review;
 pub mod sync;

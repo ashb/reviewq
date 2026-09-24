@@ -265,7 +265,7 @@ pub struct MyState {
 }
 
 impl MyState {
-    /// Whether the stored defer still applies to the highest-priority attention.
+    /// Whether the stored defer still applies to the newest attention.
     /// With no attention, nothing has invalidated the defer yet.
     pub fn is_deferred(&self, attention_since: Option<Timestamp>) -> bool {
         self.deferred_at

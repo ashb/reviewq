@@ -101,7 +101,7 @@ A PR matched by multiple reasons has the priority of the lowest (i.e. highest pr
 | | Reason | Reads as | Cleared by |
 |---|---|---|---|
 | 1 | `my_pr` | *@potiuk approved your PR* | anything you do on the PR, or `done` |
-| 2 | `mention` | *@potiuk mentioned you* | anything you do on the PR, or `done` |
+| 2 | `mention`, priority `review_requested` | *@potiuk mentioned you* | anything you do on the PR, or `done` |
 | 3 | `thread_reply` | *@potiuk replied in 2 threads you own* | replying in that thread, or `done` |
 | 4 | `resolved_unanswered` | *@potiuk resolved your thread without replying* | A later review on the forge, or `done` |
 | 5 | `re_review` | *3 new commits since your review of 5e14b22* | reviewing the new head, or `done` at it |
@@ -514,6 +514,36 @@ The relationships that surface a PR even when no rule matches it, each found wit
 the attention state machine already handles more precisely,
 but feel free to experiment with adding them if you wish.
 A project may set its own `involvement = [...]` to override this for a repo you only lurk in.
+Priority settings belong to each repository and default to empty lists:
+
+```toml
+[[project]]
+name = "airflow"
+
+[[project.repos]]
+owner = "apache"
+name = "airflow"
+priority_authors = ["apache/airflow-committers"]
+priority_review_requesters = ["kaxil", "potiuk"]
+```
+
+These fields can also be placed in an inline `repos = [{ ... }]` entry.
+`priority_authors` boosts existing attention on PRs written by those people;
+`priority_review_requesters` boosts active review requests made by those people.
+Both use the mention priority band, preserve higher-priority reasons, and do
+not stack. They affect ordering, not which PRs are tracked or need attention.
+
+Both lists accept explicit logins and `org/team` references, matched
+case-insensitively. Teams are resolved only on the configured repository's forge host and
+include inherited members. This uses the configured team's membership, with no
+inference from organization membership or project roles such as PMC membership.
+
+Team membership is cached in the ledger for 24 hours, shared by repos on the
+same host. `reviewq sync --teams` forces a refresh of all configured priority
+teams. Sync also reranks unchanged PRs from the configuration and cached members;
+`--all` is not needed for priority changes. Team access requires credentials that
+can read the team. A failed membership refresh reports an error and preserves
+the last successful cache rather than replacing it with an empty list.
 
 ```toml
 [bots]

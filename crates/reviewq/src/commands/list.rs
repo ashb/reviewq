@@ -524,6 +524,7 @@ mod tests {
             pr: pr(),
             tracked_reason: "interest: label x".into(),
             top: AttentionRow {
+                priority: false,
                 reason: AttentionReason::Mention { by: "kaxil".into() },
                 since: now,
             },

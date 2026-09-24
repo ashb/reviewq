@@ -6,7 +6,7 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use crate::{DbConnection, LedgerError, Result};
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: usize = 12;
+pub const SCHEMA_VERSION: usize = 13;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -89,6 +89,7 @@ mod tests {
         include_str!("../migrations/00000000000010_untracked_at/up.sql"),
         include_str!("../migrations/00000000000011_created_at/up.sql"),
         include_str!("../migrations/00000000000012_activity_history/up.sql"),
+        include_str!("../migrations/00000000000013_identity_priority/up.sql"),
     ];
 
     fn connection() -> DbConnection {
@@ -326,5 +327,33 @@ mod tests {
                 .contains("UNIQUE INDEX activity_events_external")
         );
         assert!(external.sql.contains("WHERE external_id IS NOT NULL"));
+    }
+    #[test]
+    fn identity_priority_upgrade_preserves_attention_and_refreshes_requester_attribution() {
+        let mut conn = legacy_connection(12);
+        conn.batch_execute(LEGACY_PR).unwrap();
+        conn.batch_execute(r#"
+            UPDATE prs SET detail_synced_at = '2026-09-17T10:00:00Z';
+            INSERT INTO attention (repo_id, pr_number, reason, since, payload)
+            VALUES (1, 1, 'review_requested', '2026-09-17T09:00:00Z', '{"reason":"review_requested","team":null}');
+        "#).unwrap();
+        migrate(&mut conn).unwrap();
+        let row = crate::schema::attention::table
+            .select(crate::models::AttentionRecord::as_select())
+            .first(&mut conn)
+            .unwrap();
+        let attention = crate::attention_from_stored(row).unwrap();
+        assert_eq!(attention.priority(), 7);
+        assert_eq!(
+            attention.since,
+            "2026-09-17T09:00:00Z".parse::<jiff::Timestamp>().unwrap()
+        );
+        assert!(
+            prs::table
+                .select(prs::detail_synced_at)
+                .first::<Option<String>>(&mut conn)
+                .unwrap()
+                .is_none()
+        );
     }
 }

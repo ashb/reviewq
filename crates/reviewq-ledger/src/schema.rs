@@ -53,6 +53,7 @@ diesel::table! {
         reason -> Text,
         since -> Text,
         payload -> Text,
+        priority -> Bool,
     }
 }
 
@@ -135,6 +136,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    team_memberships (host, organization, team) {
+        host -> Text,
+        organization -> Text,
+        team -> Text,
+        members -> Text,
+        refreshed_at -> Text,
+    }
+}
+
+diesel::table! {
     threads (thread_id) {
         thread_id -> Text,
         repo_id -> BigInt,
@@ -166,5 +177,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     repos,
     reviewers,
     sync_meta,
+    team_memberships,
     threads,
 );

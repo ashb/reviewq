@@ -118,9 +118,23 @@ pub(crate) struct FakeForge {
     activity_in_flight: AtomicUsize,
     max_activity_in_flight: AtomicUsize,
     asked: Mutex<Asked>,
+    teams: Mutex<std::collections::HashMap<(String, String), Vec<String>>>,
+    team_calls: AtomicUsize,
 }
 
 impl FakeForge {
+    pub(crate) fn with_team(self, org: &str, team: &str, members: &[&str]) -> Self {
+        self.teams.lock().unwrap().insert(
+            (org.into(), team.into()),
+            members.iter().map(|login| (*login).into()).collect(),
+        );
+        self
+    }
+
+    pub(crate) fn team_calls(&self) -> usize {
+        self.team_calls.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn new(pages: Vec<Page>) -> Self {
         Self {
             pages: Mutex::new(pages.into()),
@@ -137,6 +151,8 @@ impl FakeForge {
             activity_in_flight: AtomicUsize::new(0),
             max_activity_in_flight: AtomicUsize::new(0),
             asked: Mutex::new(Asked::default()),
+            teams: Mutex::new(std::collections::HashMap::new()),
+            team_calls: AtomicUsize::new(0),
         }
     }
 
@@ -160,7 +176,7 @@ impl FakeForge {
                 said: vec![],
                 invited: vec![],
                 new_commits: 0,
-                review_request: None,
+                review_requests: vec![],
                 cost: 1,
                 remaining,
             },
@@ -217,9 +233,26 @@ impl FakeForge {
     pub(crate) fn with_review_request(self, number: u64, remaining: u32) -> Self {
         let this = self.with_detail(number, remaining);
         if let Some(detail) = this.details.lock().expect("lock").get_mut(&number) {
-            detail.review_request = Some(reviewq_core::model::ReviewRequest { team: None });
+            detail
+                .review_requests
+                .push(reviewq_core::model::ReviewRequest {
+                    team: None,
+                    requested_by: None,
+                    requested_at: Some("2026-08-09T09:00:00Z".parse().expect("valid timestamp")),
+                });
         }
         this
+    }
+
+    pub(crate) fn with_requester(self, number: u64, requester: &str) -> Self {
+        self.details
+            .lock()
+            .unwrap()
+            .get_mut(&number)
+            .unwrap()
+            .review_requests[0]
+            .requested_by = Some(requester.into());
+        self
     }
 
     pub(crate) fn with_current_head_review(self, number: u64) -> Self {
@@ -440,6 +473,19 @@ impl Forge for FakeForge {
                 rate_limit: None,
                 next_rate_limit: None,
             }))
+    }
+
+    async fn fetch_team_members(&self, org: &str, team: &str) -> Result<Vec<String>> {
+        self.team_calls.fetch_add(1, Ordering::SeqCst);
+        self.teams
+            .lock()
+            .unwrap()
+            .get(&(org.into(), team.into()))
+            .cloned()
+            .ok_or_else(|| ForgeError::Unreachable {
+                doing: format!("fetching {org}/{team}"),
+                source: Box::new(std::io::Error::other("team unavailable")),
+            })
     }
 
     async fn fetch_labels(

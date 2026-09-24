@@ -34,9 +34,13 @@ fn every_rendering() -> Vec<AttentionReason> {
             new_commits: 3,
             since_sha: "abc123f8901234567890123456789012345678ab".into(),
         },
-        AttentionReason::ReviewRequested { team: None },
+        AttentionReason::ReviewRequested {
+            team: None,
+            requested_by: None,
+        },
         AttentionReason::ReviewRequested {
             team: Some("apache/airflow-committers".into()),
+            requested_by: None,
         },
         AttentionReason::NeedsFirstLook {
             rule: "label area:task-sdk".into(),

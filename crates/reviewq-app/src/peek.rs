@@ -152,6 +152,8 @@ mod tests {
 
     fn repo() -> RepoRef {
         RepoRef {
+            priority_authors: Vec::new(),
+            priority_review_requesters: Vec::new(),
             owner: "apache".into(),
             name: "airflow".into(),
             host: "github.com".into(),

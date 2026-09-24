@@ -10,6 +10,21 @@
           { "requestedReviewer": { "__typename": "Team", "slug": "core-committers" } }
         ]
       },
+      "timelineItems": {
+        "pageInfo": { "startCursor": "cursor-1", "hasPreviousPage": false },
+        "nodes": [
+          {
+            "actor": { "login": "kaxil" },
+            "createdAt": "2026-08-05T12:00:00Z",
+            "requestedReviewer": { "__typename": "User", "login": "ashb" }
+          },
+          {
+            "actor": { "login": "potiuk" },
+            "createdAt": "2026-08-05T11:00:00Z",
+            "requestedReviewer": { "__typename": "Team", "slug": "core-committers" }
+          }
+        ]
+      },
       "reviews": {
         "nodes": [
           {

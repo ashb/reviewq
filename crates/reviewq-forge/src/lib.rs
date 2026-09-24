@@ -22,6 +22,9 @@ pub use types::{
 
 use async_trait::async_trait;
 
+/// Minimum remaining GraphQL points before fetching more pull request detail.
+pub const DETAIL_BUDGET_FLOOR: u32 = 100;
+
 /// What can go wrong reaching a forge.
 ///
 /// Typed for the same reason the ledger's are: an interface handed one string can
@@ -95,6 +98,14 @@ mod tests {
 /// marks my own notification threads read, which `reviewq done` calls.
 #[async_trait]
 pub trait Forge: Send + Sync {
+    /// Every member login in an organization's team, across all pages.
+    /// An inaccessible or nonexistent team is an error, not an empty team.
+    async fn fetch_team_members(&self, org: &str, team: &str) -> Result<Vec<String>> {
+        Err(ForgeError::NoAdapter(format!(
+            "team membership is unsupported for {org}/{team}"
+        )))
+    }
+
     /// The authenticated account and the current rate-limit budget. The
     /// cheapest call that proves the token works.
     async fn viewer(&self) -> Result<Viewer>;
