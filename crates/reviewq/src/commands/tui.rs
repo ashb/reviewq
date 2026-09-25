@@ -111,6 +111,7 @@ fn live_hooks(config: Arc<Config>) -> Hooks {
                 let ran = Handle::current().block_on(reviewq_app::sync::run(
                     &config,
                     false,
+                    false,
                     reviewq_ledger::Detail::Stale,
                     &mut progress,
                 ));

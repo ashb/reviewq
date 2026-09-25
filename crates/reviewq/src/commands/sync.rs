@@ -29,7 +29,14 @@ pub async fn run(
         true => reviewq_ledger::Detail::Every,
         false => reviewq_ledger::Detail::Stale,
     };
-    reviewq_app::sync::run(&loaded.config, args.labels, which, &mut progress).await
+    reviewq_app::sync::run(
+        &loaded.config,
+        args.labels,
+        args.teams,
+        which,
+        &mut progress,
+    )
+    .await
 }
 
 /// `reviewq sync <number>`: refresh one PR's detail and say what changed.

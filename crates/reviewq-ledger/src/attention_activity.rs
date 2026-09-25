@@ -19,13 +19,7 @@ pub(super) fn load(
         .load::<AttentionRecord>(conn)
         .doing("reading attention history evidence")?
         .into_iter()
-        .map(|row| {
-            let row = crate::attention_from_stored(row)?;
-            Ok(Attention {
-                reason: row.reason,
-                since: row.since,
-            })
-        })
+        .map(crate::attention_from_stored)
         .collect()
 }
 

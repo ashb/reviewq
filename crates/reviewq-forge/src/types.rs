@@ -220,8 +220,8 @@ pub struct PrDetail {
     pub invited: Vec<String>,
     /// Commits pushed since my last review; zero if I have not reviewed.
     pub new_commits: u32,
-    /// A live review request naming me directly, if any.
-    pub review_request: Option<ReviewRequest>,
+    /// Active direct and team review requests that can name me.
+    pub review_requests: Vec<ReviewRequest>,
     /// GraphQL points this fetch cost.
     pub cost: u32,
     /// Points remaining after it.

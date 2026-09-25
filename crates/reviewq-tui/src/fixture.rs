@@ -345,6 +345,7 @@ fn fixtures() -> Vec<Fixture> {
             tracked: TrackedReason::Involved("review_requested".into()),
             reason: Some(AttentionReason::ReviewRequested {
                 team: Some("apache/airflow-committers".into()),
+                requested_by: None,
             }),
             since: "2026-08-11T18:05:00Z",
             opened: "2026-08-09T12:45:00Z",
@@ -572,6 +573,7 @@ fn seeded_ledger(record_deferred_activity: bool) -> Ledger {
                 &f.reason
                     .clone()
                     .map(|reason| Attention {
+                        priority: false,
                         reason,
                         since: ts(f.since),
                     })

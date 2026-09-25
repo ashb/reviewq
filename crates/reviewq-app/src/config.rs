@@ -110,6 +110,12 @@ pub struct RepoRef {
     /// supported". Naming the checkout fixes both.
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// Review requesters whose requests sort with mentions; logins or `org/team`.
+    #[serde(default)]
+    pub priority_review_requesters: Vec<String>,
+    /// Authors whose existing attention sorts with mentions; logins or `org/team`.
+    #[serde(default)]
+    pub priority_authors: Vec<String>,
 }
 
 impl RepoRef {
@@ -673,6 +679,14 @@ impl Config {
         }
         let mut seen = std::collections::HashSet::new();
         for repo in &repos {
+            for selector in repo
+                .priority_authors
+                .iter()
+                .chain(&repo.priority_review_requesters)
+            {
+                crate::priority::validate(selector)
+                    .with_context(|| format!("in repo {} in {}", repo.slug(), at()))?;
+            }
             if repo.owner.trim().is_empty() || repo.name.trim().is_empty() {
                 bail!("a repo is missing owner or name in {}", at());
             }
@@ -1070,6 +1084,38 @@ mod tests {
         .expect("parses");
         let project = &overridden.projects[0];
         assert_eq!(overridden.involving_reasons(project), ["mention"]);
+    }
+
+    #[test]
+    fn priority_settings_belong_to_individual_repositories() {
+        let config: Config = toml::from_str(r#"
+            [[project]]
+            repos = [
+                { owner = "apache", name = "airflow", priority_authors = ["apache/airflow-committers"], priority_review_requesters = ["kaxil"] },
+                { owner = "apache", name = "other", priority_review_requesters = ["someone-else"] },
+                { owner = "acme", name = "internal", host = "github.acme.example" },
+            ]
+        "#).unwrap();
+        let value = toml::Value::try_from(&config).unwrap();
+        let repos = value["project"][0]["repos"].as_array().unwrap();
+        for (index, authors, requesters) in [
+            (0, vec!["apache/airflow-committers"], vec!["kaxil"]),
+            (1, vec![], vec!["someone-else"]),
+            (2, vec![], vec![]),
+        ] {
+            for (key, expected) in [
+                ("priority_authors", authors),
+                ("priority_review_requesters", requesters),
+            ] {
+                let expected = toml::Value::Array(
+                    expected
+                        .into_iter()
+                        .map(|s| toml::Value::String(s.into()))
+                        .collect(),
+                );
+                assert_eq!(repos[index].get(key), Some(&expected));
+            }
+        }
     }
 
     #[test]
@@ -1566,5 +1612,48 @@ mod tests {
             "the config reviewq ships is one reviewq reads: {:?}",
             loaded.unknown
         );
+    }
+    #[test]
+    fn priority_identity_config_rejects_malformed_logins_and_teams() {
+        for identity in [
+            "",
+            "@alice",
+            "apache/",
+            "/team",
+            "apache/team/extra",
+            "apache/team?x=1",
+            "a b",
+            "[bot]",
+            "alice[bot]extra",
+            "apache/team[bot]",
+            "apache[bot]/team",
+        ] {
+            let config: Config = toml::from_str(&format!(
+                r#"
+                [[project]]
+                [[project.repos]]
+                owner = "apache"
+                name = "airflow"
+                priority_authors = [{identity:?}]
+            "#
+            ))
+            .unwrap();
+            assert!(
+                config.validate(Path::new("config.toml")).is_err(),
+                "{identity}"
+            );
+        }
+        let config: Config = toml::from_str(
+            r#"
+            [[project]]
+            [[project.repos]]
+            owner = "apache"
+            name = "airflow"
+            priority_authors = ["Alice", "dependabot[bot]", "apache/airflow-committers"]
+            priority_review_requesters = ["github-actions[bot]", "apache/airflow-committers"]
+        "#,
+        )
+        .unwrap();
+        config.validate(Path::new("config.toml")).unwrap();
     }
 }

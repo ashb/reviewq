@@ -24,7 +24,7 @@ use crate::types::{
     ActivityRateLimit, FetchedPr, ForgeActivity, ForgeActivityPage, LabelColour, PrDetail,
     RateLimit, RateLimitUnit, SweepPage, Viewer,
 };
-use crate::{Forge, ForgeError, ForgeHost, Result, Token, resolve_token};
+use crate::{DETAIL_BUDGET_FLOOR, Forge, ForgeError, ForgeHost, Result, Token, resolve_token};
 
 /// Classify what octocrab reported.
 ///
@@ -359,6 +359,23 @@ impl ReviewCommentsTransport for OctocrabReviewCommentsTransport {
 
 #[async_trait]
 impl Forge for GithubForge {
+    async fn fetch_team_members(&self, org: &str, team: &str) -> Result<Vec<String>> {
+        let client = self.client()?;
+        let doing = format!("reading members of {org}/{team}");
+        let page: octocrab::Page<Login> = client
+            .get(
+                format!("/orgs/{org}/teams/{team}/members"),
+                Some(&[("per_page", 100)]),
+            )
+            .await
+            .map_err(|err| classify(&self.web_host, doing.clone(), err))?;
+        let members = client
+            .all_pages(page)
+            .await
+            .map_err(|err| classify(&self.web_host, doing, err))?;
+        Ok(members.into_iter().map(|member| member.login).collect())
+    }
+
     async fn viewer(&self) -> Result<Viewer> {
         const QUERY: &str = r"
             query {
@@ -510,12 +527,39 @@ impl Forge for GithubForge {
         };
         data.rate_limit.trace("sync:detail");
 
-        let cost = data.rate_limit.cost;
-        let remaining = data.rate_limit.remaining;
-        Ok(data
-            .repository
-            .and_then(|r| r.pull_request)
-            .map(|pr| pr.into_detail(login, cost, remaining)))
+        let mut cost = data.rate_limit.cost;
+        let mut remaining = data.rate_limit.remaining;
+        let Some(mut pr) = data.repository.and_then(|r| r.pull_request) else {
+            return Ok(None);
+        };
+        while remaining >= DETAIL_BUDGET_FLOOR
+            && pr.has_unmatched_review_request(login)
+            && pr.timeline_items.page_info.has_previous_page
+        {
+            let mut page_vars = serde_json::Map::new();
+            page_vars.insert("owner".into(), owner.into());
+            page_vars.insert("name".into(), name.into());
+            page_vars.insert("number".into(), number.into());
+            page_vars.insert(
+                "before".into(),
+                pr.timeline_items.page_info.start_cursor.clone().into(),
+            );
+            let page: ReviewRequestTimelineQuery = self
+                .graphql(
+                    &format!("fetch_review_request_timeline #{number}"),
+                    REVIEW_REQUEST_TIMELINE_QUERY,
+                    page_vars,
+                )
+                .await?;
+            cost += page.rate_limit.cost;
+            remaining = page.rate_limit.remaining;
+            let Some(page_pr) = page.repository.and_then(|repo| repo.pull_request) else {
+                break;
+            };
+            pr.timeline_items.nodes.extend(page_pr.timeline_items.nodes);
+            pr.timeline_items.page_info = page_pr.timeline_items.page_info;
+        }
+        Ok(Some(pr.into_detail(login, cost, remaining)))
     }
 
     fn initial_activity_rate_limit(&self) -> RateLimitUnit {
@@ -1751,6 +1795,7 @@ struct DetailPr {
     #[serde(default)]
     body: String,
     review_requests: NodeList<ReviewRequestNode>,
+    timeline_items: TimelineItems,
     reviews: NodeList<ReviewNode>,
     comments: NodeList<CommentNode>,
     commits: NodeList<CommitWrap>,
@@ -1768,15 +1813,63 @@ struct ReviewRequestNode {
     requested_reviewer: Option<Reviewer>,
 }
 
-/// A requested reviewer is a `User` or a `Team`; the inline fragments select the
-/// discriminating field for each, and `__typename` says which was returned.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineItems {
+    nodes: Vec<ReviewRequestedEvent>,
+    page_info: TimelinePageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelinePageInfo {
+    start_cursor: Option<String>,
+    has_previous_page: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewRequestTimelineQuery {
+    repository: Option<ReviewRequestTimelineRepo>,
+    #[serde(rename = "rateLimit")]
+    rate_limit: RateLimit,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequestTimelineRepo {
+    pull_request: Option<ReviewRequestTimelinePr>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequestTimelinePr {
+    timeline_items: TimelineItems,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequestedEvent {
+    actor: Option<Login>,
+    created_at: Timestamp,
+    requested_reviewer: Option<Reviewer>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Reviewer {
     #[serde(rename = "__typename")]
     typename: String,
     login: Option<String>,
-    #[allow(dead_code)]
     slug: Option<String>,
+}
+
+impl Reviewer {
+    fn matches_viewer_or_team(&self, login: &str) -> bool {
+        match self.typename.as_str() {
+            "User" => self.login.as_deref() == Some(login),
+            "Team" => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1932,6 +2025,24 @@ fn mentions_login(body: &str, login: &str) -> bool {
 }
 
 impl DetailPr {
+    fn has_unmatched_review_request(&self, login: &str) -> bool {
+        self.review_requests.nodes.iter().any(|request| {
+            let Some(reviewer) = request.requested_reviewer.as_ref() else {
+                return false;
+            };
+            if !reviewer.matches_viewer_or_team(login) {
+                return false;
+            }
+            !self.timeline_items.nodes.iter().any(|event| {
+                event.requested_reviewer.as_ref().is_some_and(|requested| {
+                    requested.typename == reviewer.typename
+                        && requested.login == reviewer.login
+                        && requested.slug == reviewer.slug
+                })
+            })
+        })
+    }
+
     fn into_detail(self, login: &str, cost: u32, remaining: u32) -> PrDetail {
         let state = PrState::from_wire(&self.state).unwrap_or(PrState::Open);
         let state_changed_at = transition_timestamp(
@@ -2076,11 +2187,38 @@ impl DetailPr {
                 .count() as u32
         });
 
-        let review_request = self.review_requests.nodes.iter().find_map(|r| {
-            let reviewer = r.requested_reviewer.as_ref()?;
-            (reviewer.typename == "User" && reviewer.login.as_deref() == Some(login))
-                .then_some(ReviewRequest { team: None })
-        });
+        let review_requests = self
+            .review_requests
+            .nodes
+            .iter()
+            .filter_map(|request| {
+                let reviewer = request.requested_reviewer.as_ref()?;
+                if !reviewer.matches_viewer_or_team(login) {
+                    return None;
+                }
+                let event = self
+                    .timeline_items
+                    .nodes
+                    .iter()
+                    .filter(|event| {
+                        event.requested_reviewer.as_ref().is_some_and(|requested| {
+                            requested.typename == reviewer.typename
+                                && requested.login == reviewer.login
+                                && requested.slug == reviewer.slug
+                        })
+                    })
+                    .max_by_key(|event| event.created_at);
+                Some(ReviewRequest {
+                    team: (reviewer.typename == "Team")
+                        .then(|| reviewer.slug.clone())
+                        .flatten(),
+                    requested_by: event
+                        .and_then(|event| event.actor.as_ref())
+                        .map(|actor| actor.login.clone()),
+                    requested_at: event.map(|event| event.created_at),
+                })
+            })
+            .collect();
 
         PrDetail {
             activities,
@@ -2101,7 +2239,7 @@ impl DetailPr {
             said,
             invited,
             new_commits,
-            review_request,
+            review_requests,
             cost,
             remaining,
         }
@@ -2210,6 +2348,20 @@ query($owner: String!, $name: String!, $number: Int!) {
           ... on Team { slug }
         } }
       }
+      timelineItems(last: 100, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+        pageInfo { startCursor hasPreviousPage }
+        nodes {
+          ... on ReviewRequestedEvent {
+            actor { login }
+            createdAt
+            requestedReviewer {
+              __typename
+              ... on User { login }
+              ... on Team { slug }
+            }
+          }
+        }
+      }
       reviews(last: 100) {
         nodes { id url author { login } state submittedAt commit { oid } body }
       }
@@ -2275,12 +2427,185 @@ query(
 }
 ";
 
+const REVIEW_REQUEST_TIMELINE_QUERY: &str = r"
+query($owner: String!, $name: String!, $number: Int!, $before: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      timelineItems(
+        last: 100
+        before: $before
+        itemTypes: [REVIEW_REQUESTED_EVENT]
+      ) {
+        pageInfo { startCursor hasPreviousPage }
+        nodes {
+          ... on ReviewRequestedEvent {
+            actor { login }
+            createdAt
+            requestedReviewer {
+              __typename
+              ... on User { login }
+              ... on Team { slug }
+            }
+          }
+        }
+      }
+    }
+  }
+  rateLimit { limit cost remaining resetAt }
+}
+";
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::*;
+
+    fn github_server(
+        responses: Vec<(u16, impl Into<String>)>,
+    ) -> (GithubForge, std::thread::JoinHandle<Vec<String>>) {
+        let responses: Vec<(u16, String)> = responses
+            .into_iter()
+            .map(|(status, body)| (status, body.into()))
+            .collect();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let base = format!("http://{}", listener.local_addr().expect("server address"));
+        let forge = GithubForge::with_token(
+            &ForgeHost {
+                api_base: Some(base.clone()),
+                ..ForgeHost::default()
+            },
+            "github.example",
+            Token {
+                value: "test-token".into(),
+                source: crate::TokenSource::Override,
+            },
+        );
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let count = responses.len();
+            for (index, (status, body)) in responses.into_iter().enumerate() {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "expected team membership request"
+                            );
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept request: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                requests.push(request.trim().to_string());
+                let mut content_length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request_body = vec![0; content_length];
+                reader.read_exact(&mut request_body).unwrap();
+                let link = if index + 1 < count {
+                    format!(
+                        "Link: <{base}/orgs/apache/teams/airflow-committers/members?per_page=100&page={}>; rel=\"next\"\r\n",
+                        index + 2
+                    )
+                } else {
+                    String::new()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{link}\r\n{body}",
+                    body.len()
+                ).unwrap();
+            }
+            requests
+        });
+        (forge, server)
+    }
+
+    #[tokio::test]
+    async fn team_members_follows_pagination_links() {
+        let (forge, server) = github_server(vec![
+            (200, r#"[{"login":"ashb"}]"#),
+            (200, r#"[{"login":"another-member"}]"#),
+        ]);
+
+        let members = forge
+            .fetch_team_members("apache", "airflow-committers")
+            .await;
+        let requests = server.join().unwrap();
+
+        assert_eq!(members.unwrap(), ["ashb", "another-member"]);
+        assert_eq!(
+            requests,
+            [
+                "GET /orgs/apache/teams/airflow-committers/members?per_page=100 HTTP/1.1",
+                "GET /orgs/apache/teams/airflow-committers/members?per_page=100&page=2 HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn team_members_accepts_an_empty_visible_team() {
+        let (forge, server) = github_server(vec![(200, "[]")]);
+        let members = forge
+            .fetch_team_members("apache", "airflow-committers")
+            .await;
+        server.join().unwrap();
+        assert!(members.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn team_members_propagates_inaccessible_team_and_later_page_errors() {
+        for responses in [
+            vec![(404, r#"{"message":"Not Found"}"#)],
+            vec![
+                (200, r#"[{"login":"ashb"}]"#),
+                (404, r#"{"message":"Not Found"}"#),
+            ],
+        ] {
+            let (forge, server) = github_server(responses);
+            let result = forge
+                .fetch_team_members("apache", "airflow-committers")
+                .await;
+            server.join().unwrap();
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("apache/airflow-committers"));
+            let ForgeError::Unreachable { source, .. } = error else {
+                panic!("expected an unreachable team");
+            };
+            let Some(octocrab::Error::GitHub { source, .. }) = source.downcast_ref() else {
+                panic!("expected the GitHub error to be preserved");
+            };
+            assert_eq!(source.status_code.as_u16(), 404);
+            assert_eq!(source.message, "Not Found");
+        }
+    }
 
     #[test]
     fn activity_cursor_uses_graphql_variable_names() {
@@ -3130,8 +3455,21 @@ mod tests {
         assert_eq!(reviewers.get("uranusjr"), Some(&Verdict::Commented));
         // Two commits land after my 10:00 review.
         assert_eq!(detail.new_commits, 2);
-        // A direct request to me fires; the team request does not.
-        assert_eq!(detail.review_request, Some(ReviewRequest { team: None }));
+        assert_eq!(
+            detail.review_requests,
+            vec![
+                ReviewRequest {
+                    team: None,
+                    requested_by: Some("kaxil".into()),
+                    requested_at: Some("2026-08-05T12:00:00Z".parse().unwrap()),
+                },
+                ReviewRequest {
+                    team: Some("core-committers".into()),
+                    requested_by: Some("potiuk".into()),
+                    requested_at: Some("2026-08-05T11:00:00Z".parse().unwrap()),
+                },
+            ]
+        );
         // The state comes back with the detail, which is the only way a refresh
         // of one PR can learn it has been closed since the last sweep.
         assert_eq!(detail.state, PrState::Open);
@@ -3666,6 +4004,188 @@ mod tests {
         assert_eq!(second.activities.len(), 1);
         assert_eq!(second.activities[0].relation, ActivityRelation::Own);
         assert_eq!(second.next, None);
+    }
+
+    #[test]
+    fn unsupported_reviewers_do_not_create_viewer_requests() {
+        for typename in ["Bot", "Mannequin"] {
+            let raw = include_str!("../tests/fixtures/graphql/pr_detail.json");
+            let data: DetailQuery = serde_json::from_str(raw).unwrap();
+            let mut pr = data.repository.unwrap().pull_request.unwrap();
+            pr.review_requests.nodes = vec![ReviewRequestNode {
+                requested_reviewer: Some(Reviewer {
+                    typename: typename.into(),
+                    login: None,
+                    slug: None,
+                }),
+            }];
+
+            assert!(pr.into_detail("ashb", 1, 4999).review_requests.is_empty());
+        }
+    }
+
+    #[test]
+    fn unsupported_reviewers_do_not_require_older_timeline_pages() {
+        for typename in ["Bot", "Mannequin"] {
+            let raw = include_str!("../tests/fixtures/graphql/pr_detail.json");
+            let data: DetailQuery = serde_json::from_str(raw).unwrap();
+            let mut pr = data.repository.unwrap().pull_request.unwrap();
+            pr.review_requests.nodes = vec![ReviewRequestNode {
+                requested_reviewer: Some(Reviewer {
+                    typename: typename.into(),
+                    login: None,
+                    slug: None,
+                }),
+            }];
+
+            assert!(!pr.has_unmatched_review_request("ashb"));
+        }
+    }
+
+    #[tokio::test]
+    async fn review_request_pagination_preserves_detail_when_budget_is_low() {
+        for (remaining, expected_requests, expected_requester) in
+            [(99, 1, None), (100, 2, Some("kaxil"))]
+        {
+            let mut data: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/graphql/pr_detail.json"))
+                    .unwrap();
+            let event = data["repository"]["pullRequest"]["timelineItems"]["nodes"][0].clone();
+            data["rateLimit"]["remaining"] = remaining.into();
+            data["repository"]["pullRequest"]["timelineItems"]["nodes"] = serde_json::json!([]);
+            data["repository"]["pullRequest"]["timelineItems"]["pageInfo"]["hasPreviousPage"] =
+                true.into();
+            let mut responses = vec![(200, serde_json::json!({"data": data}).to_string())];
+            if expected_requests == 2 {
+                responses.push((
+                    200,
+                    serde_json::json!({
+                        "data": {
+                            "repository": {"pullRequest": {"timelineItems": {
+                                "nodes": [event],
+                                "pageInfo": {"hasPreviousPage": true, "startCursor": "older"}
+                            }}},
+                            "rateLimit": {"limit": 5000, "cost": 1, "remaining": 99,
+                                "resetAt": "2026-08-06T00:00:00Z"}
+                        }
+                    })
+                    .to_string(),
+                ));
+            }
+            let (forge, server) = github_server(responses);
+
+            let result = forge
+                .fetch_pr_detail("apache", "airflow", 44870, "ashb")
+                .await;
+            let requests = server.join().unwrap();
+            let detail = result.unwrap().unwrap();
+
+            assert_eq!(requests, vec!["POST /graphql HTTP/1.1"; expected_requests]);
+            assert_eq!(detail.remaining, 99);
+            assert_eq!(detail.cost, expected_requests as u32);
+            assert_eq!(detail.review_requests.len(), 2);
+            assert_eq!(
+                detail.review_requests[0].requested_by.as_deref(),
+                expected_requester
+            );
+            assert!(detail.review_requests[1].requested_by.is_none());
+            assert!(detail.review_requests[1].requested_at.is_none());
+        }
+    }
+
+    #[test]
+    fn older_timeline_pages_do_not_replace_the_latest_review_requester() {
+        let raw = include_str!("../tests/fixtures/graphql/pr_detail.json");
+        let data: DetailQuery = serde_json::from_str(raw).unwrap();
+        let mut pr = data.repository.unwrap().pull_request.unwrap();
+        pr.timeline_items.nodes = vec![ReviewRequestedEvent {
+            actor: Some(Login {
+                login: "alice".into(),
+            }),
+            created_at: "2026-08-05T12:00:00Z".parse().unwrap(),
+            requested_reviewer: Some(Reviewer {
+                typename: "User".into(),
+                login: Some("ashb".into()),
+                slug: None,
+            }),
+        }];
+        pr.timeline_items.page_info.has_previous_page = true;
+        assert!(pr.has_unmatched_review_request("ashb"));
+
+        pr.timeline_items.nodes.push(ReviewRequestedEvent {
+            actor: Some(Login {
+                login: "bob".into(),
+            }),
+            created_at: "2026-08-04T12:00:00Z".parse().unwrap(),
+            requested_reviewer: Some(Reviewer {
+                typename: "User".into(),
+                login: Some("ashb".into()),
+                slug: None,
+            }),
+        });
+
+        let detail = pr.into_detail("ashb", 1, 4999);
+        let direct = detail
+            .review_requests
+            .iter()
+            .find(|request| request.team.is_none())
+            .unwrap();
+        assert_eq!(direct.requested_by.as_deref(), Some("alice"));
+        assert_eq!(
+            direct.requested_at,
+            Some("2026-08-05T12:00:00Z".parse::<Timestamp>().unwrap())
+        );
+    }
+
+    #[test]
+    fn active_review_requests_survive_missing_timeline_events() {
+        let raw = include_str!("../tests/fixtures/graphql/pr_detail.json");
+        let data: DetailQuery = serde_json::from_str(raw).unwrap();
+        let mut pr = data.repository.unwrap().pull_request.unwrap();
+        pr.timeline_items.nodes.clear();
+
+        let detail = pr.into_detail("ashb", 1, 4999);
+
+        assert_eq!(
+            detail.review_requests,
+            [
+                ReviewRequest {
+                    team: None,
+                    requested_by: None,
+                    requested_at: None
+                },
+                ReviewRequest {
+                    team: Some("core-committers".into()),
+                    requested_by: None,
+                    requested_at: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_active_request_without_a_recent_event_needs_an_older_timeline_page() {
+        let raw = include_str!("../tests/fixtures/graphql/pr_detail.json");
+        let data: DetailQuery = serde_json::from_str(raw).expect("captured detail parses");
+        let mut pr = data.repository.unwrap().pull_request.unwrap();
+        pr.review_requests.nodes.truncate(1);
+        pr.timeline_items.nodes.clear();
+        pr.timeline_items.page_info.has_previous_page = true;
+
+        assert!(pr.has_unmatched_review_request("ashb"));
+
+        pr.timeline_items.nodes.push(ReviewRequestedEvent {
+            actor: Some(Login {
+                login: "kaxil".into(),
+            }),
+            created_at: "2026-08-05T12:00:00Z".parse().unwrap(),
+            requested_reviewer: Some(Reviewer {
+                typename: "User".into(),
+                login: Some("ashb".into()),
+                slug: None,
+            }),
+        });
+        assert!(!pr.has_unmatched_review_request("ashb"));
     }
 
     #[test]

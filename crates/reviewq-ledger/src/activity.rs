@@ -15,8 +15,8 @@ use reviewq_core::model::{
 };
 
 use crate::{
-    AttentionRecord, Doing as _, Encoding as _, Ledger, LedgerError, RepoId, RepoKey, Result,
-    TrackedReason, attention_from_stored, attention_is_more_urgent,
+    DbTimestamp, Doing as _, Encoding as _, Ledger, LedgerError, RepoId, RepoKey, Result,
+    TrackedReason,
     connection::DbConnection,
     existing_row,
     schema::{
@@ -671,28 +671,21 @@ impl Ledger {
                 .flatten()
                 .map(|at| decode_activity_timestamp(at, "deferred_at"))
                 .transpose()?;
-            let attention = attention::table
+            let newest_attention = attention::table
                 .filter(attention::repo_id.eq(repo_id))
                 .filter(attention::pr_number.eq(number as i64))
-                .load::<AttentionRecord>(conn)
+                .select(attention::since)
+                .load::<DbTimestamp>(conn)
                 .doing(format!("reading attention for defer on #{number}"))?
                 .into_iter()
-                .map(attention_from_stored)
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .reduce(|best, candidate| {
-                    if attention_is_more_urgent(&candidate, &best) {
-                        candidate
-                    } else {
-                        best
-                    }
-                });
+                .map(DbTimestamp::into_timestamp)
+                .max();
             let mine = MyState {
                 deferred_at: current,
                 ..MyState::default()
             };
             let unchanged = match deferred_at {
-                Some(_) => mine.is_deferred(attention.map(|top| top.since)),
+                Some(_) => mine.is_deferred(newest_attention),
                 None => current.is_none(),
             };
             if unchanged {
@@ -2525,6 +2518,7 @@ mod tests {
     fn lifecycle_relevance_survives_cleared_attention_and_authored_prs_need_no_review() {
         let (ledger, repo_id) = ledger_with_pr(1);
         let reason = reviewq_core::model::Attention {
+            priority: false,
             reason: reviewq_core::model::AttentionReason::Mention { by: "alice".into() },
             since: now(),
         };
@@ -2671,7 +2665,11 @@ mod tests {
         }];
         let ctx = ClassifyCtx {
             mentions: &mentions,
-            review_request: Some(Default::default()),
+            review_request: Some(reviewq_core::model::ReviewRequest {
+                team: None,
+                requested_by: None,
+                requested_at: Some(now()),
+            }),
             ..Default::default()
         };
         for _ in 0..2 {
@@ -2740,7 +2738,11 @@ mod tests {
             )
             .unwrap();
         let ctx = ClassifyCtx {
-            review_request: Some(Default::default()),
+            review_request: Some(reviewq_core::model::ReviewRequest {
+                team: None,
+                requested_by: None,
+                requested_at: Some(now()),
+            }),
             ..Default::default()
         };
         assert!(

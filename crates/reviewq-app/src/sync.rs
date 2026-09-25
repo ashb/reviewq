@@ -16,7 +16,8 @@ use jiff::{Timestamp, ToSpan};
 use reviewq_core::model::{ActivitySource, ClassifyCtx, PrSnapshot, PrState};
 use reviewq_core::rules::{Evaluation, Interest};
 use reviewq_forge::{
-    ActivityRateLimit, Forge, ForgeActivity, ForgeActivityPage, PrDetail, RateLimitUnit,
+    ActivityRateLimit, DETAIL_BUDGET_FLOOR, Forge, ForgeActivity, ForgeActivityPage, PrDetail,
+    RateLimitUnit,
 };
 use reviewq_ledger::{
     ActivityPageCommit, ActivityRateLimitUnit as StoredRateLimitUnit, Committed, Detail, Ledger,
@@ -25,6 +26,7 @@ use reviewq_ledger::{
 
 use crate::config::{Config, Project, RepoRef};
 use crate::identity::Logins;
+use crate::priority::{self, Priority};
 use crate::{actions, paths};
 
 /// Cursor: the high-water mark of `updatedAt` we have swept up to.
@@ -42,6 +44,7 @@ const ACTIVITY_CONCURRENCY: usize = 8;
 pub async fn run(
     cfg: &Config,
     labels: bool,
+    teams: bool,
     which: Detail,
     progress: &mut dyn SyncProgress,
 ) -> Result<ExitCode> {
@@ -75,6 +78,7 @@ pub async fn run(
                 &rules,
                 &me,
                 labels,
+                teams,
                 which,
                 now,
                 progress,
@@ -100,10 +104,14 @@ async fn sync_repo(
     rules: &Interest,
     me: &str,
     labels: bool,
+    teams: bool,
     which: Detail,
     now: Timestamp,
     progress: &mut dyn SyncProgress,
 ) -> Result<()> {
+    let priority = priority::resolve(repo, forge, ledger, teams, now).await?;
+    ledger.rank_attention(repo_id, &priority.authors, &priority.requesters)?;
+
     // The repo's whole palette, when asked for. Not on every sync: a colour
     // changes about never, and this is a query per repo to learn what is almost
     // always what we already knew. What it is *for* is the hole an incidental
@@ -211,6 +219,7 @@ async fn sync_repo(
         repo,
         me,
         &cfg.bots.logins,
+        &priority,
         rules,
         which,
         project.include_merged,
@@ -363,12 +372,6 @@ async fn involvement_search(
     stats.involved = involved.len() as u64;
     Ok(review_requested)
 }
-
-/// Stop the detail pass when the GraphQL budget falls below this. The pass is
-/// resumable (each PR commits independently and the sync watermark is already
-/// advanced), so stopping short just means the next `sync` finishes the rest —
-/// far better than running the budget to zero and erroring out.
-const DETAIL_BUDGET_FLOOR: u32 = 100;
 
 /// Counts accumulated while initially filling pull-request activity history.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1243,6 +1246,7 @@ async fn detail_pass(
     repo: &RepoRef,
     login: &str,
     bots: &[String],
+    priority: &Priority,
     rules: &Interest,
     which: Detail,
     include_merged: bool,
@@ -1274,6 +1278,7 @@ async fn detail_pass(
             repo,
             login,
             bots,
+            priority,
             // Either the project keeps every merged PR, or this one's own rule
             // asked to keep it.
             include_merged || tracked.after_merge,
@@ -1392,6 +1397,9 @@ async fn sync_one_for_in(
 
     let forge = cfg.forge_for(&repo.host)?;
     let me = Logins::new().on(cfg, &repo.host, forge.as_ref()).await?;
+    let now = Timestamp::now();
+    let priority = priority::resolve(&repo, forge.as_ref(), ledger, false, now).await?;
+    ledger.rank_attention(repo_id, &priority.authors, &priority.requesters)?;
     let outcome = refresh_one(
         forge.as_ref(),
         ledger,
@@ -1399,6 +1407,7 @@ async fn sync_one_for_in(
         &repo,
         &me,
         &cfg.bots.logins,
+        &priority,
         project.include_merged || show.after_merge,
         // No involvement search has run, so a review requested of a *team* isn't
         // known here. A full sync is what resolves those; this only refreshes
@@ -1514,13 +1523,14 @@ pub async fn track_one(cfg: &Config, repo: Option<&RepoRef>, number: u64) -> Res
 /// sync, and must not be retried on every subsequent one. Otherwise the bool
 /// reports whether the PR now holds attention.
 #[allow(clippy::too_many_arguments)]
-pub async fn refresh_one(
+async fn refresh_one(
     forge: &dyn Forge,
     ledger: &Ledger,
     repo_id: RepoId,
     repo: &RepoRef,
     login: &str,
     bots: &[String],
+    priority: &Priority,
     include_merged: bool,
     review_requested: &HashSet<u64>,
     pr: &PrSnapshot,
@@ -1556,10 +1566,21 @@ pub async fn refresh_one(
 
     // A review requested of me — directly (tier-2) or via a team I'm on (the
     // involvement search) — is the same actionable request.
-    let review_request = detail
-        .review_request
-        .clone()
-        .or_else(|| review_requested.contains(&number).then(Default::default));
+    let direct_request = detail
+        .review_requests
+        .iter()
+        .find(|request| request.team.is_none())
+        .cloned();
+    let team_requests = detail
+        .review_requests
+        .iter()
+        .filter(|request| request.team.is_some())
+        .collect::<Vec<_>>();
+    let review_request = direct_request.or_else(|| {
+        (review_requested.contains(&number) && team_requests.len() == 1)
+            .then(|| (*team_requests[0]).clone())
+    });
+    let inferred_review_request = review_requested.contains(&number) && review_request.is_none();
 
     let interest = interest_detail(tracked_reason);
     let ctx = ClassifyCtx {
@@ -1572,6 +1593,9 @@ pub async fn refresh_one(
         mine: pr.author.eq_ignore_ascii_case(login),
         heard_bots,
         review_request,
+        inferred_review_request,
+        priority_authors: &priority.authors,
+        priority_review_requesters: &priority.requesters,
         new_commits: detail.new_commits,
         include_merged,
         ..Default::default()
@@ -1989,7 +2013,11 @@ mod engine_tests {
                 &[],
                 &[],
                 &[Attention {
-                    reason: AttentionReason::ReviewRequested { team: None },
+                    priority: false,
+                    reason: AttentionReason::ReviewRequested {
+                        team: None,
+                        requested_by: None,
+                    },
                     since: now(),
                 }],
                 None,
@@ -2024,6 +2052,7 @@ mod engine_tests {
             &rules,
             "ashb",
             labels,
+            false,
             Detail::Stale,
             now(),
             &mut progress,
@@ -3056,6 +3085,7 @@ mod engine_tests {
             &rules,
             "ashb",
             false,
+            false,
             Detail::Every,
             ts("2026-08-11T12:02:00Z"),
             &mut RecordingProgress::default(),
@@ -3100,6 +3130,7 @@ mod engine_tests {
             repo,
             "ashb",
             &[],
+            &Priority::default(),
             false,
             &HashSet::new(),
             &show.pr,
@@ -3770,6 +3801,7 @@ mod engine_tests {
             &rules,
             "ashb",
             false,
+            false,
             Detail::Stale,
             now(),
             &mut RecordingProgress::default(),
@@ -3886,6 +3918,7 @@ mod engine_tests {
             &rules,
             "ashb",
             false,
+            false,
             Detail::Stale,
             now(),
             &mut RecordingProgress::default(),
@@ -3996,6 +4029,7 @@ mod engine_tests {
             &cfg.projects[0].repos[0],
             "ashb",
             &[],
+            &Priority::default(),
             false,
             &HashSet::new(),
             &snapshot,
@@ -4026,6 +4060,7 @@ mod engine_tests {
             &cfg.projects[0].repos[0],
             "ashb",
             &[],
+            &Priority::default(),
             false,
             &HashSet::new(),
             &snapshot,
@@ -4066,6 +4101,7 @@ mod engine_tests {
             &cfg.projects[0].repos[0],
             "ashb",
             &[],
+            &Priority::default(),
             false,
             &HashSet::new(),
             &show.pr,
@@ -4218,6 +4254,7 @@ mod engine_tests {
             &cfg.projects[0].repos[0],
             "ashb",
             &cfg.bots.logins,
+            &Priority::default(),
             false,
             &HashSet::new(),
             &show.pr,
@@ -4272,5 +4309,184 @@ mod engine_tests {
             "a merged PR is archived out of the queue unless the project opts in"
         );
         let _ = Verdict::Approved;
+    }
+    #[tokio::test]
+    async fn team_priority_reranks_unchanged_prs_and_removed_members_without_detail_fetches() {
+        let mut cfg = config("");
+        cfg.projects[0].repos[0].priority_authors = vec!["apache/airflow-committers".into()];
+        let mut other = pr(2, "2026-08-09T09:00:00Z");
+        other.author = "other".into();
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z"), other])])
+            .with_detail(1, 4900)
+            .with_detail(2, 4900)
+            .with_team("apache", "airflow-committers", &["other"]);
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+        let queue = ledger.queue(repo_id).unwrap();
+        assert_eq!(
+            queue.iter().map(|item| item.pr.number).collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert_eq!(queue[0].top.priority(), 2);
+        assert_eq!(queue[1].top.priority(), 8);
+        let before = ledger
+            .activity_page(ActivityScope::PrAll { repo_id, number: 2 }, None, 100)
+            .unwrap();
+        let updated = FakeForge::new(vec![Page::of(vec![])]).with_team(
+            "apache",
+            "airflow-committers",
+            &["potiuk"],
+        );
+        let project = &cfg.projects[0];
+        let rules = cfg.interest_for_login(project, "ashb").unwrap();
+        sync_repo(
+            &cfg,
+            &updated,
+            &ledger,
+            repo_id,
+            project,
+            &project.repos[0],
+            &rules,
+            "ashb",
+            false,
+            true,
+            Detail::Stale,
+            now() + jiff::SignedDuration::from_hours(1),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+        assert!(updated.details_asked().is_empty());
+        let queue = ledger.queue(repo_id).unwrap();
+        assert_eq!(
+            queue.iter().map(|item| item.pr.number).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(queue[0].top.priority(), 2);
+        assert_eq!(queue[1].top.priority(), 8);
+        assert_eq!(
+            ledger.show(repo_id, 2).unwrap().unwrap().attention[0].priority(),
+            8
+        );
+        let after = ledger
+            .activity_page(ActivityScope::PrAll { repo_id, number: 2 }, None, 100)
+            .unwrap();
+        assert_eq!(before.events.len(), after.events.len());
+        cfg.projects[0].repos[0].priority_authors.clear();
+        let project = &cfg.projects[0];
+        sync_repo(
+            &cfg,
+            &updated,
+            &ledger,
+            repo_id,
+            project,
+            &project.repos[0],
+            &rules,
+            "ashb",
+            false,
+            false,
+            Detail::Stale,
+            now() + jiff::SignedDuration::from_hours(2),
+            &mut RecordingProgress::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            ledger
+                .queue_all()
+                .unwrap()
+                .iter()
+                .all(|item| item.item.top.priority() == 8)
+        );
+    }
+
+    #[tokio::test]
+    async fn team_membership_prioritizes_the_requester_independently_of_the_author() {
+        let mut cfg = config("");
+        cfg.projects[0].repos[0].priority_review_requesters =
+            vec!["apache/airflow-committers".into()];
+        let forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
+            .with_review_request(1, 4900)
+            .with_requester(1, "kaxil")
+            .with_team("apache", "airflow-committers", &["kaxil"]);
+        let (ledger, repo_id, _) = sync(&cfg, &forge).await;
+        let queue = ledger.queue(repo_id).unwrap();
+        assert_eq!(queue[0].top.priority(), 2);
+        assert_eq!(queue[0].top.reason.discriminant(), "review_requested");
+    }
+    #[tokio::test]
+    async fn repository_policies_are_isolated_while_team_membership_is_shared() {
+        let mut cfg = config("");
+        let mut authors = cfg.projects[0].repos[0].clone();
+        authors.priority_authors = vec!["apache/airflow-committers".into()];
+        let mut requesters = cfg.projects[0].repos[0].clone();
+        requesters.name = "other".into();
+        requesters.priority_review_requesters = vec!["apache/airflow-committers".into()];
+        let mut unconfigured = cfg.projects[0].repos[0].clone();
+        unconfigured.owner = "acme".into();
+        unconfigured.host = "github.acme.example".into();
+        cfg.projects[0].repos = vec![authors, requesters, unconfigured];
+        let project = &cfg.projects[0];
+        let rules = cfg.interest_for_login(project, "ashb").unwrap();
+        let ledger = Ledger::open_in_memory().unwrap();
+        let team_forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
+            .with_review_request(1, 4900)
+            .with_requester(1, "kaxil")
+            .with_team("apache", "airflow-committers", &["potiuk", "kaxil"]);
+        let other_forge = FakeForge::new(vec![Page::of(vec![pr(1, "2026-08-09T09:00:00Z")])])
+            .with_review_request(1, 4900)
+            .with_requester(1, "kaxil");
+        for (index, expected_author_band, expected_request_band) in
+            [(0, 2, 2), (1, 8, 2), (2, 8, 7)]
+        {
+            let repo = &project.repos[index];
+            let repo_id = ledger.ensure_repo(&repo.key()).unwrap();
+            let forge = if index == 0 {
+                &team_forge
+            } else {
+                &other_forge
+            };
+            sync_repo(
+                &cfg,
+                forge,
+                &ledger,
+                repo_id,
+                project,
+                repo,
+                &rules,
+                "ashb",
+                false,
+                true,
+                Detail::Stale,
+                now(),
+                &mut RecordingProgress::default(),
+            )
+            .await
+            .unwrap();
+            let attention = ledger.show(repo_id, 1).unwrap().unwrap().attention;
+            assert_eq!(
+                attention
+                    .iter()
+                    .find(|a| a.reason.discriminant() == "needs_first_look")
+                    .unwrap()
+                    .priority(),
+                expected_author_band
+            );
+            assert_eq!(
+                attention
+                    .iter()
+                    .find(|a| a.reason.discriminant() == "review_requested")
+                    .unwrap()
+                    .priority(),
+                expected_request_band
+            );
+        }
+        assert_eq!(team_forge.team_calls(), 1);
+        assert_eq!(other_forge.team_calls(), 0);
+        assert!(
+            ledger
+                .team_members("github.acme.example", "apache", "airflow-committers")
+                .unwrap()
+                .is_none()
+        );
     }
 }

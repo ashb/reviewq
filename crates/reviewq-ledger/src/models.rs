@@ -172,4 +172,5 @@ pub(super) struct AttentionRecord {
     pub(super) reason: String,
     pub(super) since: DbTimestamp,
     pub(super) payload: String,
+    pub(super) priority: bool,
 }

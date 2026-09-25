@@ -358,15 +358,24 @@ mod tests {
         let earlier = "2026-08-11T12:00:00Z".parse().unwrap();
         let later = "2026-08-12T12:00:00Z".parse().unwrap();
         let before = [Attention {
-            reason: AttentionReason::ReviewRequested { team: None },
+            priority: false,
+            reason: AttentionReason::ReviewRequested {
+                team: None,
+                requested_by: None,
+            },
             since: earlier,
         }];
         let after = [
             Attention {
-                reason: AttentionReason::ReviewRequested { team: None },
+                priority: false,
+                reason: AttentionReason::ReviewRequested {
+                    team: None,
+                    requested_by: None,
+                },
                 since: later,
             },
             Attention {
+                priority: false,
                 reason: AttentionReason::Mention { by: "alice".into() },
                 since: later,
             },
@@ -517,7 +526,10 @@ mod tests {
         );
         assert_eq!(
             emphasis(
-                Some(band(AttentionReason::ReviewRequested { team: None })),
+                Some(band(AttentionReason::ReviewRequested {
+                    team: None,
+                    requested_by: None,
+                })),
                 false
             ),
             Emphasis::Normal

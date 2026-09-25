@@ -67,12 +67,19 @@ pub struct Said {
 }
 
 /// A formal review request that currently names me.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ReviewRequest {
     /// The team the request went to, if it was a team request rather than a
     /// direct one.
     #[serde(default)]
     pub team: Option<String>,
+    /// Login of whoever requested the review. GitHub omits this for requests
+    /// created without a user actor, including some CODEOWNERS requests.
+    #[serde(default)]
+    pub requested_by: Option<String>,
+    /// When the currently active request was made, if its event is visible.
+    #[serde(default)]
+    pub requested_at: Option<Timestamp>,
 }
 
 /// The retained event that established a thread's current resolution.
@@ -107,6 +114,13 @@ pub struct ClassifyCtx<'a> {
     pub mentions: &'a [Mention],
     /// A live review request naming me, if any.
     pub review_request: Option<ReviewRequest>,
+    /// A review request found by search but not attributable to one active
+    /// request event, usually because several teams could have matched.
+    pub inferred_review_request: bool,
+    /// Authors whose existing attention uses mention-level priority.
+    pub priority_authors: &'a [String],
+    /// Requesters whose review requests use mention-level priority.
+    pub priority_review_requesters: &'a [String],
     /// What other people have said on the PR — top-level comments and reviews,
     /// mine already excluded.
     pub said: &'a [Said],
@@ -180,7 +194,7 @@ pub fn classify(
     // anything on a draft of my own, which is a draft I published to be told
     // about.
     if pr.is_draft {
-        return sorted(my_pr.into_iter().chain(mention).collect());
+        return sorted(my_pr.into_iter().chain(mention).collect(), pr, ctx);
     }
 
     let mut out = Vec::new();
@@ -197,11 +211,18 @@ pub fn classify(
         out.extend(needs_first_look_attention(pr, mine, ctx));
     }
 
-    sorted(out)
+    sorted(out, pr, ctx)
 }
 
 /// Most urgent first, which is the order every caller wants them in.
-fn sorted(mut out: Vec<Attention>) -> Vec<Attention> {
+fn sorted(mut out: Vec<Attention>, pr: &PrSnapshot, ctx: &ClassifyCtx<'_>) -> Vec<Attention> {
+    for attention in &mut out {
+        attention.rank(
+            &pr.author,
+            ctx.priority_authors,
+            ctx.priority_review_requesters,
+        );
+    }
     out.sort();
     out
 }
@@ -225,6 +246,7 @@ fn my_pr_attention(mine: &MyState, ctx: &ClassifyCtx<'_>) -> Option<Attention> {
         .filter(|said| !acknowledged(said.at, mine))
         .max_by_key(|said| said.at)?;
     Some(Attention {
+        priority: false,
         reason: AttentionReason::MyPr {
             by: latest.by.clone(),
             what: match latest.review {
@@ -255,6 +277,7 @@ fn mention_attention(mine: &MyState, _now: Timestamp, ctx: &ClassifyCtx<'_>) -> 
         .filter(|m| !mention_acknowledged(m.at, mine))
         .max_by_key(|m| m.at)?;
     Some(Attention {
+        priority: false,
         reason: AttentionReason::Mention {
             by: latest.by.clone(),
         },
@@ -298,6 +321,7 @@ fn thread_reply_attention(
 
     let newest = replied.iter().max_by_key(|t| t.last_comment_at)?;
     Some(Attention {
+        priority: false,
         reason: AttentionReason::ThreadReply {
             by: newest.last_comment_author.clone().unwrap_or_default(),
             threads: replied.len(),
@@ -330,6 +354,7 @@ pub fn resolved_unanswered_attention(
         .iter()
         .find_map(|(thread, _)| thread.resolved_by.clone())?;
     Some(Attention {
+        priority: false,
         reason: AttentionReason::ResolvedUnanswered {
             by,
             threads: resolved.len(),
@@ -355,6 +380,7 @@ fn re_review_attention(
         return None;
     }
     Some(Attention {
+        priority: false,
         reason: AttentionReason::ReReview {
             new_commits: ctx.new_commits,
             since_sha: reviewed.to_string(),
@@ -390,6 +416,7 @@ fn answered_after_review_attention(
         .filter(|said| !acknowledged(said.at, mine))
         .max_by_key(|said| said.at)?;
     Some(Attention {
+        priority: false,
         reason: AttentionReason::AnsweredAfterReview {
             by: latest.by.clone(),
             author: latest.by == pr.author,
@@ -398,14 +425,21 @@ fn answered_after_review_attention(
     })
 }
 
-/// A live review request names me.
+/// A live or inferred review request names me.
 fn review_requested_attention(pr: &PrSnapshot, ctx: &ClassifyCtx<'_>) -> Option<Attention> {
-    let request = ctx.review_request.as_ref()?;
+    let request = ctx.review_request.as_ref();
+    if request.is_none() && !ctx.inferred_review_request {
+        return None;
+    }
     Some(Attention {
+        priority: false,
         reason: AttentionReason::ReviewRequested {
-            team: request.team.clone(),
+            team: request.and_then(|request| request.team.clone()),
+            requested_by: request.and_then(|request| request.requested_by.clone()),
         },
-        since: pr.updated_at,
+        since: request
+            .and_then(|request| request.requested_at)
+            .unwrap_or(pr.updated_at),
     })
 }
 
@@ -423,6 +457,7 @@ fn needs_first_look_attention(
         return None;
     }
     Some(Attention {
+        priority: false,
         reason: AttentionReason::NeedsFirstLook {
             rule: rule.to_string(),
         },
@@ -784,7 +819,11 @@ mod tests {
             ..Default::default()
         };
         let ctx = ClassifyCtx {
-            review_request: Some(ReviewRequest { team: None }),
+            review_request: Some(ReviewRequest {
+                team: None,
+                requested_by: None,
+                requested_at: Some(ts("2026-08-05T09:00:00Z")),
+            }),
             ..Default::default()
         };
 
@@ -969,5 +1008,105 @@ mod tests {
         // A mention and a re-review, in that order — the bands themselves moved
         // down when activity on my own PRs took the top of the table.
         assert_eq!(priorities, vec![2, 5]);
+    }
+
+    #[test]
+    fn a_priority_requester_uses_mention_priority_and_request_time() {
+        let request = ReviewRequest {
+            team: None,
+            requested_by: Some("KaXiL".into()),
+            requested_at: Some(ts("2026-08-05T08:30:00Z")),
+        };
+        let priority_requesters = ["kaxil".into()];
+        let ctx = ClassifyCtx {
+            review_request: Some(request),
+            priority_review_requesters: &priority_requesters,
+            ..Default::default()
+        };
+
+        let out = classify(&pr(), &MyState::default(), &[], now(), &ctx);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].since, ts("2026-08-05T08:30:00Z"));
+        assert_eq!(out[0].priority(), 2);
+        assert!(matches!(
+            &out[0].reason,
+            AttentionReason::ReviewRequested {
+                requested_by: Some(by),
+                ..
+            } if by == "KaXiL"
+        ));
+    }
+
+    #[test]
+    fn an_inferred_request_stays_at_normal_priority() {
+        let priority_requesters = ["kaxil".into()];
+        let ctx = ClassifyCtx {
+            inferred_review_request: true,
+            priority_review_requesters: &priority_requesters,
+            ..Default::default()
+        };
+
+        let out = classify(&pr(), &MyState::default(), &[], now(), &ctx);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].priority(), 7);
+        assert!(matches!(
+            out[0].reason,
+            AttentionReason::ReviewRequested {
+                requested_by: None,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn priority_authors_boost_existing_attention_without_creating_it() {
+        let authors = [pr().author.to_uppercase()];
+        let mut ctx = ClassifyCtx {
+            priority_authors: &authors,
+            ..Default::default()
+        };
+        assert!(classify(&pr(), &MyState::default(), &[], now(), &ctx).is_empty());
+        ctx.interest = Some("label area:test");
+        let out = classify(&pr(), &MyState::default(), &[], now(), &ctx);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].priority(), 2);
+        assert_eq!(out[0].reason.discriminant(), "needs_first_look");
+        let mine = MyState {
+            snoozed_until: Some(now() + jiff::SignedDuration::from_hours(1)),
+            ..Default::default()
+        };
+        assert!(classify(&pr(), &mine, &[], now(), &ctx).is_empty());
+        let mut draft = pr();
+        draft.is_draft = true;
+        assert!(classify(&draft, &MyState::default(), &[], now(), &ctx).is_empty());
+        let mut closed = pr();
+        closed.state = PrState::Closed;
+        assert!(classify(&closed, &MyState::default(), &[], now(), &ctx).is_empty());
+        ctx.priority_authors = &[];
+        assert_eq!(
+            classify(&pr(), &MyState::default(), &[], now(), &ctx)[0].priority(),
+            8
+        );
+    }
+
+    #[test]
+    fn author_and_requester_priority_do_not_stack_or_change_evidence() {
+        let authors = [pr().author.clone()];
+        let requesters = ["alice".into()];
+        let mut ctx = ClassifyCtx {
+            review_request: Some(ReviewRequest {
+                team: None,
+                requested_by: Some("ALICE".into()),
+                requested_at: Some(now()),
+            }),
+            ..Default::default()
+        };
+        let ordinary = classify(&pr(), &MyState::default(), &[], now(), &ctx);
+        ctx.priority_authors = &authors;
+        ctx.priority_review_requesters = &requesters;
+        let boosted = classify(&pr(), &MyState::default(), &[], now(), &ctx);
+        assert_eq!(boosted[0].priority(), 2);
+        assert!(boosted[0].same_evidence(&ordinary[0]));
     }
 }

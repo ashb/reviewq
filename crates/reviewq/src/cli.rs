@@ -185,6 +185,10 @@ pub struct SyncArgs {
     /// recoloured and you would rather not wait.
     #[arg(long, conflicts_with = "number")]
     pub labels: bool,
+
+    /// Refresh configured priority teams now instead of using the 24-hour cache.
+    #[arg(long, conflicts_with = "number")]
+    pub teams: bool,
 }
 
 #[derive(Debug, Args)]
@@ -478,5 +482,18 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from(["reviewq", "history", "42", "backfill"]).is_err());
+    }
+    #[test]
+    fn team_refresh_is_explicit_and_requires_a_full_sync() {
+        let parsed = Cli::try_parse_from(["reviewq", "sync", "--teams", "--labels"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Sync(SyncArgs {
+                teams: true,
+                labels: true,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["reviewq", "sync", "42", "--teams"]).is_err());
     }
 }
